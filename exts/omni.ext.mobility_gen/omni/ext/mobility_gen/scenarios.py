@@ -27,6 +27,9 @@ from omni.ext.mobility_gen.occupancy_map import OccupancyMap
 
 import omni.ext.mobility_gen.pose_samplers as pose_samplers
 import omni.ext.mobility_gen.inputs as inputs
+import omni.replicator.core as rep
+
+
 
 
 class Scenario(Module):
@@ -247,4 +250,55 @@ class RandomPathFollowingScenario(Scenario):
         self.robot.write_action(step_size=step_size)
 
         return self.is_alive
+    ###############################################
+    #novo cenario de coleta de dados se necessario#
+    ###############################################
+    @SCENARIOS.register()
+    class KeyboardTeleoperationWithSensors(Scenario):
+        """
+        Envolve o KeyboardTeleoperationScenario: reaproveita teleop e só monta câmeras + writer.
+        """
+        def __init__(self, robot: Robot, occupancy_map: OccupancyMap,
+                    mount_bev=True, mount_rs=True, mount_zed=True, out_dir="/tmp/mg_dataset"):
+            super().__init__(robot, occupancy_map)
+            # instancia o cenário base (mesma assinatura)
+            self.base = KeyboardTeleoperationScenario(robot, occupancy_map)
+            self.mount_bev = mount_bev
+            self.mount_rs = mount_rs
+            self.mount_zed = mount_zed
+            self.out_dir = out_dir
+            self._writer = None
+            self._cam_paths = []
 
+        def reset(self):
+            self.base.reset()  # isso chama pose sampler e etc.
+
+            # monta câmeras no robô (métodos da sua classe)
+            if self.mount_bev:
+                self._cam_paths.append(self.robot.mount_bev_camera_topdown())
+            if self.mount_rs:
+                self._cam_paths.append(self.robot.mount_realsense_rgbd())
+            if self.mount_zed:
+                l, r = self.robot.mount_zed_stereo()
+                self._cam_paths += [l, r]
+
+            # liga o writer do Replicator
+            self._writer = rep.WriterRegistry.get("BasicWriter")
+            self._writer.initialize(
+                output_dir=self.out_dir,
+                rgb=True,
+                semantic_segmentation=True,
+                instance_segmentation=True,
+                distance_to_camera=True,
+            )
+            with rep.trigger.on_frame(num_frames=-1):
+                prims = []
+                for p in self._cam_paths:
+                    if isinstance(p, tuple):
+                        prims += [rep.get.prims(path=p[0]), rep.get.prims(path=p[1])]
+                    else:
+                        prims.append(rep.get.prims(path=p))
+                self._writer.attach(prims)
+
+        def step(self, step_size):
+            return self.base.step(step_size)

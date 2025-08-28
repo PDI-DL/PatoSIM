@@ -35,7 +35,7 @@ class Sensor(Module):
     def attach(self, prim_path: str):
         raise NotImplementedError
 
-
+# tenho que editar os sensores de camera usando esse modulo como base 
 class Camera(Sensor):
 
     def __init__(self,
