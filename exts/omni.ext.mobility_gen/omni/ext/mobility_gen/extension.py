@@ -80,7 +80,8 @@ class MobilityGenExtension(omni.ext.IExt):
                         ui.Label("USD Path / URL")
                         self.scene_usd_field_string_model = ui.SimpleStringModel()
                         self.scene_usd_field = ui.StringField(model=self.scene_usd_field_string_model, height=25)
-                        self.scene_usd_field.model.set_value("/home/pdi_4/Documentos/bevlog-isaac/mundo_pallets.usd")
+                        #self.scene_usd_field.model.set_value("/home/pdi_4/Documentos/bevlog-isaac/mundo_pallets.usd")
+                        self.scene_usd_field.model.set_value("/home/pdi_4/Documentos/bevlog-isaac/default_w.usd")
 
                     with ui.HStack():
                         ui.Label("Scenario Type")
@@ -130,6 +131,7 @@ class MobilityGenExtension(omni.ext.IExt):
             scenario_type=list(SCENARIOS.names())[self.scenario_combo_box.model.get_item_value_model().get_value_as_int()],
             robot_type=list(ROBOTS.names())[self.robot_combo_box.model.get_item_value_model().get_value_as_int()],
             scene_usd=self.scene_usd_field_string_model.as_string
+            #scene_usd="/home/pdi_4/Documentos/bevlog-isaac/mundo_pallets.usd"
         )
         return config
     

@@ -46,7 +46,9 @@ from omni.ext.mobility_gen.utils.stage_utils import stage_get_prim, stage_add_ca
 from omni.ext.mobility_gen.utils.prim_utils import prim_rotate_x, prim_rotate_y, prim_rotate_z, prim_translate
 from omni.ext.mobility_gen.types import Pose2d
 from omni.ext.mobility_gen.utils.registry import Registry
+from types import SimpleNamespace
 
+from .rear_simple_controller import RearDriveSimpleController
 # sensores novos (do seu sensors.py)
 from omni.ext.mobility_gen.sensors import (
     HawkCamera,
@@ -54,15 +56,12 @@ from omni.ext.mobility_gen.sensors import (
     BevFrontDownCamera,
     RealSenseRGBDCamera,
     ZedStereoCamera,
+    #nuscenes
 )
-
-# RELATIVOS (recomendado)
-# from .registry import ROBOTS
-# from .robot import Robot
-
+#lidar 
 
 # dentro da classe ForkliftC
-from pxr import UsdGeom, Gf, UsdPhysics, PhysxSchema
+from pxr import UsdGeom, Gf, UsdPhysics, PhysxSchema, Usd, Sdf
 import omni.usd
 from omni.isaac.core.utils.rotations import euler_angles_to_quat
 
@@ -185,6 +184,34 @@ class Robot(Module):
         prim_translate(front_camera_prim, cls.front_camera_translation)
 
         return cls.front_camera_type.build(prim_path=camera_path)
+    # @classmethod
+    # def build_front_camera(cls, prim_path):
+    #     """
+    #     Cria um mount seguro para a câmera fora da hierarquia rígida do `body`,
+    #     garantindo um Xform puro (sem colliders/rigid body) e sem imports extras.
+    #     """
+
+    #     # Evita montar a câmera dentro de "body/*".
+    #     # Sempre usamos um mount sob "<robot>/sensors/front_camera".
+    #     camera_mount_rel = "sensors/front_camera"
+    #     camera_path = os.path.join(prim_path, camera_mount_rel)
+
+    #     # Garante que o mount é um Xform puro (isso NÃO adiciona física nem colisores)
+    #     front_camera_xform = XFormPrim(camera_path)
+
+    #     # Posiciona o mount (transform relativo ao robô)
+    #     stage = get_stage()
+    #     cam_prim = stage_get_prim(stage, camera_path)
+    #     prim_rotate_x(cam_prim, cls.front_camera_rotation[0])
+    #     prim_rotate_y(cam_prim, cls.front_camera_rotation[1])
+    #     prim_rotate_z(cam_prim, cls.front_camera_rotation[2])
+    #     prim_translate(cam_prim, cls.front_camera_translation)
+
+    #     # Constrói o sensor dentro do mount Xform.
+    #     # Como o mount NÃO é um RigidBody e está FORA do `body`,
+    #     # não ocorre o erro de "RigidBody filho de RigidBody".
+    #     return cls.front_camera_type.build(prim_path=camera_path)
+    
 
     def build_chase_camera(self) -> str:
 
@@ -316,137 +343,6 @@ class WheeledRobot(Robot):
                 command=self.action.get_value()
             )
         )
-from typing import List, Tuple, Dict, Any, Optional
-import os
-
-from isaacsim.robot.wheeled_robots.robots.wheeled_robot import WheeledRobot as _WheeledRobot
-from isaacsim.core.prims import ArticulationView as _ArticulationView
-from isaacsim.robot.wheeled_robots.controllers.ackermann_controller import AckermannController
-
-from omni.isaac.core.world import get_world
-from .base_robot import Robot  # ajuste o import conforme seu projeto
-
-
-class FourWheeledRobot(Robot):
-
-    # Wheeled robot parameters (defina nas subclasses concretas)
-    wheel_dof_names: List[str]        # ex: ["fl_wheel_joint", "fr_wheel_joint", "rl_wheel_joint", "rr_wheel_joint"]
-    steering_dof_names: List[str]     # ex: ["fl_steer_joint", "fr_steer_joint"]
-    usd_url: str
-    chassis_subpath: str
-    wheel_radius: float               # raio da roda (m)
-    wheel_base: float                 # distância entre eixos (m)
-    track_width: float                # bitola (distância entre rodas esquerda-direita do mesmo eixo) (m)
-    max_steer_angle: float = 0.6      # limite de esterçamento (rad), ajuste conforme seu veículo
-
-    def __init__(
-        self,
-        prim_path: str,
-        robot: _WheeledRobot,
-        articulation_view: _ArticulationView,
-        controller: AckermannController,
-        front_camera: Optional[Any] = None
-    ):
-        super().__init__(
-            prim_path=prim_path,
-            robot=robot,
-            articulation_view=articulation_view,
-            front_camera=front_camera
-        )
-        self.controller = controller
-        self.robot = robot
-
-    @classmethod
-    def build(cls, prim_path: str) -> "FourWheeledRobot":
-        world = get_world()
-
-        # Cria o robô com juntas de rodas e (se suportado) de direção
-        # Algumas versões aceitam steering_dof_names no ctor; deixamos fallback para compatibilidade
-        try:
-            robot = world.scene.add(_WheeledRobot(
-                prim_path,
-                wheel_dof_names=cls.wheel_dof_names,
-                steering_dof_names=cls.steering_dof_names,
-                create_robot=True,
-                usd_path=cls.usd_url
-            ))
-        except TypeError:
-            robot = world.scene.add(_WheeledRobot(
-                prim_path,
-                wheel_dof_names=cls.wheel_dof_names,
-                create_robot=True,
-                usd_path=cls.usd_url
-            ))
-            # fallback se a API não aceitar no construtor
-            if hasattr(robot, "set_steering_dof_names"):
-                robot.set_steering_dof_names(cls.steering_dof_names)
-
-        # ArticulationView do chassi (mantém estrutura original)
-        view = _ArticulationView(os.path.join(prim_path, cls.chassis_subpath))
-        world.scene.add(view)
-
-        # Controlador Ackermann (mantém “controller” na estrutura)
-        controller = AckermannController(
-            name="ackermann_controller",
-            wheel_radius=cls.wheel_radius,
-            wheel_base=cls.wheel_base,
-            track_width=cls.track_width,
-            max_steer_angle=cls.max_steer_angle
-        )
-
-        camera = cls.build_front_camera(prim_path)
-
-        return cls(
-            prim_path=prim_path,
-            robot=robot,
-            articulation_view=view,
-            controller=controller,
-            front_camera=camera
-        )
-
-    def _parse_command(self, raw_cmd: Any) -> Tuple[float, float]:
-        """
-        Converte o comando vindo de self.action.get_value() para (speed, steer).
-        Aceita:
-          - tupla/lista: (speed, steer)
-          - dict com chaves 'speed'/'steer' ou 'v'/'delta'
-        speed em m/s; steer em rad (ângulo da roda dianteira).
-        """
-        if isinstance(raw_cmd, (list, tuple)) and len(raw_cmd) >= 2:
-            return float(raw_cmd[0]), float(raw_cmd[1])
-        if isinstance(raw_cmd, dict):
-            if "speed" in raw_cmd and "steer" in raw_cmd:
-                return float(raw_cmd["speed"]), float(raw_cmd["steer"])
-            if "v" in raw_cmd and "delta" in raw_cmd:
-                return float(raw_cmd["v"]), float(raw_cmd["delta"])
-        # default seguro
-        return 0.0, 0.0
-
-    def write_action(self, step_size: float):
-        """
-        Usa AckermannController para gerar:
-          - velocidades das quatro rodas [FL, FR, RL, RR]
-          - ângulos de direção para as juntas dianteiras [FL_steer, FR_steer]
-        e aplica via WheeledRobot.apply_wheel_actions(...).
-        """
-        raw = self.action.get_value()
-        speed, steer = self._parse_command(raw)
-
-        # Clampeia ângulo ao limite do veículo
-        if abs(steer) > self.max_steer_angle:
-            steer = self.max_steer_angle if steer > 0 else -self.max_steer_angle
-
-        # O controller.forward retorna um payload compatível com apply_wheel_actions
-        # (normalmente contendo wheel_velocity_commands e steering_commands)
-        controls = self.controller.forward(
-            command={"speed": speed, "steer": steer},
-            dt=step_size
-        )
-
-        # Mantém o padrão original: passa o pacote único para apply_wheel_actions
-        self.robot.apply_wheel_actions(controls)
-
-
 
 class IsaacLabRobot(Robot):
 
@@ -522,6 +418,733 @@ class IsaacLabRobot(Robot):
 
 ROBOTS = Registry[Robot]()
 
+# ===============================
+#  Forklift C: tração + direção traseiras (sem Ackermann)
+# ===============================
+# =================================================================================================
+# ROBÔ: 4 rodas, tração + direção NAS TRASEIRAS (sem Ackermann), compatível com MobilityGen/Robot
+# =================================================================================================
+@ROBOTS.register()
+class FourWheelRearSteerRobot_V1(Robot):
+    """
+    - Dianteiras: livres (sem comando de ω).
+    - Traseiras: recebem ω (iguais) e δ (mesmo sinal) via juntas de direção.
+    - Sem Ackermann: comportamento de "carro com esterço traseiro".
+    """
+
+    # ===== Sim / sensores =====
+    physics_dt: float = 0.005
+    z_offset: float = 0.25
+
+    chase_camera_base_path: str = "body"
+    chase_camera_x_offset: float = -5.0#
+    chase_camera_z_offset: float =  -10.0
+    chase_camera_tilt_angle: float = 60.0
+
+    # ===== Occupancy Map (usado pelo builder) =====
+    occupancy_map_radius: float = 1.5
+    occupancy_map_z_min: float = 0.05
+    occupancy_map_z_max: float = 1.2
+    occupancy_map_cell_size: float = 0.05
+    occupancy_map_collision_radius: float = 0.3
+
+    # ===== Câmera frontal =====
+    front_camera_type = ZedStereoCamera
+    front_camera_base_path = "rgb_camera/front_camera"
+    front_camera_rotation = (0., 0., 0.)
+    front_camera_translation = (10., 0., 10.)
+
+    # ===== Teleop =====
+    keyboard_linear_velocity_gain: float = 1.0
+    keyboard_angular_velocity_gain: float = 1.0
+
+    # ===== Geometria =====
+    wheel_base: float = 1.65
+    track_width: float = 1.25
+    wheel_radius: float = 0.5
+
+    # Ângulo máximo (rad) — aumente se o USD permitir
+    max_steer_angle: float = math.radians(80.0)
+
+    # ===== Juntas (ajuste para seu USD) =====
+    rear_wheel_dof_names: List[str] = ["left_back_wheel_joint", "right_back_wheel_joint"]
+    steering_dof_names:   List[str] = ["left_rotator_joint", "right_rotator_joint"]  # yaw traseiro
+
+    # ===== USD =====
+    usd_url: str = ("http://omniverse-content-production.s3-us-west-2.amazonaws.com/"
+                    "Assets/Isaac/4.2/Isaac/Robots/Forklift/forklift_c.usd")
+    chassis_subpath: str = ""
+
+    # ===== Drives de direção (posição) =====
+    steer_stiffness: float = 1.6e5
+    steer_damping:   float = 3.0e3
+    steer_max_force: float = 8.0e6
+
+    # Mesmo sentido nos dois lados (auto-calib pode inverter se detectar erro)
+    steering_axis_signs: Tuple[float, float] = (1.0, 1.0)
+
+    # Limite efetivo após ler/ajustar limites do USD (rad)
+    effective_steer_limit: float = math.radians(80.0)
+
+    def __init__(self,
+                 prim_path: str,
+                 robot: _WheeledRobot,
+                 articulation_view: _ArticulationView,
+                 front_camera: Sensor | None = None):
+        super().__init__(prim_path=prim_path, robot=robot, articulation_view=articulation_view, front_camera=front_camera)
+        self.controller = RearDriveSimpleController(self.wheel_radius, self.max_steer_angle)
+        self._rear_idx: np.ndarray | None = None
+        self._steer_idx: np.ndarray | None = None
+        self._last_cmd: np.ndarray | None = None
+        self._auto_done = False
+        self._auto_frames = 45
+        self._frame = 0
+
+    # ---------- Build ----------
+    @classmethod
+    def build(cls, prim_path: str) -> "FourWheelRearSteerRobot":
+        world = get_world()
+        robot = world.scene.add(_WheeledRobot(
+            prim_path,
+            wheel_dof_names=cls.rear_wheel_dof_names,   # só as traseiras recebem ω
+            create_robot=True,
+            usd_path=cls.usd_url
+        ))
+        view_path = os.path.join(prim_path, cls.chassis_subpath) if cls.chassis_subpath else prim_path
+        view = _ArticulationView(view_path)
+        world.scene.add(view)
+
+        camera = cls.build_front_camera(prim_path)
+        return cls(
+            prim_path=prim_path,
+            robot=robot,
+            articulation_view=view,
+            front_camera=camera
+        )
+
+    # ---------- Helpers ----------
+    def _resolve_indices(self, names: List[str]) -> np.ndarray:
+        idx = []
+        for n in names:
+            try: idx.append(self.articulation_view.get_dof_index(n))
+            except Exception: idx.append(-1)
+        return np.asarray(idx, np.int32)
+
+    def _auto_find_rear_steer_dofs(self) -> Optional[List[str]]:
+        # tenta localizar DOFs traseiros de esterço por nome
+        names = []
+        for attr in ("get_dof_names", "dof_names", "_dof_names"):
+            if hasattr(self.articulation_view, attr):
+                try:
+                    val = getattr(self.articulation_view, attr)
+                    names = list(val() if callable(val) else val); break
+                except Exception:
+                    pass
+        if not names:
+            return None
+        def is_steer(n: str) -> bool:
+            s = n.lower()
+            return (("rear" in s or "back" in s) and ("steer" in s or "swivel" in s or "yaw" in s or "rotator" in s))
+        cands = [n for n in names if is_steer(n)]
+        lefts  = [n for n in cands if "left"  in n.lower()]
+        rights = [n for n in cands if "right" in n.lower()]
+        if lefts and rights:
+            return [lefts[0], rights[0]]
+        return cands[:2] if len(cands) >= 2 else None
+
+    def _force_limits_and_drive_in_usd(self, joint_names: List[str]):
+        """Abre limites (±max_steer_angle, em graus no USD) e aplica Drive angular PD."""
+        stage = omni.usd.get_context().get_stage()
+        max_deg = math.degrees(self.max_steer_angle)
+        for prim in stage.TraverseAll():
+            if prim.GetTypeName() != "PhysicsRevoluteJoint":
+                continue
+            if prim.GetName() not in joint_names:
+                continue
+            try:
+                rj = UsdPhysics.RevoluteJoint(prim)
+                (rj.CreateLowerLimitAttr() if not rj.GetLowerLimitAttr() else rj.GetLowerLimitAttr()).Set(-max_deg)
+                (rj.CreateUpperLimitAttr() if not rj.GetUpperLimitAttr() else rj.GetUpperLimitAttr()).Set(+max_deg)
+            except Exception:
+                pass
+            try:
+                drv = UsdPhysics.DriveAPI.Get(prim, "angular")
+                if not drv: drv = UsdPhysics.DriveAPI.Apply(prim, "angular")
+                (drv.GetStiffnessAttr() if drv.GetStiffnessAttr() else drv.CreateStiffnessAttr()).Set(self.steer_stiffness)
+                (drv.GetDampingAttr()   if drv.GetDampingAttr()   else drv.CreateDampingAttr()).Set(self.steer_damping)
+                (drv.GetMaxForceAttr()  if drv.GetMaxForceAttr()  else drv.CreateMaxForceAttr()).Set(self.steer_max_force)
+            except Exception:
+                pass
+
+    def _ensure_indices_limits_and_drive(self):
+        try: self.articulation_view.initialize()
+        except Exception: pass
+
+        # rodas traseiras
+        if self._rear_idx is None:
+            idx = self._resolve_indices(self.rear_wheel_dof_names)
+            if (idx < 0).any():
+                raise RuntimeError(f"[RearSteer] Juntas traseiras não encontradas: {self.rear_wheel_dof_names}")
+            self._rear_idx = idx
+
+        # direção traseira
+        if self._steer_idx is None:
+            steer_names = list(self.steering_dof_names)
+            idx = self._resolve_indices(steer_names)
+            if (idx < 0).any():
+                auto = self._auto_find_rear_steer_dofs()
+                if auto:
+                    steer_names = auto
+                    idx = self._resolve_indices(steer_names)
+            if (idx < 0).any():
+                raise RuntimeError(f"[RearSteer] Juntas de direção não encontradas. Ajuste steering_dof_names. (atual={self.steering_dof_names})")
+            self.steering_dof_names = steer_names
+            self._steer_idx = idx
+
+            # abre limites/drives no USD também
+            self._force_limits_and_drive_in_usd(self.steering_dof_names)
+
+        # reforça limites via AV (rad) e guarda limite efetivo
+        try:
+            lo_all, up_all = self.articulation_view.get_dof_limits()
+            lo = np.array([lo_all[i] for i in self._steer_idx], np.float32)
+            up = np.array([up_all[i] for i in self._steer_idx], np.float32)
+            req = float(self.max_steer_angle)
+            need = (np.abs(lo) < req) | (np.abs(up) < req)
+            if np.any(need):
+                self.articulation_view.set_dof_limits(
+                    joint_indices=self._steer_idx,
+                    lower_limits=np.where(need, -req, lo).astype(np.float32),
+                    upper_limits=np.where(need,  req, up).astype(np.float32),
+                )
+            lo_all, up_all = self.articulation_view.get_dof_limits()
+            lo = np.array([lo_all[i] for i in self._steer_idx], np.float32)
+            up = np.array([up_all[i] for i in self._steer_idx], np.float32)
+            self.effective_steer_limit = float(min(self.max_steer_angle, np.min(np.abs([lo, up]))))
+        except Exception:
+            self.effective_steer_limit = float(self.max_steer_angle)
+
+        # drive de posição via AV (rad)
+        try:
+            if hasattr(self.articulation_view, "set_dof_position_drive_properties"):
+                self.articulation_view.set_dof_position_drive_properties(
+                    joint_indices=self._steer_idx,
+                    stiffness=np.full(len(self._steer_idx), self.steer_stiffness, np.float32),
+                    damping=np.full(len(self._steer_idx),   self.steer_damping,   np.float32),
+                    max_forces=np.full(len(self._steer_idx), self.steer_max_force, np.float32),
+                )
+        except Exception:
+            pass
+    # ---------- ciclo de vida ----------
+    def post_reset(self):
+        super().post_reset()
+        self._ensure_indices_limits_and_drive()
+        self._last_cmd = None
+        self._auto_done = False
+        self._frame = 0
+    # ---------- controle ----------
+    def write_action(self, step_size: float):
+        # 1) rodas traseiras: ω = v/R
+        wheel_action, steer_targets = self.controller.forward(self.action.get_value())
+        self.robot.apply_wheel_actions(wheel_action)
+
+        # 2) direção traseira: δ igual nos dois lados
+        self._ensure_indices_limits_and_drive()
+        steer_targets = (np.asarray(self.steering_axis_signs, np.float32) * steer_targets).astype(np.float32)
+        lim = float(self.effective_steer_limit)
+        steer_targets = np.clip(steer_targets, -lim, +lim).astype(np.float32)
+        self.articulation_view.set_joint_position_targets(
+            positions=steer_targets, joint_indices=self._steer_idx
+        )
+
+        # 3) auto calibra sinais nos primeiros frames (se medição divergir do comando)
+        try:
+            q_all = self.articulation_view.get_joint_positions()
+            q_all = np.array(q_all)[0] if np.ndim(q_all) == 2 else np.array(q_all)
+            q_now = q_all[self._steer_idx].astype(np.float32)
+        except Exception:
+            q_now = None
+
+        if (not self._auto_done) and (q_now is not None):
+            if self._last_cmd is not None and np.max(np.abs(self._last_cmd)) > 1e-3:
+                exp = np.sign(self._last_cmd)
+                meas = np.sign(q_now + 1e-9)
+                flip = [meas[i] != exp[i] for i in (0, 1)]
+                if any(flip):
+                    s = list(self.steering_axis_signs)
+                    for i in (0, 1):
+                        if flip[i]:
+                            s[i] = -s[i]
+                    self.steering_axis_signs = (float(s[0]), float(s[1]))
+                    print(f"[RearSteer] auto-calib: invertendo sinais -> {self.steering_axis_signs}")
+            self._frame += 1
+            if self._frame >= self._auto_frames:
+                self._auto_done = True
+
+        self._last_cmd = steer_targets.copy()
+
+
+#  @ROBOTS.register()
+# class ForkliftCRobot(Robot):
+#     """
+#     Forklift C (empilhadeira) com:
+#       - Tração somente nas rodas traseiras
+#       - Direção apenas nas juntas 'rotator' (mesmo sentido no mundo)
+#       - Sem Ackermann: mapeamento direto (v_mps, delta_rad) -> (omega_traseiras, posição_rotators)
+#     Ação esperada: np.array([v_mps, delta_rad], float32)
+#     """
+
+#     # ====== Sim / sensores ======
+#     physics_dt: float = 0.005
+#     z_offset: float = 0.25
+
+#     chase_camera_base_path: str = "body"
+#     chase_camera_x_offset: float = -2.0
+#     chase_camera_z_offset: float = 2.0
+#     chase_camera_tilt_angle: float = 45.0
+
+#     occupancy_map_radius: float = 1.5
+#     occupancy_map_z_min: float = 0.05
+#     occupancy_map_z_max: float = 1.2
+#     occupancy_map_cell_size: float = 0.05
+#     occupancy_map_collision_radius: float = 0.5
+
+
+#     front_camera_base_path = "chassis/rgb_camera/front_hawk"
+#     front_camera_rotation = (0., 0., 0.)
+#     front_camera_translation = (0., 0., 0.)
+#     front_camera_type = HawkCamera
+
+#     # ====== Geometria ======
+#     wheel_base: float = 1.65
+#     track_width: float = 1.25
+#     wheel_radius: float = 0.5
+
+#     # ====== Juntas ======
+#     rear_wheel_dof_names = ["left_back_wheel_joint", "right_back_wheel_joint"]
+#     front_wheel_dof_names = ["left_front_wheel_joint", "right_front_wheel_joint"]
+#     steering_dof_names     = ["left_rotator_joint", "right_rotator_joint"]
+
+#     # ====== USD ======
+#     usd_url = ("http://omniverse-content-production.s3-us-west-2.amazonaws.com/"
+#                "Assets/Isaac/4.2/Isaac/Robots/Forklift/forklift_c.usd")
+#     chassis_subpath: str = ""  # se o root de articulação for um filho, ex.: "Chassis"
+
+#     # ====== Interface p/ Teleop (compatível com sua cena) ======
+#     keyboard_linear_velocity_gain: float = 1.0
+#     keyboard_angular_velocity_gain: float = 1.0
+#     # A cena lê max_steer_angle; deixe em rad e ajuste como preferir
+#     max_steer_angle: float = 1.20  # ~68.8°
+
+#     # ====== Garantias de direção e suavização ======
+#     min_steer_abs_deg: float = 45.0  # garantia de curso mínimo (>= 45°)
+#     steering_axis_signs: Tuple[float, float] = (1.0, -1.0)  # ajuste se eixos locais estiverem espelhados
+#     max_wheel_accel_radps2: float = 30.0  # rampa nas rodas traseiras (evita trancos)
+
+#     def __init__(self, prim_path, robot, articulation_view, front_camera=None):
+#         super().__init__(prim_path, robot, articulation_view, front_camera)
+#         self.robot = robot
+
+#         # Cache de índices
+#         self._rear_idx = None
+#         self._front_idx = None
+#         self._steer_idx = None
+
+#         # Estado de rampa para rodas traseiras
+#         self._rear_omega_cmd = np.zeros(2, dtype=np.float32)
+
+#     # ---------- Inicialização / garantias ----------
+#     def _ensure_joint_indices(self):
+#         try:
+#             self.articulation_view.initialize()
+#         except Exception:
+#             pass
+
+#         def _idx_or_raise(names):
+#             idxs = [self.articulation_view.get_dof_index(n) for n in names]
+#             missing = [names[i] for i, v in enumerate(idxs) if v is None or v < 0]
+#             if missing:
+#                 raise RuntimeError(
+#                     f"Juntas não encontradas na ArticulationView: {missing}. "
+#                     f"Verifique root e nomes no USD."
+#                 )
+#             return np.asarray(idxs, dtype=np.int32)
+
+#         self._rear_idx  = _idx_or_raise(self.rear_wheel_dof_names)
+#         self._front_idx = _idx_or_raise(self.front_wheel_dof_names)
+#         self._steer_idx = _idx_or_raise(self.steering_dof_names)
+
+#     def _ensure_steering_limits(self):
+#         """
+#         Garante limites de direção >= max(45°, max_steer_angle).
+#         Se a API suportar set_dof_limits, amplia; caso contrário, documente no USD.
+#         """
+#         required_abs = max(math.radians(self.min_steer_abs_deg), float(self.max_steer_angle))
+#         try:
+#             lower, upper = self.articulation_view.get_dof_limits()  # arrays [ndof], [ndof] ou [[lo,up],...]
+#             # Normaliza formas diferentes de retorno
+#             # Tenta tratar como vetores "lower[i], upper[i]"
+#             lo = np.array([lower[i] for i in self._steer_idx], dtype=np.float32)
+#             up = np.array([upper[i] for i in self._steer_idx], dtype=np.float32)
+
+#             needs_update = (np.abs(lo) < required_abs) | (np.abs(up) < required_abs)
+#             if np.any(needs_update):
+#                 new_lo = np.where(needs_update, -required_abs, lo)
+#                 new_up = np.where(needs_update,  +required_abs, up)
+#                 self.articulation_view.set_dof_limits(
+#                     joint_indices=self._steer_idx,
+#                     lower_limits=new_lo,
+#                     upper_limits=new_up
+#                 )
+#         except AttributeError:
+#             # Sem suporte na versão — ajuste no USD (recommended: ±max_steer_angle, no mínimo ±45°)
+#             pass
+
+#     def post_reset(self):
+#         super().post_reset()
+#         if (self._rear_idx is None) or (self._front_idx is None) or (self._steer_idx is None):
+#             self._ensure_joint_indices()
+#             self._ensure_steering_limits()
+
+#     # ---------- Construção ----------
+#     @classmethod
+#     def build(cls, prim_path: str) -> "ForkliftCRobot":
+#         world = get_world()
+
+#         robot = world.scene.add(_WheeledRobot(
+#             prim_path,
+#             wheel_dof_names=cls.rear_wheel_dof_names + cls.front_wheel_dof_names,
+#             create_robot=True,
+#             usd_path=cls.usd_url
+#         ))
+
+#         view_path = os.path.join(prim_path, cls.chassis_subpath) if cls.chassis_subpath else prim_path
+#         view = _ArticulationView(view_path)
+#         world.scene.add(view)
+
+#         camera = cls.build_front_camera(prim_path)
+#         return cls(prim_path=prim_path, robot=robot, articulation_view=view, front_camera=camera)
+
+#     # ---------- Controle (malha aberta) ----------
+#     def write_action(self, step_size: float):
+#         """
+#         Entrada: (v_mps, delta_rad)
+#           - v_mps     : velocidade linear desejada nas rodas traseiras [m/s]
+#           - delta_rad : ângulo de direção desejado [rad], mesmo para os dois rotators
+#         Saída:
+#           - rodas traseiras: velocidade alvo (rad/s) com rampa
+#           - rodas dianteiras: velocidade alvo zero
+#           - direção: posição alvo (rad) com clamp pelos limites garantidos
+#         """
+#         if (self._rear_idx is None) or (self._front_idx is None) or (self._steer_idx is None):
+#             self._ensure_joint_indices()
+#             self._ensure_steering_limits()
+
+#         v_mps, delta_rad = self.action.get_value()
+#         v_mps    = float(v_mps)
+#         delta_in = float(delta_rad)
+
+#         # Respeita o maior entre (curso garantido) e (max_steer_angle declarado)
+#         steer_abs_max = max(math.radians(self.min_steer_abs_deg), float(self.max_steer_angle))
+#         delta_cmd = float(np.clip(delta_in, -steer_abs_max, +steer_abs_max))
+
+#         # Mesmo sentido no mundo (ajustável via steering_axis_signs, se um eixo local estiver invertido)
+#         steer_targets = np.asarray(self.steering_axis_signs, dtype=np.float32) * delta_cmd
+#         self.articulation_view.set_joint_position_targets(
+#             positions=steer_targets.astype(np.float32),
+#             joint_indices=self._steer_idx
+#         )
+
+#         # Tração apenas traseira: omega = v / R
+#         omega_des = float(v_mps / max(self.wheel_radius, 1e-6))
+#         omega_pair = np.array([omega_des, omega_des], dtype=np.float32)
+
+#         dt = float(step_size) if step_size else self.physics_dt
+#         max_domega = float(self.max_wheel_accel_radps2) * dt
+#         domega = np.clip(omega_pair - self._rear_omega_cmd, -max_domega, +max_domega)
+#         self._rear_omega_cmd = self._rear_omega_cmd + domega
+
+#         # Aplica velocidades
+#         self.articulation_view.set_joint_velocity_targets(
+#             velocities=self._rear_omega_cmd.astype(np.float32),
+#             joint_indices=self._rear_idx
+#         )
+#         # Dianteiras paradas (sem tração)
+#         self.articulation_view.set_joint_velocity_targets(
+#             velocities=np.zeros(2, dtype=np.float32),
+#             joint_indices=self._front_idx
+#         )
+
+#     # ---------- Observações técnicas ----------
+#     # - Cinemática típica de empilhadeira (rear-wheel steering):
+#     #     R ≈ L / tan(delta), yaw_rate ≈ v * tan(delta) / L.
+#     # - Se notar que os rotators giram em sentidos opostos no mundo, ajuste:
+#     #     steering_axis_signs = (1.0, -1.0)  # ou vice-versa
+#     # - Caso a API não permita ampliar limites, configure ±max_steer_angle (>= 45°) diretamente no USD.
+
+
+# # # ---------- Subclasse para o asset Forklift ----------
+# # @ROBOTS.register()
+# # class ForkliftCRobot(FourWheeledRearSteerRobot):
+# #     # Física/render
+# #     physics_dt: float = 0.005
+# #     z_offset: float = 0.25
+
+# #     # DOFs (ordem: [FL, FR, RL, RR])
+# #     wheel_dof_names = [
+# #         "left_front_wheel_joint", "right_front_wheel_joint",
+# #         "left_back_wheel_joint",  "right_back_wheel_joint",
+# #     ]
+# #     # DUAS juntas TRASEIRAS (yaw)
+# #     steering_dof_names = ["left_rotator_joint", "right_rotator_joint"]
+
+# #     # Asset
+# #     usd_url = "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.2/Isaac/Robots/Forklift/forklift_c.usd"
+# #     chassis_subpath: str = ""
+
+# #     # Geometria/limites (ângulo alto para curvas fáceis; o USD pode limitar)
+# #     wheel_radius: float = 0.30
+# #     max_steer_angle: float = 1.90
+# #     steer_axis_signs: Tuple[float, float] = (-1.0, +1.0)  # virar MESMO LADO no mundo
+# #     invert_steering: bool = F
+# @ROBOTS.register()
+# class ForkliftCRobot(Robot):
+#     """
+#     Forklift C (empilhadeira) com:
+#       - Tração somente nas rodas traseiras
+#       - Direção apenas nas juntas 'rotator' (mesmo sentido no mundo)
+#       - Sem Ackermann: mapeamento direto (v_mps, delta_rad) -> (omega_traseiras, posição_rotators)
+#     Ação esperada: np.array([v_mps, delta_rad], float32)
+#     """
+
+#     # ====== Sim / sensores ======
+#     physics_dt: float = 0.005
+#     z_offset: float = 0.25
+
+#     chase_camera_base_path: str = "body"
+#     chase_camera_x_offset: float = -2.0
+#     chase_camera_z_offset: float = 2.0
+#     chase_camera_tilt_angle: float = 45.0
+
+#     occupancy_map_radius: float = 1.5
+#     occupancy_map_z_min: float = 0.05
+#     occupancy_map_z_max: float = 1.2
+#     occupancy_map_cell_size: float = 0.05
+#     occupancy_map_collision_radius: float = 0.5
+
+
+#     front_camera_base_path = "chassis/rgb_camera/front_hawk"
+#     front_camera_rotation = (0., 0., 0.)
+#     front_camera_translation = (0., 0., 0.)
+#     front_camera_type = HawkCamera
+
+#     # ====== Geometria ======
+#     wheel_base: float = 1.65
+#     track_width: float = 1.25
+#     wheel_radius: float = 0.5
+
+#     # ====== Juntas ======
+#     rear_wheel_dof_names = ["left_back_wheel_joint", "right_back_wheel_joint"]
+#     front_wheel_dof_names = ["left_front_wheel_joint", "right_front_wheel_joint"]
+#     steering_dof_names     = ["left_rotator_joint", "right_rotator_joint"]
+
+#     # ====== USD ======
+#     usd_url = ("http://omniverse-content-production.s3-us-west-2.amazonaws.com/"
+#                "Assets/Isaac/4.2/Isaac/Robots/Forklift/forklift_c.usd")
+#     chassis_subpath: str = ""  # se o root de articulação for um filho, ex.: "Chassis"
+
+#     # ====== Interface p/ Teleop (compatível com sua cena) ======
+#     keyboard_linear_velocity_gain: float = 1.0
+#     keyboard_angular_velocity_gain: float = 1.0
+#     # A cena lê max_steer_angle; deixe em rad e ajuste como preferir
+#     max_steer_angle: float = 1.20  # ~68.8°
+
+#     # ====== Garantias de direção e suavização ======
+#     min_steer_abs_deg: float = 45.0  # garantia de curso mínimo (>= 45°)
+#     steering_axis_signs: Tuple[float, float] = (1.0, -1.0)  # ajuste se eixos locais estiverem espelhados
+#     max_wheel_accel_radps2: float = 30.0  # rampa nas rodas traseiras (evita trancos)
+
+#     def __init__(self, prim_path, robot, articulation_view, front_camera=None):
+#         super().__init__(prim_path, robot, articulation_view, front_camera)
+#         self.robot = robot
+
+#         # Cache de índices
+#         self._rear_idx = None
+#         self._front_idx = None
+#         self._steer_idx = None
+
+#         # Estado de rampa para rodas traseiras
+#         self._rear_omega_cmd = np.zeros(2, dtype=np.float32)
+
+#     # ---------- Inicialização / garantias ----------
+#     def _ensure_joint_indices(self):
+#         try:
+#             self.articulation_view.initialize()
+#         except Exception:
+#             pass
+
+#         def _idx_or_raise(names):
+#             idxs = [self.articulation_view.get_dof_index(n) for n in names]
+#             missing = [names[i] for i, v in enumerate(idxs) if v is None or v < 0]
+#             if missing:
+#                 raise RuntimeError(
+#                     f"Juntas não encontradas na ArticulationView: {missing}. "
+#                     f"Verifique root e nomes no USD."
+#                 )
+#             return np.asarray(idxs, dtype=np.int32)
+
+#         self._rear_idx  = _idx_or_raise(self.rear_wheel_dof_names)
+#         self._front_idx = _idx_or_raise(self.front_wheel_dof_names)
+#         self._steer_idx = _idx_or_raise(self.steering_dof_names)
+
+#     def _ensure_steering_limits(self):
+#         """
+#         Garante limites de direção >= max(45°, max_steer_angle).
+#         Se a API suportar set_dof_limits, amplia; caso contrário, documente no USD.
+#         """
+#         required_abs = max(math.radians(self.min_steer_abs_deg), float(self.max_steer_angle))
+#         try:
+#             lower, upper = self.articulation_view.get_dof_limits()  # arrays [ndof], [ndof] ou [[lo,up],...]
+#             # Normaliza formas diferentes de retorno
+#             # Tenta tratar como vetores "lower[i], upper[i]"
+#             lo = np.array([lower[i] for i in self._steer_idx], dtype=np.float32)
+#             up = np.array([upper[i] for i in self._steer_idx], dtype=np.float32)
+
+#             needs_update = (np.abs(lo) < required_abs) | (np.abs(up) < required_abs)
+#             if np.any(needs_update):
+#                 new_lo = np.where(needs_update, -required_abs, lo)
+#                 new_up = np.where(needs_update,  +required_abs, up)
+#                 self.articulation_view.set_dof_limits(
+#                     joint_indices=self._steer_idx,
+#                     lower_limits=new_lo,
+#                     upper_limits=new_up
+#                 )
+#         except AttributeError:
+#             # Sem suporte na versão — ajuste no USD (recommended: ±max_steer_angle, no mínimo ±45°)
+#             pass
+
+#     def post_reset(self):
+#         super().post_reset()
+#         if (self._rear_idx is None) or (self._front_idx is None) or (self._steer_idx is None):
+#             self._ensure_joint_indices()
+#             self._ensure_steering_limits()
+
+#     # ---------- Construção ----------
+#     @classmethod
+#     def build(cls, prim_path: str) -> "ForkliftCRobot":
+#         world = get_world()
+
+#         robot = world.scene.add(_WheeledRobot(
+#             prim_path,
+#             wheel_dof_names=cls.rear_wheel_dof_names + cls.front_wheel_dof_names,
+#             create_robot=True,
+#             usd_path=cls.usd_url
+#         ))
+
+#         view_path = os.path.join(prim_path, cls.chassis_subpath) if cls.chassis_subpath else prim_path
+#         view = _ArticulationView(view_path)
+#         world.scene.add(view)
+
+#         camera = cls.build_front_camera(prim_path)
+#         return cls(prim_path=prim_path, robot=robot, articulation_view=view, front_camera=camera)
+
+#     # ---------- Controle (malha aberta) ----------
+#     def write_action(self, step_size: float):
+#         """
+#         Entrada: (v_mps, delta_rad)
+#           - v_mps     : velocidade linear desejada nas rodas traseiras [m/s]
+#           - delta_rad : ângulo de direção desejado [rad], mesmo para os dois rotators
+#         Saída:
+#           - rodas traseiras: velocidade alvo (rad/s) com rampa
+#           - rodas dianteiras: velocidade alvo zero
+#           - direção: posição alvo (rad) com clamp pelos limites garantidos
+#         """
+#         if (self._rear_idx is None) or (self._front_idx is None) or (self._steer_idx is None):
+#             self._ensure_joint_indices()
+#             self._ensure_steering_limits()
+
+#         v_mps, delta_rad = self.action.get_value()
+#         v_mps    = float(v_mps)
+#         delta_in = float(delta_rad)
+
+#         # Respeita o maior entre (curso garantido) e (max_steer_angle declarado)
+#         steer_abs_max = max(math.radians(self.min_steer_abs_deg), float(self.max_steer_angle))
+#         delta_cmd = float(np.clip(delta_in, -steer_abs_max, +steer_abs_max))
+
+#         # Mesmo sentido no mundo (ajustável via steering_axis_signs, se um eixo local estiver invertido)
+#         steer_targets = np.asarray(self.steering_axis_signs, dtype=np.float32) * delta_cmd
+#         self.articulation_view.set_joint_position_targets(
+#             positions=steer_targets.astype(np.float32),
+#             joint_indices=self._steer_idx
+#         )
+
+#         # Tração apenas traseira: omega = v / R
+#         omega_des = float(v_mps / max(self.wheel_radius, 1e-6))
+#         omega_pair = np.array([omega_des, omega_des], dtype=np.float32)
+
+#         dt = float(step_size) if step_size else self.physics_dt
+#         max_domega = float(self.max_wheel_accel_radps2) * dt
+#         domega = np.clip(omega_pair - self._rear_omega_cmd, -max_domega, +max_domega)
+#         self._rear_omega_cmd = self._rear_omega_cmd + domega
+
+#         # Aplica velocidades
+#         self.articulation_view.set_joint_velocity_targets(
+#             velocities=self._rear_omega_cmd.astype(np.float32),
+#             joint_indices=self._rear_idx
+#         )
+#         # Dianteiras paradas (sem tração)
+#         self.articulation_view.set_joint_velocity_targets(
+#             velocities=np.zeros(2, dtype=np.float32),
+#             joint_indices=self._front_idx
+#         )
+
+    # ---------- Observações técnicas ----------
+    # - Cinemática típica de empilhadeira (rear-wheel steering):
+    #     R ≈ L / tan(delta), yaw_rate ≈ v * tan(delta) / L.
+    # - Se notar que os rotators giram em sentidos opostos no mundo, ajuste:
+    #     steering_axis_signs = (1.0, -1.0)  # ou vice-versa
+    # - Caso a API não permita ampliar limites, configure ±max_steer_angle (>= 45°) diretamente no USD.
+
+
+# # ---------- Subclasse para o asset Forklift ----------
+# @ROBOTS.register()
+# class ForkliftCRobot(FourWheeledRearSteerRobot):
+#     # Física/render
+#     physics_dt: float = 0.005
+#     z_offset: float = 0.25
+
+#     # DOFs (ordem: [FL, FR, RL, RR])
+#     wheel_dof_names = [
+#         "left_front_wheel_joint", "right_front_wheel_joint",
+#         "left_back_wheel_joint",  "right_back_wheel_joint",
+#     ]
+#     # DUAS juntas TRASEIRAS (yaw)
+#     steering_dof_names = ["left_rotator_joint", "right_rotator_joint"]
+
+#     # Asset
+#     usd_url = "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.2/Isaac/Robots/Forklift/forklift_c.usd"
+#     chassis_subpath: str = ""
+
+#     # Geometria/limites (ângulo alto para curvas fáceis; o USD pode limitar)
+#     wheel_radius: float = 0.30
+#     max_steer_angle: float = 1.90
+#     steer_axis_signs: Tuple[float, float] = (-1.0, +1.0)  # virar MESMO LADO no mundo
+#     invert_steering: bool = False
+#     keyboard_linear_velocity_gain: float = 1.7
+
+#     # ==== Requisitos do builder (evita erros de atributos ausentes) ====
+#     # Occupancy map
+#     occupancy_map_radius: float = 1.5
+#     occupancy_map_z_min: float = 0.05
+#     occupancy_map_z_max: float = 1.20
+#     occupancy_map_cell_size: float = 0.05
+#     occupancy_map_collision_radius: float = 0.50
+
+#     # Chase camera (usado por build_scenario_from_config → robot.build_chase_camera())
+#     chase_camera_base_path: str = "body"
+#     chase_camera_x_offset: float = -1.2
+#     chase_camera_z_offset: float = 7.3
+#     chase_camera_tilt_angle: float = 60.0
 
 @ROBOTS.register()
 class JetbotRobot(WheeledRobot):
@@ -721,232 +1344,6 @@ class SpotRobot(IsaacLabRobot):
     #Colocar aqui a nova definição do robo forklift# Preliminar faltam ajustes e testes#
     ####################################################################################
 
-import math
-from typing import List, Tuple
-from omni.isaac.core.utils.viewports import set_camera_view
-
-from .four_wheeled_robot import FourWheeledRobot  # <- importe a superclasse que criamos
-from .sensors.hawk_camera import HawkCamera       # ajuste conforme seu projeto
-from .registry import ROBOTS                      # mantém seu registry/decorator
-
-@ROBOTS.register()
-class ForkliftCRobot(FourWheeledRobot):
-    # ====== Timing / Física ======
-    physics_dt: float = 0.005
-
-    # ====== Pose / Offsets ======
-    z_offset: float = 0.5
-
-    # ====== Câmera de perseguição (se você usa) ======
-    chase_camera_base_path = "body"  # root do chassi
-    chase_camera_x_offset: float = -1.6
-    chase_camera_z_offset: float = 5.0
-    chase_camera_tilt_angle: float = 55.0
-
-    # ====== Mapa de ocupação (mantidos) ======
-    occupancy_map_radius: float = 1.0
-    occupancy_map_z_min: float = 0.1
-    occupancy_map_z_max: float = 0.62
-    occupancy_map_cell_size: float = 0.05
-    occupancy_map_collision_radius: float = 0.5
-
-    # ====== Câmera frontal (mantidos) ======
-    front_camera_base_path = "sensors/rgb_camera/front_hawk"
-    front_camera_rotation = (0.0, 0.0, 0.0)
-    front_camera_translation = (0.55, 0.0, 1.40)
-    front_camera_type = HawkCamera
-
-    # ====== Ganhos de teleop (mantidos) ======
-    keyboard_linear_velocity_gain: float = 1.0
-    keyboard_angular_velocity_gain: float = 1.0
-    gamepad_linear_velocity_gain: float = 1.0
-    gamepad_angular_velocity_gain: float = 1.0
-
-    # ====== Ação aleatória (mantidos) ======
-    random_action_linear_velocity_range: Tuple[float, float] = (-0.3, 1.0)
-    random_action_angular_velocity_range: Tuple[float, float] = (-0.75, 0.75)
-    random_action_linear_acceleration_std: float = 2.0
-    random_action_angular_acceleration_std: float = 2.0
-    random_action_grid_pose_sampler_grid_size: float = 5.0
-
-    # ====== Path following (mantidos) ======
-    path_following_speed: float = 0.8
-    path_following_angular_gain: float = 1.0
-    path_following_stop_distance_threshold: float = 0.3
-    path_following_forward_angle_threshold = math.pi
-    path_following_target_point_offset_meters: float = 0.0
-
-    # ====== Parâmetros do robô / USD ======
-    # Quatro juntas de roda (ordem esperada pelo controlador: FL, FR, RL, RR)
-    # Ajuste os nomes para bater com o seu forklift_c.usd.
-    wheel_dof_names: List[str] = [
-        "left_front_wheel_joint",
-        "right_front_wheel_joint",
-        "left_back_wheel_joint",
-        "right_back_wheel_joint",
-    ]
-
-    # Duas juntas de direção (Ackermann) — aqui assumimos direção dianteira
-    # Se o seu modelo tiver direção traseira, troque para, por ex.:
-    # ["left_back_steer_joint", "right_back_steer_joint"]
-    steering_dof_names: List[str] = [
-        "left_front_steer_joint",
-        "right_front_steer_joint",
-    ]
-
-    usd_url: str = (
-        "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.2/Isaac/Robots/Forklift/forklift_c.usd"
-    )
-    chassis_subpath: str = "body"  # articulation no root
-
-    # Geometria do veículo (use valores do seu modelo se souber)
-    wheel_base: float = 1.10     # distância entre eixos (m)
-    track_width: float = 0.95    # bitola (m) — ajuste conforme seu USD
-    wheel_radius: float = 0.50   # raio (m)
-    max_steer_angle: float = 0.60  # limite de esterçamento (rad)
-
-    # Observação:
-    # - A superclasse FourWheeledRobot provê .build(...) que cria o WheeledRobot,
-    #   ArticulationView e o AckermannController usando os atributos acima.
-    # - Se os nomes de DOF diferirem no seu USD, basta corrigi-los aqui.
 
 
-# @ROBOTS.register()
-# class ForkliftCRobot(WheeledRobot):
-
-#     physics_dt: float = 0.005
-
-#     z_offset: float = 0.5
-
-#     chase_camera_base_path = "body"  # root
-#     chase_camera_x_offset: float = -1.6
-#     chase_camera_z_offset: float = 5.0
-#     chase_camera_tilt_angle: float = 55.0
-
-#     # occupancy_map_radius: float = 1.5
-#     # occupancy_map_z_min: float = -0.2
-#     # occupancy_map_z_max: float = 3.0
-#     # occupancy_map_cell_size: float = 0.05
-#     # occupancy_map_collision_radius: float = 0.6
-
-#     occupancy_map_radius: float = 1.0
-#     occupancy_map_z_min: float = 0.1
-#     occupancy_map_z_max: float = 0.62
-#     occupancy_map_cell_size: float = 0.05
-#     occupancy_map_collision_radius: float = 0.5
-
-#     front_camera_base_path = "sensors/rgb_camera/front_hawk"
-#     front_camera_rotation = (0.0, 0.0, 0.0)
-#     front_camera_translation = (0.55, 0.0, 1.40)
-#     front_camera_type = HawkCamera
-
-#     keyboard_linear_velocity_gain: float = 1.0
-#     keyboard_angular_velocity_gain: float = 1.0
-
-#     gamepad_linear_velocity_gain: float = 1.0
-#     gamepad_angular_velocity_gain: float = 1.0
-
-#     random_action_linear_velocity_range: Tuple[float, float] = (-0.3, 1.0)
-#     random_action_angular_velocity_range: Tuple[float, float] = (-0.75, 0.75)
-#     random_action_linear_acceleration_std: float = 2.0
-#     random_action_angular_acceleration_std: float = 2.0
-#     random_action_grid_pose_sampler_grid_size: float = 5.0
-
-#     path_following_speed: float = 0.8
-#     path_following_angular_gain: float = 1.0
-#     path_following_stop_distance_threshold: float = 0.3
-#     path_following_forward_angle_threshold = math.pi
-#     path_following_target_point_offset_meters: float = 0.0
-
-#     #wheel_dof_names: List[str] = ["left_back_wheel_joint", "right_back_wheel_joint", "left_front_wheel_joint", "right_front_wheel_joint"]
-#     wheel_dof_names: List[str] = ["left_back_wheel_joint", "right_back_wheel_joint"]
-#     usd_url: str = "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.2/Isaac/Robots/Forklift/forklift_c.usd"
-#     chassis_subpath: str = "body"  # articulation no root
-#     wheel_base: float = 1.10
-#     wheel_radius: float = 0.5
-
-
-# @ROBOTS.register()
-# class ForkliftCRobot(WheeledRobot):
-#     # Passo de física
-#     physics_dt: float = 1.0 / 120.0
-
-#     # Spawn
-#     z_offset: float = 0.10
-
-#     # Chase-cam (apenas visual)
-#     chase_camera_base_path: str = ""   # no root
-#     chase_camera_x_offset: float = -1.6
-#     chase_camera_z_offset: float = 1.2
-#     chase_camera_tilt_angle: float = 55.0
-
-#     # Ocupância (típico de empilhadeira)
-#     occupancy_map_radius: float = 1.5
-#     occupancy_map_z_min: float = -0.2
-#     occupancy_map_z_max: float = 3.0
-#     occupancy_map_cell_size: float = 0.05
-#     occupancy_map_collision_radius: float = 0.6
-
-#     # Câmera frontal oficial (MobilityGen)
-#     front_camera_base_path: str = "sensors/front_hawk"
-#     front_camera_rotation: Tuple[float, float, float] = (0.0, 0.0, 0.0)
-#     front_camera_translation: Tuple[float, float, float] = (0.55, 0.0, 1.40)
-#     front_camera_type = HawkCamera
-
-#     # Ganhos teleop
-#     keyboard_linear_velocity_gain: float = 1.0
-#     keyboard_angular_velocity_gain: float = 1.0
-#     gamepad_linear_velocity_gain: float = 1.0
-#     gamepad_angular_velocity_gain: float = 1.0
-
-#     # Ação aleatória / path following (compatibilidade)
-#     random_action_linear_velocity_range: Tuple[float, float] = (-0.3, 1.0)
-#     random_action_angular_velocity_range: Tuple[float, float] = (-0.75, 0.75)
-#     random_action_linear_acceleration_std: float = 2.0
-#     random_action_angular_acceleration_std: float = 2.0
-#     random_action_grid_pose_sampler_grid_size: float = 5.0
-
-#     path_following_speed: float = 0.8
-#     path_following_angular_gain: float = 1.0
-#     path_following_stop_distance_threshold: float = 0.3
-#     path_following_forward_angle_threshold = math.pi
-#     path_following_target_point_offset_meters: float = 0.0
-
-#     # === Isaac assets ===
-#     usd_url: str = "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.2/Isaac/Robots/Forklift/forklift_c.usd"
-#     # SE usar outro asset (S3 4.2) troque aqui para o mesmo que já carregava OK no seu setup.
-
-#     # O root da articulação é o próprio /World/robot
-#     chassis_subpath: str = ""   # <<<<<< chave para resolver seu erro
-
-#     # Cinemática aproximada para controller diferencial (apenas traseiras motrizes)
-#     wheel_base: float = 1.10    # distância entre eixos (m)
-#     wheel_radius: float = 0.165 # raio da roda traseira (m)
-
-#     # Nomes EXATOS das rodas traseiras no seu USD:
-#     wheel_dof_names: List[str] = [
-#         "rear_left_wheel_joint",   # TODO: troque pelo nome real
-#         "rear_right_wheel_joint",  # TODO: troque pelo nome real
-#     ]
-#     # ====== build overriden p/ garantir IMU funcional ======
-#     # @classmethod
-#     # def build(cls, prim_path: str) -> "ForkliftCRobot":
-#     #     # cria robô, articulation view, controller e câmera (lógica do WheeledRobot)
-#     #     self = super().build(prim_path)
-
-#     #     # >>> IMU FIX: garantir que o mount da câmera frontal tenha RigidBodyAPI <<<
-#     #     # Muitos pipelines criam a IMU como filho do mount da câmera; o pai precisa ser rigid.
-#     #     stage = get_stage()
-#     #     cam_mount_path = os.path.join(prim_path, cls.front_camera_base_path)
-#     #     cam_mount_prim = stage_get_prim(stage, cam_mount_path)
-#     #     if cam_mount_prim and cam_mount_prim.IsValid():
-#     #         # aplica PhysxRigidBodyAPI se ainda não tiver
-#     #         if not PhysxSchema.PhysxRigidBodyAPI(cam_mount_prim):
-#     #             PhysxSchema.PhysxRigidBodyAPI.Apply(cam_mount_prim)
-#     #         # (opcional) manter como “leve”: sem colisor, só para fornecer velocidades/pose à IMU
-
-#     #     # pronto — agora, se o seu script/extension cria “.../Imu_Sensor” sob esse mount,
-#     #     # o parent já tem RigidBody e a IMU inicializa sem warnings.
-
-#     #     return self
 

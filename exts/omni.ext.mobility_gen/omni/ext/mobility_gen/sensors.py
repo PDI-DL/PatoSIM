@@ -184,7 +184,7 @@ class Camera(Sensor):
 
 class HawkCamera(Sensor):
 
-    usd_url: str = "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.2/Isaac/Sensors/LeopardImaging/Hawk/hawk_v1.1_nominal.usd"
+    usd_url: str = "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.5/Isaac/LeopardImaging/Hawk/hawk_v1.1_nominal.usd"
     resolution: Tuple[int, int] = (960, 600)
     left_camera_path: str = "left/camera_left"
     right_camera_path: str = "right/camera_right"
@@ -229,7 +229,8 @@ class RealSenseRGBDCamera(Sensor):
     - attach(): empacota o prim interno em uma Camera (sua classe)
     """
     # Ajuste para o caminho real do asset no seu servidor/Omniverse
-    usd_url: str = "omniverse://<SEU_NUCLEUS>/Assets/Isaac/…/RealSense/RealSense_D435.usd"
+   
+    usd_url: str = "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.5/Isaac/Sensors/RealSense/RealSense_D435.usd"
     resolution: Tuple[int, int] = (1280, 720)
     camera_path: str = "camera"  # subcaminho do prim de câmera dentro do USD referenciado
 
@@ -274,7 +275,7 @@ class ZedStereoCamera(Sensor):
     - attach(): empacota os dois prims internos em duas Cameras (left/right)
     """
     # Ajuste para o caminho real do asset no seu servidor/Omniverse
-    usd_url: str = "omniverse://<SEU_NUCLEUS>/Assets/Isaac/…/Stereolabs/ZED.usd"
+    usd_url: str = "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.5/Isaac/Sensors/Stereolabs/ZED_X/ZED_X.usd"
     resolution: Tuple[int, int] = (1280, 720)
     left_camera_path: str = "left/camera_left"     # confirme no USD
     right_camera_path: str = "right/camera_right"  # confirme no USD
