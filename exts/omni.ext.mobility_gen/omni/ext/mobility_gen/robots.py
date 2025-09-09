@@ -1161,7 +1161,7 @@ class JetbotRobot(WheeledRobot):
     occupancy_map_radius: float = 0.25
     occupancy_map_z_min: float = 0.05
     occupancy_map_z_max: float = 0.5
-    occupancy_map_cell_size: float = 0.05
+    occupancy_map_cell_size: float = 0.07
     occupancy_map_collision_radius: float = 0.25
 
     front_camera_base_path = "chassis/rgb_camera/front_hawk"
@@ -1169,7 +1169,7 @@ class JetbotRobot(WheeledRobot):
     front_camera_translation = (0., 0., 0.)
     front_camera_type = HawkCamera
 
-    keyboard_linear_velocity_gain: float = 0.25
+    keyboard_linear_velocity_gain: float = 1.0
     keyboard_angular_velocity_gain: float = 1.0
 
     gamepad_linear_velocity_gain: float = 0.25
