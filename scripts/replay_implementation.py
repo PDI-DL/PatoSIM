@@ -22,9 +22,10 @@ This script supports:
 """
 
 import argparse
+import glob
+import json
 import os
 from pathlib import Path
-import shutil
 import signal
 import sys
 from typing import Any, Dict, Optional, Tuple
@@ -75,6 +76,28 @@ def parse_args() -> argparse.Namespace:
     if unknown:
         print(f"[replay] Ignoring unknown args: {' '.join(unknown)}")
     return args
+
+
+def enforce_full_capture(args: argparse.Namespace) -> None:
+    required_true = [
+        "rgb_enabled",
+        "segmentation_enabled",
+        "depth_enabled",
+        "instance_id_segmentation_enabled",
+        "normals_enabled",
+        "pc_enabled",
+        "annotations_enabled",
+    ]
+    for key in required_true:
+        if not getattr(args, key, False):
+            print(f"[replay] Overriding --{key}=False to True to keep full dataset capture.")
+        setattr(args, key, True)
+    if int(getattr(args, "pc_interval", 1)) != 1:
+        print("[replay] Overriding --pc_interval to 1 to keep full per-frame pointcloud capture.")
+    args.pc_interval = 1
+    if int(getattr(args, "render_interval", 1)) != 1:
+        print("[replay] Overriding --render_interval to 1 to keep full per-frame replay coverage.")
+    args.render_interval = 1
 
 
 def install_signal_handlers() -> None:
@@ -157,6 +180,60 @@ def pointcloud_fields(value: Any) -> Optional[list]:
     return ["x", "y", "z"]
 
 
+def to_jsonable(value: Any) -> Any:
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, (np.floating,)):
+        return float(value)
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+    if isinstance(value, dict):
+        return {str(k): to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [to_jsonable(v) for v in value]
+    return value
+
+
+def _semantic_type_from_attr_prefix(prefix: str) -> str:
+    if "_" in prefix:
+        return prefix.split("_", 1)[0]
+    return prefix
+
+
+def extract_semantic_labels_from_prim(prim: Any) -> Dict[str, str]:
+    semantic_labels: Dict[str, str] = {}
+    for attr in prim.GetAttributes():
+        name = attr.GetName()
+        if not name.startswith("semantic:") or not name.endswith(":params:semanticData"):
+            continue
+        raw_value = attr.Get()
+        if raw_value is None:
+            continue
+
+        prefix = name[len("semantic:") : -len(":params:semanticData")]
+        type_attr = prim.GetAttribute(f"semantic:{prefix}:params:semanticType")
+        semantic_type = None
+        if type_attr is not None:
+            semantic_type = type_attr.Get()
+        if semantic_type is None:
+            semantic_type = _semantic_type_from_attr_prefix(prefix)
+
+        semantic_labels[str(semantic_type)] = str(raw_value)
+    return semantic_labels
+
+
+def extract_semantic_state_from_state_dict(state_dict: Dict[str, Any]) -> Dict[str, Any]:
+    semantic_state: Dict[str, Any] = {}
+    for key, value in state_dict.items():
+        if not isinstance(key, str):
+            continue
+        if key.endswith("segmentation_info") or key.endswith("instance_id_segmentation_info"):
+            semantic_state[key] = to_jsonable(value)
+    return semantic_state
+
+
 def build_pointcloud_metadata(scenario: Any, state_pc: Dict[str, Any]) -> Dict[str, Any]:
     metadata: Dict[str, Any] = {}
     modules = scenario.named_modules()
@@ -190,7 +267,7 @@ def build_pointcloud_metadata(scenario: Any, state_pc: Dict[str, Any]) -> Dict[s
 def gather_annotations(stage: Any) -> Dict[str, Any]:
     from pxr import Gf, Usd, UsdGeom
 
-    annotations = {"bboxes2d": [], "bboxes3d": []}
+    annotations = {"bboxes2d": [], "bboxes3d": [], "classes": []}
     if stage is None:
         return annotations
 
@@ -233,11 +310,13 @@ def gather_annotations(stage: Any) -> Dict[str, Any]:
                 for z in [min_pt[2], max_pt[2]]:
                     corners.append([float(x), float(y), float(z)])
 
-        class_name = prim.GetName()
+        semantic_labels = extract_semantic_labels_from_prim(prim)
+        class_name = semantic_labels.get("class", prim.GetName())
         annotations["bboxes3d"].append(
             {
                 "prim_path": prim.GetPath().pathString,
                 "class": class_name,
+                "semantic_labels": semantic_labels,
                 "corners": corners,
             }
         )
@@ -262,6 +341,7 @@ def gather_annotations(stage: Any) -> Dict[str, Any]:
                 {
                     "prim_path": prim.GetPath().pathString,
                     "class": class_name,
+                    "semantic_labels": semantic_labels,
                     "bbox": [
                         max(0.0, min(xs)),
                         max(0.0, min(ys)),
@@ -271,7 +351,51 @@ def gather_annotations(stage: Any) -> Dict[str, Any]:
                 }
             )
 
+    annotations["classes"] = sorted(
+        {entry.get("class", "") for entry in annotations["bboxes3d"] if entry.get("class", "")}
+    )
     return annotations
+
+
+def read_annotation_file(path: str) -> Optional[Dict[str, Any]]:
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return None
+
+
+def build_annotation_payload(
+    step: int,
+    base_annotations: Optional[Dict[str, Any]] = None,
+    semantic_state: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "step": int(step),
+        "bboxes2d": [],
+        "bboxes3d": [],
+        "classes": [],
+        "semantic": semantic_state or {},
+    }
+    if isinstance(base_annotations, dict):
+        payload.update(base_annotations)
+        if "semantic" not in payload or payload.get("semantic") is None:
+            payload["semantic"] = semantic_state or {}
+    payload["step"] = int(step)
+    if not isinstance(payload.get("bboxes2d"), list):
+        payload["bboxes2d"] = []
+    if not isinstance(payload.get("bboxes3d"), list):
+        payload["bboxes3d"] = []
+    if not isinstance(payload.get("classes"), list):
+        payload["classes"] = []
+    if not isinstance(payload.get("semantic"), dict):
+        payload["semantic"] = {}
+    return payload
 
 
 def write_summary(
@@ -294,6 +418,43 @@ def write_summary(
         f.write(f"Output: {output_path}\n")
         f.write(f"Pointcloud entries written: {pc_written_count}\n")
         f.write(f"Annotation files written: {annotations_written_count}\n")
+
+        common_files = glob.glob(os.path.join(output_path, "state", "common", "*.npy"))
+        rgb_files = glob.glob(os.path.join(output_path, "state", "rgb", "*", "*.jpg"))
+        seg_files = glob.glob(os.path.join(output_path, "state", "segmentation", "*", "*.png"))
+        depth_files = glob.glob(os.path.join(output_path, "state", "depth", "*", "*.png"))
+        normals_files = glob.glob(os.path.join(output_path, "state", "normals", "*", "*.npy"))
+        ann_files = glob.glob(os.path.join(output_path, "state", "annotations", "*.json"))
+        f.write(f"state/common files: {len(common_files)}\n")
+        f.write(f"state/rgb images: {len(rgb_files)}\n")
+        f.write(f"state/segmentation images: {len(seg_files)}\n")
+        f.write(f"state/depth images: {len(depth_files)}\n")
+        f.write(f"state/normals arrays: {len(normals_files)}\n")
+        f.write(f"state/annotations files: {len(ann_files)}\n")
+
+        total_bbox2d = 0
+        total_bbox3d = 0
+        semantic_files = 0
+        class_labels = set()
+        for ann_path in ann_files:
+            ann_data = read_annotation_file(ann_path)
+            if not isinstance(ann_data, dict):
+                continue
+            b2d = ann_data.get("bboxes2d")
+            b3d = ann_data.get("bboxes3d")
+            if isinstance(b2d, list):
+                total_bbox2d += len(b2d)
+            if isinstance(b3d, list):
+                total_bbox3d += len(b3d)
+                for entry in b3d:
+                    if isinstance(entry, dict) and "class" in entry:
+                        class_labels.add(str(entry["class"]))
+            if isinstance(ann_data.get("semantic"), dict) and ann_data["semantic"]:
+                semantic_files += 1
+        f.write(f"Total bbox2d entries: {total_bbox2d}\n")
+        f.write(f"Total bbox3d entries: {total_bbox3d}\n")
+        f.write(f"Annotation files with semantic payload: {semantic_files}\n")
+        f.write(f"Detected class labels: {len(class_labels)}\n")
 
         pc_root = os.path.join(output_path, "state", "pointcloud")
         if os.path.exists(pc_root):
@@ -324,8 +485,8 @@ def run_dry_run(args: argparse.Namespace, reader: Any, writer: Any) -> Tuple[int
             print("[replay] Stop requested; leaving dry_run loop.")
             break
 
-        state_dict = reader.read_state_dict(index=step)
-        writer.write_state_dict_common(state_dict, step)
+        state_dict_common = reader.read_state_dict_common(index=step)
+        writer.write_state_dict_common(state_dict_common, step)
 
         if args.rgb_enabled:
             writer.write_state_dict_rgb(reader.read_state_dict_rgb(index=step), step)
@@ -344,12 +505,15 @@ def run_dry_run(args: argparse.Namespace, reader: Any, writer: Any) -> Tuple[int
 
         if args.annotations_enabled:
             src_ann = os.path.join(args.input_path, "state", "annotations", f"{step:08d}.json")
-            if os.path.exists(src_ann):
-                dst_dir = os.path.join(args.output_path, "state", "annotations")
-                os.makedirs(dst_dir, exist_ok=True)
-                dst_ann = os.path.join(dst_dir, f"{step:08d}.json")
-                shutil.copyfile(src_ann, dst_ann)
-                annotations_written_count += 1
+            src_payload = read_annotation_file(src_ann)
+            semantic_state = extract_semantic_state_from_state_dict(state_dict_common)
+            payload = build_annotation_payload(
+                step=step,
+                base_annotations=src_payload,
+                semantic_state=semantic_state,
+            )
+            writer.write_annotations(payload, step)
+            annotations_written_count += 1
 
     return pc_written_count, annotations_written_count
 
@@ -413,8 +577,8 @@ def run_replay(
         )
         scenario.update_state()
 
-        state_dict = scenario.state_dict_common()
-        writer.write_state_dict_common(state_dict, step)
+        state_dict_common = scenario.state_dict_common()
+        writer.write_state_dict_common(state_dict_common, step)
 
         if args.rgb_enabled:
             writer.write_state_dict_rgb(scenario.state_dict_rgb(), step)
@@ -449,15 +613,21 @@ def run_replay(
             from omni.ext.mobility_gen.utils.global_utils import get_stage
 
             annotations = gather_annotations(get_stage())
-            if annotations["bboxes2d"] or annotations["bboxes3d"]:
-                writer.write_annotations(annotations, step)
-                annotations_written_count += 1
+            semantic_state = extract_semantic_state_from_state_dict(state_dict_common)
+            payload = build_annotation_payload(
+                step=step,
+                base_annotations=annotations,
+                semantic_state=semantic_state,
+            )
+            writer.write_annotations(payload, step)
+            annotations_written_count += 1
 
     return pc_written_count, annotations_written_count
 
 
 def main() -> int:
     args = parse_args()
+    enforce_full_capture(args)
     args.input_path = os.path.expanduser(args.input_path)
     args.output_path = os.path.expanduser(args.output_path)
 

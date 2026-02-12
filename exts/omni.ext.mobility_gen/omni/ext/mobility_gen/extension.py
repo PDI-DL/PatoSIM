@@ -20,6 +20,7 @@ import os
 import datetime
 import tempfile
 import glob
+from collections import OrderedDict
 
 import omni.ext
 import omni.ui as ui
@@ -80,12 +81,36 @@ class MobilityGenExtension(omni.ext.IExt):
 
         # Image provider for occupancy map preview
         self._occupancy_map_image_provider = omni.ui.ByteImageProvider()
+        self._sensor_preview_image_provider = omni.ui.ByteImageProvider()
+        self._sensor_preview_camera_names = []
+        self._sensor_preview_selected_index = 0
+        self._sensor_preview_latest_rgb = {}
+        self._sensor_preview_latest_camera_map = OrderedDict()
 
         # Visualization window for occupancy map
         self._visualize_window = omni.ui.Window("MobilityGen - Occupancy Map", width=300, height=300)
+        try:
+            self._visualize_window.visible = True
+        except Exception:
+            pass
         with self._visualize_window.frame:
             self._occ_map_frame = ui.Frame()
             self._occ_map_frame.set_build_fn(self.build_occ_map_frame)
+
+        # Low-resolution live preview window for RGB camera sensors.
+        self._sensor_preview_window = omni.ui.Window("MobilityGen - Sensor Preview", width=330, height=235)
+        try:
+            self._sensor_preview_window.visible = True
+        except Exception:
+            pass
+        with self._sensor_preview_window.frame:
+            self._sensor_preview_frame = ui.Frame()
+            self._sensor_preview_frame.set_build_fn(self._build_sensor_preview_frame)
+        try:
+            blank = np.zeros((144, 256, 4), dtype=np.uint8)
+            self._sensor_preview_image_provider.set_bytes_data(list(blank.tobytes()), [256, 144])
+        except Exception:
+            pass
 
         # discover available USD worlds in the working directory and DATA_DIR
         try:
@@ -114,21 +139,7 @@ class MobilityGenExtension(omni.ext.IExt):
                     # -- Build button --
                     ui.Button("Build", clicked_fn=self.build_scenario)
 
-                    # -- Quick parameter models (used by recording and buttons) --
-                    # These models exist even if the full recording UI is not shown,
-                    # so the background logic in on_physics can reference them.
-                    try:
-                        self.record_pointclouds_model = ui.SimpleBoolModel(False)
-                    except Exception:
-                        self.record_pointclouds_model = None
-                    try:
-                        self.pointcloud_interval_model = ui.SimpleIntModel(1)
-                    except Exception:
-                        self.pointcloud_interval_model = None
-                    try:
-                        self.annotate_bboxes_model = ui.SimpleBoolModel(False)
-                    except Exception:
-                        self.annotate_bboxes_model = None
+                    # -- Quick parameter models --
                     # fallback internal format/index for environments where the
                     # pointcloud format ComboBox is not present in the UI
                     self._pc_format_items = ["npy", "ply", "pcd"]
@@ -138,70 +149,10 @@ class MobilityGenExtension(omni.ext.IExt):
                     with ui.Frame():
                         ui.Label("Quick Params")
                         with ui.HStack(height=40):
-                            # Left column: Save stage and occupancy map visibility
-                            with ui.VStack(width=180, spacing=4):
-                                ui.Button("Save Stage", clicked_fn=self._save_stage_now)
-                                # Show occupancy map checkbox + label on same row
-                                try:
-                                    if not hasattr(self, '_show_occ_map_model') or self._show_occ_map_model is None:
-                                        self._show_occ_map_model = ui.SimpleBoolModel(False)
-                                except Exception:
-                                    self._show_occ_map_model = None
-                                with ui.HStack():
-                                    if self._show_occ_map_model is not None:
-                                        cb = ui.CheckBox(model=self._show_occ_map_model)
-                                        # Deterministic: set visible when checked, hide when unchecked
-                                        def _on_show_occ_change(value=None):
-                                            try:
-                                                val = self._show_occ_map_model.get_value()
-                                                # ensure the toggle sets to a deterministic visible state
-                                                if val:
-                                                    try:
-                                                        self._visualize_window.set_visible(True)
-                                                    except Exception:
-                                                        try:
-                                                            self._visualize_window.visible = True
-                                                        except Exception:
-                                                            pass
-                                                else:
-                                                    try:
-                                                        self._visualize_window.set_visible(False)
-                                                    except Exception:
-                                                        try:
-                                                            self._visualize_window.visible = False
-                                                        except Exception:
-                                                            pass
-                                            except Exception:
-                                                pass
-                                        try:
-                                            cb.model.add_value_changed_fn(_on_show_occ_change)
-                                        except Exception:
-                                            pass
-                                    ui.Label("Show Occ Map")
-
-                            # Middle column: recording toggles
-                            with ui.VStack(width=200, spacing=4):
-                                # Record PointClouds checkbox and label
-                                try:
-                                    if self.record_pointclouds_model is None:
-                                        self.record_pointclouds_model = ui.SimpleBoolModel(False)
-                                except Exception:
-                                    self.record_pointclouds_model = None
-                                with ui.HStack():
-                                    if self.record_pointclouds_model is not None:
-                                        cb_rec = ui.CheckBox(model=self.record_pointclouds_model)
-                                    ui.Label("Record PointClouds")
-
-                                # Annotate BBoxes checkbox
-                                try:
-                                    if self.annotate_bboxes_model is None:
-                                        self.annotate_bboxes_model = ui.SimpleBoolModel(False)
-                                except Exception:
-                                    self.annotate_bboxes_model = None
-                                with ui.HStack():
-                                    if self.annotate_bboxes_model is not None:
-                                        cb_ann = ui.CheckBox(model=self.annotate_bboxes_model)
-                                    ui.Label("Annotate BBoxes")
+                            # Left column: fixed capture policy (always on)
+                            with ui.VStack(width=220, spacing=4):
+                                ui.Label("Record PointClouds: Always On")
+                                ui.Label("Annotate BoundingBoxes: Always On")
 
                             # Right column: format and interval selectors
                             with ui.VStack(width=220, spacing=4):
@@ -220,14 +171,7 @@ class MobilityGenExtension(omni.ext.IExt):
 
                                 with ui.HStack():
                                     ui.Label("Interval (frames)")
-                                    try:
-                                        self._interval_combo = ui.ComboBox(0, "1", "5")
-                                        try:
-                                            self._interval_combo.model.add_value_changed_fn(lambda: (self.pointcloud_interval_model.set_value(int(["1","5"][self._interval_combo.model.get_item_value_model().get_value_as_int()])) if self.pointcloud_interval_model is not None else None))
-                                        except Exception:
-                                            pass
-                                    except Exception:
-                                        ui.Label(str(self.pointcloud_interval_model.get_value() if self.pointcloud_interval_model is not None else "1"))
+                                    ui.Label("1 (always)")
 
                 with ui.VStack():
                     self.recording_count_label = ui.Label("")
@@ -256,6 +200,165 @@ class MobilityGenExtension(omni.ext.IExt):
             data = list(image.tobytes())
             self._occupancy_map_image_provider.set_bytes_data(data, [image.width, image.height])
             self._occ_map_frame.rebuild()
+
+    def _build_sensor_preview_frame(self):
+        with ui.VStack():
+            with ui.HStack():
+                ui.Label("Camera Preview")
+                if len(self._sensor_preview_camera_names) > 0:
+                    idx = min(self._sensor_preview_selected_index, len(self._sensor_preview_camera_names) - 1)
+                    combo = ui.ComboBox(idx, *self._sensor_preview_camera_names)
+                    self._sensor_preview_combo = combo
+                    try:
+                        combo.model.add_value_changed_fn(self._on_sensor_preview_camera_changed)
+                    except Exception:
+                        pass
+                else:
+                    self._sensor_preview_combo = None
+                    ui.Label("(waiting for RGB data)")
+            with ui.HStack():
+                ui.Label("Resolution")
+                ui.Label("256x144")
+            ui.ImageWithProvider(self._sensor_preview_image_provider)
+
+    def _on_sensor_preview_camera_changed(self, *_args):
+        try:
+            if not hasattr(self, "_sensor_preview_combo"):
+                return
+            combo_model = self._sensor_preview_combo.model
+            self._sensor_preview_selected_index = int(combo_model.get_item_value_model().get_value_as_int())
+        except Exception:
+            pass
+        try:
+            self._refresh_sensor_preview(self._sensor_preview_latest_camera_map)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _resize_rgb_for_preview(image: np.ndarray, max_width: int = 320, max_height: int = 200):
+        if image is None:
+            return None
+        arr = np.asarray(image)
+        if arr.ndim != 3:
+            return None
+
+        if arr.shape[2] == 1:
+            arr = np.repeat(arr, 3, axis=2)
+        elif arr.shape[2] >= 4:
+            arr = arr[:, :, :4]
+        elif arr.shape[2] == 2:
+            arr = np.stack([arr[:, :, 0], arr[:, :, 1], arr[:, :, 0]], axis=2)
+
+        if arr.dtype != np.uint8:
+            arr = np.clip(arr, 0, 255).astype(np.uint8)
+
+        height, width = arr.shape[:2]
+        if height <= 0 or width <= 0:
+            return None
+
+        scale = min(float(max_width) / float(width), float(max_height) / float(height), 1.0)
+        if scale < 1.0:
+            new_w = max(1, int(width * scale))
+            new_h = max(1, int(height * scale))
+            x_idx = np.linspace(0, width - 1, new_w).astype(np.int32)
+            y_idx = np.linspace(0, height - 1, new_h).astype(np.int32)
+            arr = arr[np.ix_(y_idx, x_idx)]
+
+        if arr.shape[2] == 3:
+            alpha = np.full((arr.shape[0], arr.shape[1], 1), 255, dtype=np.uint8)
+            arr = np.concatenate([arr, alpha], axis=2)
+        return arr
+
+    def _build_sensor_preview_camera_map(self, rgb_state: dict):
+        """Group raw RGB buffers into user-facing camera previews."""
+        camera_map = OrderedDict()
+        if not isinstance(rgb_state, dict):
+            return camera_map
+
+        valid_items = [(k, v) for k, v in rgb_state.items() if v is not None]
+        if len(valid_items) == 0:
+            return camera_map
+
+        def _find_camera(substrings: list[str], prefer_left: bool = False):
+            matches = []
+            for key, value in valid_items:
+                lower = key.lower()
+                if all(token in lower for token in substrings):
+                    matches.append((key, value))
+            if not matches:
+                return None
+            if prefer_left:
+                for key, value in matches:
+                    if ".left." in key.lower() or "camera_left" in key.lower() or "left" in key.lower():
+                        return value
+            return matches[0][1]
+
+        def _first_non_none(*values):
+            for value in values:
+                if value is not None:
+                    return value
+            return None
+
+        left_fisheye = _first_non_none(
+            _find_camera(["fisheye", "left"]),
+            _find_camera(["fisheye_left"]),
+        )
+        right_fisheye = _first_non_none(
+            _find_camera(["fisheye", "right"]),
+            _find_camera(["fisheye_right"]),
+        )
+        front_stereo = _first_non_none(
+            _find_camera(["front_stereo"], prefer_left=True),
+            _find_camera(["front_camera"], prefer_left=True),
+            _find_camera(["stereo"], prefer_left=True),
+        )
+
+        if left_fisheye is not None:
+            camera_map["fisheye_left"] = left_fisheye
+        if right_fisheye is not None:
+            camera_map["fisheye_right"] = right_fisheye
+        if front_stereo is not None:
+            camera_map["front_stereo"] = front_stereo
+
+        # Fallback: if no canonical names were found, expose all RGB buffers.
+        if len(camera_map) == 0:
+            for key, value in sorted(valid_items, key=lambda kv: kv[0]):
+                camera_map[key] = value
+
+        return camera_map
+
+    def _refresh_sensor_preview(self, camera_map: dict):
+        if not isinstance(camera_map, dict):
+            return
+
+        camera_names = list(camera_map.keys())
+        if camera_names != self._sensor_preview_camera_names:
+            self._sensor_preview_camera_names = camera_names
+            if len(self._sensor_preview_camera_names) == 0:
+                self._sensor_preview_selected_index = 0
+            else:
+                self._sensor_preview_selected_index = min(
+                    self._sensor_preview_selected_index, len(self._sensor_preview_camera_names) - 1
+                )
+            try:
+                self._sensor_preview_frame.rebuild()
+            except Exception:
+                pass
+
+        if len(self._sensor_preview_camera_names) == 0:
+            blank = np.zeros((144, 256, 4), dtype=np.uint8)
+            self._sensor_preview_image_provider.set_bytes_data(list(blank.tobytes()), [256, 144])
+            return
+
+        selected_name = self._sensor_preview_camera_names[self._sensor_preview_selected_index]
+        selected_image = camera_map.get(selected_name)
+        preview_rgba = self._resize_rgb_for_preview(selected_image, max_width=256, max_height=144)
+        if preview_rgba is None:
+            return
+        self._sensor_preview_image_provider.set_bytes_data(
+            list(preview_rgba.tobytes()),
+            [int(preview_rgba.shape[1]), int(preview_rgba.shape[0])],
+        )
 
 
     def update_recording_count(self):
@@ -322,6 +425,7 @@ class MobilityGenExtension(omni.ext.IExt):
             pass
 
     def start_new_recording(self):
+        self._enable_recording_modalities()
         recording_name = datetime.datetime.now().isoformat()
         recording_path = os.path.join(RECORDINGS_DIR, recording_name)
         writer = Writer(recording_path)
@@ -344,9 +448,59 @@ class MobilityGenExtension(omni.ext.IExt):
         self.scenario = None
         self.cached_stage_path = None
 
+    @staticmethod
+    def _to_jsonable(value):
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, (np.floating,)):
+            return float(value)
+        if isinstance(value, (np.integer,)):
+            return int(value)
+        if isinstance(value, (np.bool_,)):
+            return bool(value)
+        if isinstance(value, dict):
+            return {str(k): MobilityGenExtension._to_jsonable(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [MobilityGenExtension._to_jsonable(v) for v in value]
+        return value
+
+    def _extract_semantic_state_from_common(self, state_dict: dict) -> dict:
+        semantic_state = {}
+        for key, value in state_dict.items():
+            if not isinstance(key, str):
+                continue
+            if key.endswith("segmentation_info") or key.endswith("instance_id_segmentation_info"):
+                semantic_state[key] = self._to_jsonable(value)
+        return semantic_state
+
+    def _enable_recording_modalities(self):
+        if self.scenario is None:
+            return
+        try:
+            self.scenario.enable_rgb_rendering()
+        except Exception:
+            pass
+        try:
+            self.scenario.enable_segmentation_rendering()
+        except Exception:
+            pass
+        try:
+            self.scenario.enable_instance_id_segmentation_rendering()
+        except Exception:
+            pass
+        try:
+            self.scenario.enable_depth_rendering()
+        except Exception:
+            pass
+        try:
+            self.scenario.enable_normals_rendering()
+        except Exception:
+            pass
+
     def enable_recording(self):
         if not self.recording_enabled:
             if self.scenario is not None:
+                self._enable_recording_modalities()
                 self.start_new_recording()
             self.recording_enabled = True
 
@@ -368,123 +522,138 @@ class MobilityGenExtension(omni.ext.IExt):
 
             if not is_alive:
                 self.reset()
+
+            rgb_state_for_preview = {}
+            try:
+                rgb_state_for_preview = self.scenario.state_dict_rgb()
+            except Exception:
+                rgb_state_for_preview = {}
+            self._sensor_preview_latest_rgb = rgb_state_for_preview
+            self._sensor_preview_latest_camera_map = self._build_sensor_preview_camera_map(rgb_state_for_preview)
+            try:
+                self._refresh_sensor_preview(self._sensor_preview_latest_camera_map)
+            except Exception:
+                pass
             
             if self.writer is not None:
-                state_dict = self.scenario.state_dict_common()
-                self.writer.write_state_dict_common(state_dict, step=self.step)
-                # Pointcloud auto-recording
+                state_dict_common = self.scenario.state_dict_common()
+                self.writer.write_state_dict_common(state_dict_common, step=self.step)
+
+                # Always persist rendered camera modalities while recording.
                 try:
-                    record_pc = self.record_pointclouds_model.get_value()
+                    self.writer.write_state_dict_rgb(rgb_state_for_preview, step=self.step)
                 except Exception:
-                    record_pc = False
+                    pass
+                try:
+                    self.writer.write_state_dict_segmentation(self.scenario.state_dict_segmentation(), step=self.step)
+                except Exception:
+                    pass
+                try:
+                    self.writer.write_state_dict_depth(self.scenario.state_dict_depth(), step=self.step)
+                except Exception:
+                    pass
+                try:
+                    self.writer.write_state_dict_normals(self.scenario.state_dict_normals(), step=self.step)
+                except Exception:
+                    pass
 
-                if record_pc:
+                # Always persist pointclouds using the configured format/interval.
+                interval = 1
+                if (self.step % interval) == 0:
+                    state_pc = self.scenario.state_dict_pointcloud()
+                    fmt = "npy"
                     try:
-                        interval = int(self.pointcloud_interval_model.get_value())
+                        fmt = self._pc_format_items[self._pc_format_index]
                     except Exception:
-                        interval = 1
-                    if interval <= 0:
-                        interval = 1
-                    if (self.step % interval) == 0:
-                        state_pc = self.scenario.state_dict_pointcloud()
                         fmt = "npy"
-                        try:
-                            fmt = ["npy", "ply", "pcd"][self.pointcloud_format_combo.model.get_item_value_model().get_value_as_int()]
-                        except Exception:
-                            # fallback to internal index if the UI combo is not present
+                    try:
+                        self.writer.write_state_dict_pointcloud(state_pc, step=self.step, save_format=fmt)
+                    except Exception:
+                        pass
+
+                    # Persist per-sensor metadata (pose) next to the pointcloud
+                    try:
+                        metadata = {}
+                        modules = self.scenario.named_modules()
+                        for full_name, arr_value in state_pc.items():
+                            if "." in full_name:
+                                module_name = full_name.rsplit(".", 1)[0]
+                            else:
+                                module_name = full_name
+                            module = modules.get(module_name, None)
+                            if module is None:
+                                continue
+                            pos = None
+                            ori = None
                             try:
-                                fmt = self._pc_format_items[self._pc_format_index]
+                                if hasattr(module, "position") and module.position.get_value() is not None:
+                                    pos = module.position.get_value()
                             except Exception:
-                                fmt = "npy"
-                        try:
-                            self.writer.write_state_dict_pointcloud(state_pc, step=self.step, save_format=fmt)
-                        except Exception:
-                            # Best-effort: continue if writer fails
-                            pass
-
-                        # Persist per-sensor metadata (pose) next to the pointcloud
-                        try:
-                            metadata = {}
-                            modules = self.scenario.named_modules()
-                            for full_name, arr_value in state_pc.items():
-                                # sensor module name is the prefix before the last '.':
-                                if "." in full_name:
-                                    module_name = full_name.rsplit('.', 1)[0]
-                                else:
-                                    module_name = full_name
-                                module = modules.get(module_name, None)
-                                if module is None:
-                                    continue
                                 pos = None
+                            try:
+                                if hasattr(module, "orientation") and module.orientation.get_value() is not None:
+                                    ori = module.orientation.get_value()
+                            except Exception:
                                 ori = None
-                                try:
-                                    if hasattr(module, 'position') and module.position.get_value() is not None:
-                                        pos = module.position.get_value()
-                                except Exception:
-                                    pos = None
-                                try:
-                                    if hasattr(module, 'orientation') and module.orientation.get_value() is not None:
-                                        ori = module.orientation.get_value()
-                                except Exception:
-                                    ori = None
 
-                                # fallback: try _xform_prim
-                                if (pos is None or ori is None) and hasattr(module, '_xform_prim'):
-                                    try:
-                                        p, o = module._xform_prim.get_world_pose()
-                                        if pos is None:
-                                            pos = p
-                                        if ori is None:
-                                            ori = o
-                                    except Exception:
-                                        pass
-
-                                # detect pointcloud fields based on array shape
-                                fields = None
+                            if (pos is None or ori is None) and hasattr(module, "_xform_prim"):
                                 try:
-                                    if arr_value is not None:
-                                        a = np.asarray(arr_value)
-                                        if a.ndim == 2:
-                                            ncol = a.shape[1]
-                                            if ncol == 3:
-                                                fields = ["x", "y", "z"]
-                                            elif ncol == 4:
-                                                fields = ["x", "y", "z", "intensity"]
-                                            elif ncol == 6:
-                                                fields = ["x", "y", "z", "r", "g", "b"]
-                                            elif ncol == 7:
-                                                fields = ["x", "y", "z", "r", "g", "b", "intensity"]
-                                            else:
-                                                fields = ["x", "y", "z"]
-                                except Exception:
-                                    fields = None
-
-                                if pos is not None or ori is not None or fields is not None:
-                                    metadata[module_name] = {
-                                        'position': None if pos is None else [float(x) for x in list(pos)],
-                                        'orientation': None if ori is None else [float(x) for x in list(ori)],
-                                        'prim_path': getattr(module, '_prim_path', None),
-                                        'fields': fields
-                                    }
-                            if len(metadata) > 0:
-                                try:
-                                    self.writer.write_pointcloud_metadata(metadata, step=self.step)
+                                    p, o = module._xform_prim.get_world_pose()
+                                    if pos is None:
+                                        pos = p
+                                    if ori is None:
+                                        ori = o
                                 except Exception:
                                     pass
-                        except Exception:
-                            pass
 
-                        # Annotations (2D/3D) using prim bounds if requested
-                        try:
-                            annotate = self.annotate_bboxes_model.get_value()
-                        except Exception:
-                            annotate = False
-                        if annotate:
+                            fields = None
                             try:
-                                annotations = self._gather_annotations(self.step)
-                                self.writer.write_annotations(annotations, step=self.step)
+                                if arr_value is not None:
+                                    a = np.asarray(arr_value)
+                                    if a.ndim == 2:
+                                        ncol = a.shape[1]
+                                        if ncol == 3:
+                                            fields = ["x", "y", "z"]
+                                        elif ncol == 4:
+                                            fields = ["x", "y", "z", "intensity"]
+                                        elif ncol == 6:
+                                            fields = ["x", "y", "z", "r", "g", "b"]
+                                        elif ncol == 7:
+                                            fields = ["x", "y", "z", "r", "g", "b", "intensity"]
+                                        else:
+                                            fields = ["x", "y", "z"]
                             except Exception:
-                                pass
+                                fields = None
+
+                            if pos is not None or ori is not None or fields is not None:
+                                metadata[module_name] = {
+                                    "position": None if pos is None else [float(x) for x in list(pos)],
+                                    "orientation": None if ori is None else [float(x) for x in list(ori)],
+                                    "prim_path": getattr(module, "_prim_path", None),
+                                    "fields": fields,
+                                }
+                        if metadata:
+                            self.writer.write_pointcloud_metadata(metadata, step=self.step)
+                    except Exception:
+                        pass
+
+                # Always write bounding-box annotations and semantic payload.
+                try:
+                    annotations = self._gather_annotations(self.step)
+                    payload = dict(annotations)
+                    payload["step"] = int(self.step)
+                    payload["semantic"] = self._extract_semantic_state_from_common(state_dict_common)
+                    if not isinstance(payload.get("bboxes2d"), list):
+                        payload["bboxes2d"] = []
+                    if not isinstance(payload.get("bboxes3d"), list):
+                        payload["bboxes3d"] = []
+                    if not isinstance(payload.get("classes"), list):
+                        payload["classes"] = []
+                    if not isinstance(payload.get("semantic"), dict):
+                        payload["semantic"] = {}
+                    self.writer.write_annotations(payload, step=self.step)
+                except Exception:
+                    pass
                 self.step += 1
                 self.recording_time += step_size
                 if self.step % 15 == 0:
@@ -509,6 +678,31 @@ class MobilityGenExtension(omni.ext.IExt):
                 except Exception:
                     pass
 
+    @staticmethod
+    def _semantic_type_from_attr_prefix(prefix: str) -> str:
+        if "_" in prefix:
+            return prefix.split("_", 1)[0]
+        return prefix
+
+    def _extract_semantic_labels_from_prim(self, prim) -> dict:
+        semantic_labels = {}
+        for attr in prim.GetAttributes():
+            name = attr.GetName()
+            if not name.startswith("semantic:") or not name.endswith(":params:semanticData"):
+                continue
+            raw_value = attr.Get()
+            if raw_value is None:
+                continue
+            prefix = name[len("semantic:") : -len(":params:semanticData")]
+            type_attr = prim.GetAttribute(f"semantic:{prefix}:params:semanticType")
+            semantic_type = None
+            if type_attr is not None:
+                semantic_type = type_attr.Get()
+            if semantic_type is None:
+                semantic_type = self._semantic_type_from_attr_prefix(prefix)
+            semantic_labels[str(semantic_type)] = str(raw_value)
+        return semantic_labels
+
     def _gather_annotations(self, step: int) -> dict:
         """Collect 3D and 2D bounding boxes for prims in the stage.
 
@@ -518,7 +712,7 @@ class MobilityGenExtension(omni.ext.IExt):
         are defaulted to the prim name if no explicit metadata is present.
         This is a best-effort helper intended for synthetic data generation.
         """
-        annotations = {"bboxes2d": [], "bboxes3d": []}
+        annotations = {"bboxes2d": [], "bboxes3d": [], "classes": []}
         stage = get_stage()
         if stage is None:
             return annotations
@@ -570,12 +764,13 @@ class MobilityGenExtension(omni.ext.IExt):
                         for z in [min_pt[2], max_pt[2]]:
                             corners.append([float(x), float(y), float(z)])
 
-                prim_name = prim.GetName()
-                class_name = prim_name
+                semantic_labels = self._extract_semantic_labels_from_prim(prim)
+                class_name = semantic_labels.get("class", prim.GetName())
                 # 3D annotation entry
                 annotations["bboxes3d"].append({
                     "prim_path": prim.GetPath().pathString,
                     "class": class_name,
+                    "semantic_labels": semantic_labels,
                     "corners": corners,
                 })
 
@@ -611,11 +806,15 @@ class MobilityGenExtension(omni.ext.IExt):
                             annotations["bboxes2d"].append({
                                 "prim_path": prim.GetPath().pathString,
                                 "class": class_name,
+                                "semantic_labels": semantic_labels,
                                 "bbox": [xmin, ymin, xmax, ymax],
                             })
             except Exception:
                 continue
 
+        annotations["classes"] = sorted(
+            {entry.get("class", "") for entry in annotations["bboxes3d"] if entry.get("class", "")}
+        )
         return annotations
 
     def build_scenario(self):
@@ -635,8 +834,20 @@ class MobilityGenExtension(omni.ext.IExt):
 
             self.config = config
             self.scenario = await build_scenario_from_config(config)
+            try:
+                self.scenario.enable_rgb_rendering()
+            except Exception:
+                pass
 
             self.draw_occ_map()
+            try:
+                self._visualize_window.visible = True
+            except Exception:
+                pass
+            try:
+                self._sensor_preview_window.visible = True
+            except Exception:
+                pass
             
             world = get_world()
             await world.reset_async()

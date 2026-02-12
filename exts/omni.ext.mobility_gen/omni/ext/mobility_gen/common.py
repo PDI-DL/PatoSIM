@@ -191,7 +191,7 @@ class Module:
         Returns:
             _type_: The module's state dictionary, including only common types.
         """
-        return self.state_dict(prefix, exclude_tags=["rgb", "segmentation", "depth", "normals"])
+        return self.state_dict(prefix, exclude_tags=["rgb", "segmentation", "depth", "normals", "pointcloud"])
 
     def state_dict_rgb(self, prefix: str = ""):
         """Get the state dictionary, including only values tagged "rgb"
@@ -361,4 +361,3 @@ class Module:
         for k, v in self.named_buffers().items():
             if k in state_dict:
                 v.set_value(state_dict[k])
-

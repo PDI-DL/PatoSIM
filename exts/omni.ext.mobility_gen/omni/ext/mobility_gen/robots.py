@@ -59,7 +59,14 @@ from omni.ext.mobility_gen.sensors import (
     #nuscenes
 )
 # convenience imports for the Forklift builder
-from omni.ext.mobility_gen.sensors import Camera, Lidar, _quat_from_euler_xyz
+from omni.ext.mobility_gen.sensors import (
+    Camera,
+    Lidar,
+    _define_camera_prim,
+    _quat_from_euler_xyz,
+    _xform_orient_quat,
+    _xform_translate,
+)
 #lidar 
 
 # dentro da classe ForkliftC
@@ -435,10 +442,11 @@ class FourWheelRearSteerRobot_V1(Robot):
     physics_dt: float = 0.005
     z_offset: float = 0.25
 
+    # Third-person chase camera behind and above the forklift.
     chase_camera_base_path: str = "body"
-    chase_camera_x_offset: float = -5.0#
-    chase_camera_z_offset: float =  -10.0
-    chase_camera_tilt_angle: float = 60.0
+    chase_camera_x_offset: float = -4.0
+    chase_camera_z_offset: float = 2.0
+    chase_camera_tilt_angle: float = 35.0
 
     # ===== Occupancy Map (usado pelo builder) =====
     occupancy_map_radius: float = 1.5
@@ -451,7 +459,8 @@ class FourWheelRearSteerRobot_V1(Robot):
     front_camera_type = HawkCamera
     front_camera_base_path = "sensors/rgb_camera/front_camera"
     front_camera_rotation = (0., 0., 0.)
-    front_camera_translation = (10., 0., 10.)
+    # Front stereo camera mounted near the mast, facing forward.
+    front_camera_translation = (1.10, 0.0, 1.65)
 
     # ===== Teleop =====
     keyboard_linear_velocity_gain: float = 1.0
@@ -491,6 +500,11 @@ class FourWheelRearSteerRobot_V1(Robot):
                  articulation_view: _ArticulationView,
                  front_camera: Sensor | None = None):
         super().__init__(prim_path=prim_path, robot=robot, articulation_view=articulation_view, front_camera=front_camera)
+        # Explicit sensor handles used by extension preview/writer.
+        self.front_stereo: Optional[Sensor] = front_camera
+        self.fisheye_left: Optional[Camera] = None
+        self.fisheye_right: Optional[Camera] = None
+        self.lidar: Optional[Lidar] = None
         self.controller = RearDriveSimpleController(self.wheel_radius, self.max_steer_angle)
         self._rear_idx: np.ndarray | None = None
         self._steer_idx: np.ndarray | None = None
@@ -518,12 +532,68 @@ class FourWheelRearSteerRobot_V1(Robot):
         world.scene.add(view)
 
         camera = cls.build_front_camera(prim_path)
-        return cls(
+        instance = cls(
             prim_path=prim_path,
             robot=robot,
             articulation_view=view,
             front_camera=camera
         )
+        instance._attach_aux_sensors()
+        return instance
+
+    def _attach_aux_sensors(self):
+        """Attach fisheye pair + lidar and expose a single front stereo handle."""
+        self.front_stereo = self.front_camera
+
+        # Left fisheye
+        try:
+            left_path = os.path.join(self.prim_path, "sensors/fisheye_left")
+            _define_camera_prim(left_path)
+            self.fisheye_left = Camera(left_path, (640, 480))
+            _xform_translate(left_path, (1.05, -0.38, 1.58))
+            qw, qx, qy, qz = _quat_from_euler_xyz(0.0, 0.0, 28.0)
+            _xform_orient_quat(left_path, (qw, qx, qy, qz))
+        except Exception:
+            self.fisheye_left = None
+
+        # Right fisheye
+        try:
+            right_path = os.path.join(self.prim_path, "sensors/fisheye_right")
+            _define_camera_prim(right_path)
+            self.fisheye_right = Camera(right_path, (640, 480))
+            _xform_translate(right_path, (1.05, 0.38, 1.58))
+            qw, qx, qy, qz = _quat_from_euler_xyz(0.0, 0.0, -28.0)
+            _xform_orient_quat(right_path, (qw, qx, qy, qz))
+        except Exception:
+            self.fisheye_right = None
+
+        # Roof lidar
+        try:
+            lidar_path = os.path.join(self.prim_path, "sensors/lidar")
+            self.lidar = Lidar(lidar_path)
+            _xform_translate(lidar_path, (0.25, 0.0, 2.10))
+            self.lidar.enable_lidar()
+        except Exception:
+            self.lidar = None
+
+        # Ensure RGB streams are available for preview/recording.
+        try:
+            if hasattr(self.front_stereo, "left"):
+                self.front_stereo.left.enable_rgb_rendering()
+            if hasattr(self.front_stereo, "right"):
+                self.front_stereo.right.enable_rgb_rendering()
+        except Exception:
+            pass
+        try:
+            if self.fisheye_left is not None:
+                self.fisheye_left.enable_rgb_rendering()
+        except Exception:
+            pass
+        try:
+            if self.fisheye_right is not None:
+                self.fisheye_right.enable_rgb_rendering()
+        except Exception:
+            pass
 
     # ---------- Helpers ----------
     def _get_dof_names(self) -> List[str]:
@@ -1272,7 +1342,7 @@ class FourWheelRearSteerRobot_V1(Robot):
 #     chase_camera_z_offset: float = 7.3
 #     chase_camera_tilt_angle: float = 60.0
 
-@ROBOTS.register()
+#@ROBOTS.register()
 class JetbotRobot(WheeledRobot):
 
     physics_dt: float = 0.005
@@ -1320,7 +1390,7 @@ class JetbotRobot(WheeledRobot):
     wheel_radius: float = 0.03
     
 
-@ROBOTS.register()
+#@ROBOTS.register()
 class CarterRobot(WheeledRobot):
 
     physics_dt: float = 0.005
@@ -1368,7 +1438,7 @@ class CarterRobot(WheeledRobot):
     wheel_radius = 0.14
 
 
-@ROBOTS.register()
+#@ROBOTS.register()
 class H1Robot(IsaacLabRobot):
 
     physics_dt: float = 0.005
@@ -1421,7 +1491,7 @@ class H1Robot(IsaacLabRobot):
         )
 
 
-@ROBOTS.register()
+#@ROBOTS.register()
 class SpotRobot(IsaacLabRobot):
 
     physics_dt: float = 0.005
@@ -1470,7 +1540,7 @@ class SpotRobot(IsaacLabRobot):
     #Colocar aqui a nova definição do robo forklift# Preliminar faltam ajustes e testes#
     ####################################################################################
 
-@ROBOTS.register()
+#@ROBOTS.register()
 class ForkliftRobot(FourWheelRearSteerRobot_V1):
     """
     Concrete Forklift robot that attaches:
@@ -1644,7 +1714,7 @@ class ForkliftRobot(FourWheelRearSteerRobot_V1):
 
 
 
-@ROBOTS.register()
+#@ROBOTS.register()
 class ForkliftRobotV3(FourWheelRearSteerRobot_V1):
     """
     Versão V3 simplificada do Forklift:
@@ -1664,10 +1734,11 @@ class ForkliftRobotV3(FourWheelRearSteerRobot_V1):
     physics_dt: float = 0.005
     z_offset: float = 0.25
 
+    # Third-person chase camera behind and above the forklift.
     chase_camera_base_path: str = "body"
-    chase_camera_x_offset: float = -5.0
-    chase_camera_z_offset: float = -10.0
-    chase_camera_tilt_angle: float = 60.0
+    chase_camera_x_offset: float = -4.0
+    chase_camera_z_offset: float = 2.0
+    chase_camera_tilt_angle: float = 35.0
 
     # ===== Occupancy Map =====
     occupancy_map_radius: float = 1.5
@@ -1763,11 +1834,16 @@ class ForkliftRobotV3(FourWheelRearSteerRobot_V1):
         try:
             instance._rear_idx = getattr(base, "_rear_idx", None)
             instance._steer_idx = getattr(base, "_steer_idx", None)
+            instance.front_stereo = getattr(base, "front_stereo", base.front_camera)
+            instance.fisheye_left = getattr(base, "fisheye_left", None)
+            instance.fisheye_right = getattr(base, "fisheye_right", None)
+            instance.lidar = getattr(base, "lidar", None)
         except Exception:
             pass
 
-        # Anexa sensores auxiliares (stereo/front já veio de base.front_camera)
-        instance._attach_aux_sensors()
+        # Completa sensores auxiliares ausentes.
+        if instance.fisheye_left is None or instance.fisheye_right is None or instance.lidar is None:
+            instance._attach_aux_sensors()
 
         return instance
 
@@ -1805,14 +1881,6 @@ class ForkliftRobotV3(FourWheelRearSteerRobot_V1):
     def _attach_aux_sensors(self):
         """Anexa câmeras fisheye e Lidar em caminhos fixos sob o prim do robô."""
         # Paths baseados em self.prim_path para manter a cena organizada
-        try:
-            # Importações locais para evitar dependência forte em ambientes sem os assets
-            from omni.ext.mobility_gen.sensors import ZedStereoCamera as _ZedStereoCamera  # noqa: F401
-            from omni.ext.mobility_gen.sensors import _xform_translate, _xform_orient_quat
-        except Exception:
-            _xform_translate = None
-            _xform_orient_quat = None
-
         # Já temos self.front_camera (ZedStereoCamera) via build_front_camera,
         # mas expomos também em self.front_stereo para ficar explícito.
         self.front_stereo = self.front_camera
@@ -1820,28 +1888,22 @@ class ForkliftRobotV3(FourWheelRearSteerRobot_V1):
         # Câmera fisheye esquerda
         try:
             left_path = os.path.join(self.prim_path, "sensors/fisheye_left")
+            _define_camera_prim(left_path)
             self.fisheye_left = Camera(left_path, (640, 480))
-            if _xform_translate is not None and _xform_orient_quat is not None:
-                try:
-                    _xform_translate(left_path, (1.0, -0.45, 1.2))
-                    qw, qx, qy, qz = _quat_from_euler_xyz(0.0, 0.0, 20.0)
-                    _xform_orient_quat(left_path, (qw, qx, qy, qz))
-                except Exception:
-                    pass
+            _xform_translate(left_path, (1.05, -0.38, 1.58))
+            qw, qx, qy, qz = _quat_from_euler_xyz(0.0, 0.0, 28.0)
+            _xform_orient_quat(left_path, (qw, qx, qy, qz))
         except Exception:
             self.fisheye_left = None
 
         # Câmera fisheye direita
         try:
             right_path = os.path.join(self.prim_path, "sensors/fisheye_right")
+            _define_camera_prim(right_path)
             self.fisheye_right = Camera(right_path, (640, 480))
-            if _xform_translate is not None and _xform_orient_quat is not None:
-                try:
-                    _xform_translate(right_path, (1.0, 0.45, 1.2))
-                    qw, qx, qy, qz = _quat_from_euler_xyz(0.0, 0.0, -20.0)
-                    _xform_orient_quat(right_path, (qw, qx, qy, qz))
-                except Exception:
-                    pass
+            _xform_translate(right_path, (1.05, 0.38, 1.58))
+            qw, qx, qy, qz = _quat_from_euler_xyz(0.0, 0.0, -28.0)
+            _xform_orient_quat(right_path, (qw, qx, qy, qz))
         except Exception:
             self.fisheye_right = None
 
@@ -1849,6 +1911,7 @@ class ForkliftRobotV3(FourWheelRearSteerRobot_V1):
         try:
             lidar_path = os.path.join(self.prim_path, "sensors/lidar")
             self.lidar = Lidar(lidar_path)
+            _xform_translate(lidar_path, (0.25, 0.0, 2.10))
             try:
                 self.lidar.enable_lidar()
             except Exception:
@@ -1858,11 +1921,10 @@ class ForkliftRobotV3(FourWheelRearSteerRobot_V1):
 
         # Garante que câmeras tenham RGB habilitado para gravação
         try:
-            if isinstance(self.front_stereo, ZedStereoCamera):
-                if hasattr(self.front_stereo, "left"):
-                    self.front_stereo.left.enable_rgb_rendering()
-                if hasattr(self.front_stereo, "right"):
-                    self.front_stereo.right.enable_rgb_rendering()
+            if hasattr(self.front_stereo, "left"):
+                self.front_stereo.left.enable_rgb_rendering()
+            if hasattr(self.front_stereo, "right"):
+                self.front_stereo.right.enable_rgb_rendering()
         except Exception:
             pass
         try:

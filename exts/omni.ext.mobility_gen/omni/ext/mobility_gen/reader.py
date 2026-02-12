@@ -47,12 +47,20 @@ class Reader:
         self.depth_folders = glob.glob(os.path.join(self.recording_path, "state", "depth", "*"))
         self.normals_folders = glob.glob(os.path.join(self.recording_path, "state", "normals", "*"))
         self.pointcloud_folders = glob.glob(os.path.join(self.recording_path, "state", "pointcloud", "*"))
+        self.annotation_paths = glob.glob(os.path.join(self.recording_path, "state", "annotations", "*.json"))
 
         self.rgb_names = [os.path.basename(folder) for folder in self.rgb_folders]
         self.segmentation_names = [os.path.basename(folder) for folder in self.segmentation_folders]
         self.depth_names = [os.path.basename(folder) for folder in self.depth_folders]
         self.normals_names = [os.path.basename(folder) for folder in self.normals_folders]
         self.pointcloud_names = [os.path.basename(folder) for folder in self.pointcloud_folders]
+        self.annotation_steps = sorted(
+            [
+                int(os.path.basename(path).split(".")[0])
+                for path in self.annotation_paths
+                if os.path.basename(path).split(".")[0].isdigit()
+            ]
+        )
 
     def read_config(self) -> Config:
         with open(os.path.join(self.recording_path, "config.json"), 'r') as f:
@@ -175,6 +183,26 @@ class Reader:
         step = self.steps[index]
         state_dict = np.load(os.path.join(self.recording_path, "state", "common", f"{step:08d}.npy"), allow_pickle=True).item()
         return state_dict
+
+    def read_annotations(self, index: int):
+        step = self.steps[index]
+        ann_path = os.path.join(self.recording_path, "state", "annotations", f"{step:08d}.json")
+        if not os.path.exists(ann_path):
+            return None
+        try:
+            with open(ann_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
+
+    def read_semantic_annotations(self, index: int):
+        annotations = self.read_annotations(index)
+        if not isinstance(annotations, dict):
+            return None
+        semantic = annotations.get("semantic")
+        if isinstance(semantic, dict):
+            return semantic
+        return None
 
     def read_state_dict(self, index: int):
 

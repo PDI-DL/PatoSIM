@@ -32,9 +32,16 @@ if os.path.isdir(_PATH_PLANNER) and _PATH_PLANNER not in sys.path:
     sys.path.insert(0, _PATH_PLANNER)
 
 try:
+    import mobility_gen_path_planner as _planner_pkg
     from mobility_gen_path_planner import generate_paths as _generate_paths
+    try:
+        _planner_backend = "cpp" if getattr(_planner_pkg, "_C", None) is not None else "python"
+    except Exception:
+        _planner_backend = "python"
 except Exception as exc:
+    _planner_pkg = None
     _generate_paths = None
+    _planner_backend = "unavailable"
     warnings.warn(
         f"mobility_gen_path_planner is unavailable ({exc}). "
         "RandomPathFollowingScenario will use robot planner fallback when possible.",
@@ -46,6 +53,7 @@ from omni.ext.mobility_gen.utils.registry import Registry
 from omni.ext.mobility_gen.common import Module, Buffer
 from omni.ext.mobility_gen.robots import Robot
 from omni.ext.mobility_gen.occupancy_map import OccupancyMap
+from omni.ext.mobility_gen.types import Point2d
 
 import omni.ext.mobility_gen.pose_samplers as pose_samplers
 import omni.ext.mobility_gen.inputs as inputs
@@ -78,7 +86,7 @@ class Scenario(Module):
 
 SCENARIOS = Registry[Scenario]()
 
-
+#Naofunciona bem ainda
 @SCENARIOS.register()
 class RandomPathFollowingScenarioRearSteer(Scenario):
     """
@@ -105,49 +113,144 @@ class RandomPathFollowingScenarioRearSteer(Scenario):
         # limite de direção (rad)
         self._delta_lim = float(getattr(self.robot, "effective_steer_limit",
                                   getattr(self.robot, "max_steer_angle", 0.6)))
+        # limite prático para path following (evita esterço exagerado em manobras automáticas)
+        self._delta_cmd_lim = float(
+            np.clip(
+                getattr(self.robot, "path_following_max_steer_command", 0.45),
+                0.12,
+                self._delta_lim,
+            )
+        )
 
         # filtragem leve para delta (evita chattering)
         self._delta = 0.0
         self._alpha_delta = 0.35  # 0..1 (0=mais suave)
+        self._delta_rate_limit = float(getattr(self.robot, "path_following_delta_rate_limit", 1.2))
+        self._lookahead_min = float(getattr(self.robot, "path_following_lookahead_min", 0.6))
+        self._lookahead_max = float(getattr(self.robot, "path_following_lookahead_max", 2.5))
+        self._planner_min_goal_distance_m = float(
+            getattr(self.robot, "path_following_min_goal_distance_m", 4.0)
+        )
+        self._path_smoothing_iterations = int(
+            getattr(self.robot, "path_following_smoothing_iterations", 2)
+        )
+        self._safety_points = int(getattr(self.robot, "path_following_safety_points", 8))
+        self._safety_margin = float(getattr(self.robot, "path_following_safety_margin", 0.35))
+        self._max_curve_speed_factor = float(
+            getattr(self.robot, "path_following_max_curve_speed_factor", 1.0)
+        )
+        self._min_curve_speed_factor = float(
+            getattr(self.robot, "path_following_min_curve_speed_factor", 0.45)
+        )
+        self._min_v_cmd = float(getattr(self.robot, "path_following_min_speed", 0.6))
+        self._last_v_cmd = 0.0
+        self._blocked_steps = 0
+        self._planner_info_printed = False
 
     # ---------- utilidades ----------
+    def _planner_backend_info(self) -> str:
+        if _planner_backend == "cpp":
+            return "mobility_gen_path_planner (C++ backend)"
+        if _planner_backend == "python":
+            return "mobility_gen_path_planner (python wrapper)"
+        return "planner unavailable"
+
+    def _smooth_path(self, path_world: np.ndarray) -> np.ndarray:
+        if path_world is None or len(path_world) < 3:
+            return path_world
+        out = path_world.astype(np.float32)
+        for _ in range(max(0, self._path_smoothing_iterations)):
+            if len(out) < 3:
+                break
+            refined = [out[0]]
+            for i in range(len(out) - 1):
+                p = out[i]
+                q = out[i + 1]
+                refined.append(0.75 * p + 0.25 * q)
+                refined.append(0.25 * p + 0.75 * q)
+            refined.append(out[-1])
+            out = np.asarray(refined, dtype=np.float32)
+        # remove pontos quase idênticos
+        filtered = [out[0]]
+        for p in out[1:]:
+            if np.linalg.norm(p - filtered[-1]) > 0.02:
+                filtered.append(p)
+        return np.asarray(filtered, dtype=np.float32)
+
+    def _choose_endpoint(self, output) -> Tuple[int, int]:
+        visited = output.visited
+        ys, xs = np.where(visited != 0)
+        if len(ys) == 0:
+            raise RuntimeError("Path planner returned no reachable endpoints.")
+
+        dists = output.distance_to_start[ys, xs]
+        min_px = max(4.0, self._planner_min_goal_distance_m / max(self.occupancy_map.resolution, 1e-6))
+        valid = dists >= min_px
+        if np.any(valid):
+            ys = ys[valid]
+            xs = xs[valid]
+            dists = dists[valid]
+
+        # Prefere endpoints mais longos para evitar caminhos curtos/instáveis
+        order = np.argsort(dists)
+        tail_start = int(0.6 * len(order))
+        candidate_idx = order[tail_start:] if tail_start < len(order) else order
+        choice = int(np.random.choice(candidate_idx))
+        return int(ys[choice]), int(xs[choice])
+
+    def _is_segment_free(self, a_xy: np.ndarray, b_xy: np.ndarray) -> bool:
+        for t in np.linspace(0.0, 1.0, max(2, self._safety_points)):
+            p = (1.0 - t) * a_xy + t * b_xy
+            q = Point2d(x=float(p[0]), y=float(p[1]))
+            if not self.collision_occupancy_map.check_world_point_in_freespace(q):
+                return False
+        return True
+
+    def _compute_dynamic_lookahead(self, heading_error: float) -> float:
+        lookahead = self._lookahead + 0.5 * abs(self._last_v_cmd) - 0.35 * abs(heading_error)
+        return float(np.clip(lookahead, self._lookahead_min, self._lookahead_max))
+
     def _set_random_target_path(self):
         """Gera um caminho aleatório a partir da pose atual."""
-        # If the robot exposes a convenience planner, prefer it (it will
-        # call mobility_gen_path_planner internally). This keeps the
-        # planner integration centralized in the Robot class. Otherwise,
-        # fall back to the previous local planning logic.
-        try:
-            if hasattr(self.robot, 'plan_path_from_occupancy_map'):
-                path_list = self.robot.plan_path_from_occupancy_map(self.occupancy_map)
-                # path_list is list[(x,y)] -> convert to numpy array shape (N,2)
-                path = np.asarray(path_list, dtype=np.float32)
-                self.target_path.set_value(path)
-                self._helper = PathHelper(path)
-                return
-        except Exception:
-            # fall back to local planner below
-            pass
+        if not self._planner_info_printed:
+            print(f"[RandomPathFollowingRearSteer] planner backend: {self._planner_backend_info()}")
+            self._planner_info_printed = True
 
+        # Caminho primário: planner C++ (via mobility_gen_path_planner)
+        # Fallback: planner do robô (quando disponível)
         current_pose = self.robot.get_pose_2d()
-
         start_px = self.occupancy_map.world_to_pixel_numpy(
-            np.array([[current_pose.x, current_pose.y]])
+            np.array([[current_pose.x, current_pose.y]], dtype=np.float32)
         )
         freespace = self.buffered_occupancy_map.freespace_mask()
-        start = (start_px[0, 1], start_px[0, 0])
+        start = (int(start_px[0, 1]), int(start_px[0, 0]))  # planner usa (row, col) = (y, x)
 
-        if _generate_paths is None:
-            raise RuntimeError(
-                "mobility_gen_path_planner is not available and robot fallback planner failed. "
-                "Install path_planner with Isaac python (../app/python.sh -m pip install -e path_planner)."
-            )
+        try:
+            if _generate_paths is not None:
+                output = _generate_paths(start, freespace)
+                end = self._choose_endpoint(output)
+                path_px = output.unroll_path(end)
+                path_px = path_px[:, ::-1]  # (y,x) -> (x,y)
+                path = self.occupancy_map.pixel_to_world_numpy(path_px)
+            elif hasattr(self.robot, "plan_path_from_occupancy_map"):
+                path_list = self.robot.plan_path_from_occupancy_map(self.occupancy_map)
+                path = np.asarray(path_list, dtype=np.float32)
+            else:
+                raise RuntimeError(
+                    "mobility_gen_path_planner is unavailable and no robot fallback planner was found. "
+                    "Install with Isaac python: ./app/python.sh -m pip install -e path_planner"
+                )
+        except Exception as exc:
+            if hasattr(self.robot, "plan_path_from_occupancy_map"):
+                path_list = self.robot.plan_path_from_occupancy_map(self.occupancy_map)
+                path = np.asarray(path_list, dtype=np.float32)
+                print(f"[RandomPathFollowingRearSteer] planner fallback via robot after error: {exc}")
+            else:
+                raise
 
-        output = _generate_paths(start, freespace)
-        end = output.sample_random_end_point()
-        path = output.unroll_path(end)
-        path = path[:, ::-1]  # (y,x) -> (x,y)
-        path = self.occupancy_map.pixel_to_world_numpy(path)
+        path = self._smooth_path(path.astype(np.float32))
+        if path is None or len(path) < 2:
+            raise RuntimeError("Generated path is invalid (needs at least 2 points).")
 
         self.target_path.set_value(path)
         self._helper = PathHelper(path)
@@ -162,6 +265,8 @@ class RandomPathFollowingScenarioRearSteer(Scenario):
         # novo caminho e estado
         self._set_random_target_path()
         self._delta = 0.0
+        self._last_v_cmd = 0.0
+        self._blocked_steps = 0
         self.is_alive = True
 
     # ---------- passo ----------
@@ -177,11 +282,23 @@ class RandomPathFollowingScenarioRearSteer(Scenario):
             self.is_alive = False
             return False
 
-        # ponto mais próximo e ponto de lookahead
+        # ponto mais próximo e ponto de lookahead dinâmico
         path = self.target_path.get_value()
         pt_robot = np.array([current_pose.x, current_pose.y], dtype=np.float32)
         _, s_near, _, _ = self._helper.find_nearest(pt_robot)
-        pt_target = self._helper.get_point_by_distance(distance=s_near + self._lookahead)
+        if s_near is None:
+            self._set_random_target_path()
+            return True
+        pt_target_near = self._helper.get_point_by_distance(distance=s_near + self._lookahead)
+        v_robot = np.array([np.cos(current_pose.theta), np.sin(current_pose.theta)], dtype=np.float32)
+        v_targ_near = (pt_target_near - pt_robot).astype(np.float32)
+        n_near = float(np.linalg.norm(v_targ_near))
+        if n_near > 1e-6:
+            d_theta_near = float(vector_angle(v_robot, v_targ_near / n_near))
+        else:
+            d_theta_near = 0.0
+        lookahead = self._compute_dynamic_lookahead(d_theta_near)
+        pt_target = self._helper.get_point_by_distance(distance=s_near + lookahead)
 
         # condição de chegada
         dist_to_goal = float(np.linalg.norm(pt_robot - path[-1]))
@@ -193,7 +310,6 @@ class RandomPathFollowingScenarioRearSteer(Scenario):
             return True
 
         # orientação atual e rumo até alvo
-        v_robot = np.array([np.cos(current_pose.theta), np.sin(current_pose.theta)], dtype=np.float32)
         v_targ = (pt_target - pt_robot).astype(np.float32)
         n = float(np.linalg.norm(v_targ))
         if n < 1e-6:
@@ -204,20 +320,47 @@ class RandomPathFollowingScenarioRearSteer(Scenario):
             v_targ_unit = v_targ / n
             d_theta = vector_angle(v_robot, v_targ_unit)  # [-pi, pi], positivo = alvo à esquerda
 
-            # política simples: se muito “de costas”, pare para corrigir
-            v_cmd = 0.0 if abs(d_theta) > self._fwd_ang_th else self._v_nom
-
             # mapeia erro angular direto para ângulo de direção traseiro
-            delta_raw = self._k_ang * d_theta
-            delta_cmd = float(np.clip(delta_raw, -self._delta_lim, self._delta_lim))
+            delta_target = float(np.clip(self._k_ang * d_theta, -self._delta_cmd_lim, self._delta_cmd_lim))
 
-            # filtragem (evita oscilações no drive da junta)
-            self._delta = (1.0 - self._alpha_delta) * self._delta + self._alpha_delta * delta_cmd
+            # filtragem + limitação da taxa de esterço (curva mais suave)
+            delta_filtered = (1.0 - self._alpha_delta) * self._delta + self._alpha_delta * delta_target
+            max_delta_step = max(1e-4, self._delta_rate_limit * float(step_size))
+            delta_step = float(np.clip(delta_filtered - self._delta, -max_delta_step, +max_delta_step))
+            self._delta = float(np.clip(self._delta + delta_step, -self._delta_cmd_lim, +self._delta_cmd_lim))
             delta_cmd = self._delta
+
+            # velocidade adaptativa: reduz quando há grande heading error / grande esterço
+            heading_factor = max(0.0, math.cos(abs(float(d_theta))))
+            steer_ratio = min(1.0, abs(delta_cmd) / (self._delta_cmd_lim + 1e-6))
+            curve_factor = self._max_curve_speed_factor - (
+                (self._max_curve_speed_factor - self._min_curve_speed_factor) * steer_ratio
+            )
+            v_cmd = self._v_nom * heading_factor * curve_factor
+            if v_cmd > 0.0:
+                v_cmd = max(self._min_v_cmd, v_cmd)
+            if abs(d_theta) > self._fwd_ang_th:
+                v_cmd = 0.0
+
+            # safety gate: se segmento à frente não está livre, reduz/paralisa e replaneja se persistir
+            ahead_dist = max(self._safety_margin, abs(self._last_v_cmd) * 0.8 + self._safety_margin)
+            ahead_target = pt_robot + ahead_dist * v_robot
+            safe_corridor = self._is_segment_free(pt_robot, pt_target) and self._is_segment_free(pt_robot, ahead_target)
+            if not safe_corridor:
+                self._blocked_steps += 1
+                v_cmd *= 0.35
+                if v_cmd < 0.08:
+                    v_cmd = 0.0
+                if self._blocked_steps > 20:
+                    self._set_random_target_path()
+                    self._blocked_steps = 0
+            else:
+                self._blocked_steps = 0
 
         # publica ação e aplica
         self.robot.action.set_value(np.array([v_cmd, delta_cmd], dtype=np.float32))
         self.robot.write_action(step_size)
+        self._last_v_cmd = float(v_cmd)
         return True
 
 #@SCENARIOS.register()
@@ -549,7 +692,7 @@ class KeyboardTeleoperationScenario_forklift(Scenario):
         self.update_state()
         return True
 
-@SCENARIOS.register()
+#@SCENARIOS.register()
 class KeyboardTeleoperationScenario(Scenario):
 
     def __init__(self, 
@@ -618,7 +761,7 @@ class GamepadTeleoperationScenario(Scenario):
         return True
     
 
-@SCENARIOS.register()
+#@SCENARIOS.register()
 class RandomAccelerationScenario(Scenario):
 
     def __init__(self, 
@@ -743,5 +886,3 @@ class RandomPathFollowingScenario(Scenario):
         self.robot.write_action(step_size=step_size)
 
         return self.is_alive
-
-
