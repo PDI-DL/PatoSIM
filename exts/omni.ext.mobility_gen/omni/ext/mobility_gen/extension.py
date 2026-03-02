@@ -37,6 +37,7 @@ from omni.ext.mobility_gen.robots import ROBOTS
 from omni.ext.mobility_gen.config import Config
 from omni.ext.mobility_gen.build import build_scenario_from_config
 
+dev_scene_path = "/home/pdi_4/Documents/Documentos/bevlog-isaac/mundo_pallets.usd"  # --- DEV ---
 
 if "MOBILITY_GEN_DATA" in os.environ:
     DATA_DIR = os.environ['MOBILITY_GEN_DATA']
@@ -69,6 +70,9 @@ class MobilityGenExtension(omni.ext.IExt):
         self.config: Config = None
 
         self.count = 0
+        self._physics_callback_name = f"scenario_physics_{id(self)}"
+        self._physics_callback_registered = False
+        self._physics_callback_world = None
 
         self.scenario_path: str | None = None
         self.cached_stage_path: str | None = None
@@ -82,10 +86,16 @@ class MobilityGenExtension(omni.ext.IExt):
         # Image provider for occupancy map preview
         self._occupancy_map_image_provider = omni.ui.ByteImageProvider()
         self._sensor_preview_image_provider = omni.ui.ByteImageProvider()
+        self._lidar_preview_image_provider = omni.ui.ByteImageProvider()
         self._sensor_preview_camera_names = []
         self._sensor_preview_selected_index = 0
         self._sensor_preview_latest_rgb = {}
         self._sensor_preview_latest_camera_map = OrderedDict()
+        self._sensor_preview_latest_pointcloud = {}
+        self._sensor_pose_text = "Sensor poses: waiting for scenario..."
+        self._sensor_pose_label = None
+        self._preview_update_interval_frames = 2
+        self._preview_frame_counter = 0
 
         # Visualization window for occupancy map
         self._visualize_window = omni.ui.Window("MobilityGen - Occupancy Map", width=300, height=300)
@@ -98,7 +108,10 @@ class MobilityGenExtension(omni.ext.IExt):
             self._occ_map_frame.set_build_fn(self.build_occ_map_frame)
 
         # Low-resolution live preview window for RGB camera sensors.
-        self._sensor_preview_window = omni.ui.Window("MobilityGen - Sensor Preview", width=330, height=235)
+        self._sensor_preview_target_width = 320
+        self._sensor_preview_target_height = 180
+        self._lidar_preview_target_size = 220
+        self._sensor_preview_window = omni.ui.Window("MobilityGen - Sensor Preview", width=500, height=560)
         try:
             self._sensor_preview_window.visible = True
         except Exception:
@@ -107,8 +120,23 @@ class MobilityGenExtension(omni.ext.IExt):
             self._sensor_preview_frame = ui.Frame()
             self._sensor_preview_frame.set_build_fn(self._build_sensor_preview_frame)
         try:
-            blank = np.zeros((144, 256, 4), dtype=np.uint8)
-            self._sensor_preview_image_provider.set_bytes_data(list(blank.tobytes()), [256, 144])
+            blank = np.zeros(
+                (self._sensor_preview_target_height, self._sensor_preview_target_width, 4),
+                dtype=np.uint8,
+            )
+            self._sensor_preview_image_provider.set_bytes_data(
+                list(blank.tobytes()),
+                [self._sensor_preview_target_width, self._sensor_preview_target_height],
+            )
+            blank_lidar = np.zeros(
+                (self._lidar_preview_target_size, self._lidar_preview_target_size, 4),
+                dtype=np.uint8,
+            )
+            blank_lidar[:, :, 3] = 255
+            self._lidar_preview_image_provider.set_bytes_data(
+                list(blank_lidar.tobytes()),
+                [self._lidar_preview_target_size, self._lidar_preview_target_size],
+            )
         except Exception:
             pass
 
@@ -202,24 +230,48 @@ class MobilityGenExtension(omni.ext.IExt):
             self._occ_map_frame.rebuild()
 
     def _build_sensor_preview_frame(self):
-        with ui.VStack():
-            with ui.HStack():
+        with ui.VStack(spacing=4, height=0):
+            with ui.HStack(height=26):
                 ui.Label("Camera Preview")
                 if len(self._sensor_preview_camera_names) > 0:
                     idx = min(self._sensor_preview_selected_index, len(self._sensor_preview_camera_names) - 1)
                     combo = ui.ComboBox(idx, *self._sensor_preview_camera_names)
                     self._sensor_preview_combo = combo
                     try:
-                        combo.model.add_value_changed_fn(self._on_sensor_preview_camera_changed)
+                        combo.model.get_item_value_model().add_value_changed_fn(
+                            self._on_sensor_preview_camera_changed
+                        )
                     except Exception:
                         pass
                 else:
                     self._sensor_preview_combo = None
                     ui.Label("(waiting for RGB data)")
-            with ui.HStack():
+            with ui.HStack(height=20):
                 ui.Label("Resolution")
-                ui.Label("256x144")
-            ui.ImageWithProvider(self._sensor_preview_image_provider)
+                ui.Label(f"{self._sensor_preview_target_width}x{self._sensor_preview_target_height}")
+            with ui.HStack(height=self._sensor_preview_target_height + 10):
+                ui.Spacer(width=6)
+                ui.ImageWithProvider(
+                    self._sensor_preview_image_provider,
+                    width=self._sensor_preview_target_width,
+                    height=self._sensor_preview_target_height,
+                )
+                ui.Spacer(width=6)
+            ui.Spacer(height=6)
+            with ui.HStack(height=22):
+                ui.Label("LiDAR Preview (Top-Down)")
+                ui.Spacer(width=8)
+                ui.Label(f"{self._lidar_preview_target_size}x{self._lidar_preview_target_size}")
+            with ui.HStack(height=self._lidar_preview_target_size + 8):
+                ui.Spacer(width=6)
+                ui.ImageWithProvider(
+                    self._lidar_preview_image_provider,
+                    width=self._lidar_preview_target_size,
+                    height=self._lidar_preview_target_size,
+                )
+                ui.Spacer(width=6)
+            ui.Label("Sensor Poses Relative To Robot")
+            self._sensor_pose_label = ui.Label(self._sensor_pose_text)
 
     def _on_sensor_preview_camera_changed(self, *_args):
         try:
@@ -269,15 +321,170 @@ class MobilityGenExtension(omni.ext.IExt):
             arr = np.concatenate([arr, alpha], axis=2)
         return arr
 
+    def _compose_stereo_preview(self, left_image, right_image):
+        """Compose left/right stereo images into a single side-by-side preview."""
+        if left_image is None and right_image is None:
+            return None
+
+        target_w = int(self._sensor_preview_target_width)
+        target_h = int(self._sensor_preview_target_height)
+        half_w = max(1, target_w // 2)
+
+        left_rgba = self._resize_rgb_for_preview(
+            left_image, max_width=half_w - 4, max_height=target_h
+        )
+        right_rgba = self._resize_rgb_for_preview(
+            right_image, max_width=half_w - 4, max_height=target_h
+        )
+
+        if left_rgba is None and right_rgba is None:
+            return None
+
+        canvas = np.zeros((target_h, target_w, 4), dtype=np.uint8)
+        canvas[:, :, 3] = 255
+
+        def _paste(img, x0, x1):
+            if img is None:
+                return
+            ih, iw = img.shape[:2]
+            if ih <= 0 or iw <= 0:
+                return
+            dst_w = max(1, x1 - x0)
+            px = x0 + max(0, (dst_w - iw) // 2)
+            py = max(0, (target_h - ih) // 2)
+            px2 = min(target_w, px + iw)
+            py2 = min(target_h, py + ih)
+            canvas[py:py2, px:px2, :] = img[: py2 - py, : px2 - px, :]
+
+        split = half_w
+        _paste(left_rgba, 0, split)
+        _paste(right_rgba, split, target_w)
+        canvas[:, max(0, split - 1):min(target_w, split + 1), :3] = 80
+        return canvas
+
     def _build_sensor_preview_camera_map(self, rgb_state: dict):
         """Group raw RGB buffers into user-facing camera previews."""
         camera_map = OrderedDict()
         if not isinstance(rgb_state, dict):
             return camera_map
 
+        # Prefer explicit robot sensor handles first (stable even when the stage
+        # has extra camera prims with similar names).
+        try:
+            scenario = getattr(self, "scenario", None)
+            robot = getattr(scenario, "robot", None)
+        except Exception:
+            robot = None
+
+        def _read_rgb(sensor_obj):
+            if sensor_obj is None:
+                return None
+            try:
+                buf = getattr(sensor_obj, "rgb", None)
+                if buf is None:
+                    return None
+                if hasattr(buf, "get_value"):
+                    return buf.get_value()
+                return buf
+            except Exception:
+                return None
+
+        def _preview_score_local(image) -> float:
+            try:
+                arr = np.asarray(image)
+                if arr.ndim != 3:
+                    return -1.0
+                h, w = arr.shape[:2]
+                if h <= 0 or w <= 0:
+                    return -1.0
+                step_h = max(1, h // 32)
+                step_w = max(1, w // 32)
+                sample = arr[::step_h, ::step_w, :3]
+                return float(np.mean(sample))
+            except Exception:
+                return -1.0
+
+        def _best_visible(*images):
+            best = None
+            best_score = -1.0
+            for image in images:
+                if image is None:
+                    continue
+                score = _preview_score_local(image)
+                if score > best_score:
+                    best_score = score
+                    best = image
+            return best
+
+        if robot is not None:
+            front = getattr(robot, "front_stereo", None)
+            if front is None:
+                front = getattr(robot, "front_camera", None)
+
+            front_left = None
+            front_right = None
+            front_single = None
+            try:
+                if hasattr(front, "left"):
+                    front_left = _read_rgb(front.left)
+                if hasattr(front, "right"):
+                    front_right = _read_rgb(front.right)
+                front_single = _read_rgb(front)
+            except Exception:
+                pass
+            front_img = _best_visible(front_left, front_right, front_single)
+            front_stereo_pair = self._compose_stereo_preview(front_left, front_right)
+
+            left_img = _read_rgb(getattr(robot, "fisheye_left", None))
+            right_img = _read_rgb(getattr(robot, "fisheye_right", None))
+            left_score = _preview_score_local(left_img)
+            right_score = _preview_score_local(right_img)
+            front_score = _preview_score_local(front_img)
+
+            # Discard almost-black frames from direct handles so we can fallback
+            # to rgb_state key matching below.
+            if left_score < 2.0:
+                left_img = None
+            if right_score < 2.0:
+                right_img = None
+            if front_score < 2.0:
+                front_img = None
+
+            if left_img is not None:
+                camera_map["fisheye_left"] = left_img
+            if right_img is not None:
+                camera_map["fisheye_right"] = right_img
+            if front_stereo_pair is not None:
+                camera_map["front_stereo"] = front_stereo_pair
+            elif front_img is not None:
+                camera_map["front_stereo"] = front_img
+            if front_left is not None:
+                camera_map["front_stereo_left"] = front_left
+            if front_right is not None:
+                camera_map["front_stereo_right"] = front_right
+
+            if len(camera_map) > 0:
+                return camera_map
+
         valid_items = [(k, v) for k, v in rgb_state.items() if v is not None]
         if len(valid_items) == 0:
             return camera_map
+
+        def _preview_score(image) -> float:
+            try:
+                arr = np.asarray(image)
+                if arr.ndim != 3:
+                    return -1.0
+                h, w = arr.shape[:2]
+                if h <= 0 or w <= 0:
+                    return -1.0
+                # downsample for cheap scoring
+                step_h = max(1, h // 32)
+                step_w = max(1, w // 32)
+                sample = arr[::step_h, ::step_w, :3]
+                return float(np.mean(sample))
+            except Exception:
+                return -1.0
 
         def _find_camera(substrings: list[str], prefer_left: bool = False):
             matches = []
@@ -287,11 +494,28 @@ class MobilityGenExtension(omni.ext.IExt):
                     matches.append((key, value))
             if not matches:
                 return None
+            ordered = matches
             if prefer_left:
+                left_first = []
+                others = []
                 for key, value in matches:
-                    if ".left." in key.lower() or "camera_left" in key.lower() or "left" in key.lower():
-                        return value
-            return matches[0][1]
+                    lower = key.lower()
+                    if ".left." in lower or "camera_left" in lower or "left" in lower:
+                        left_first.append((key, value))
+                    else:
+                        others.append((key, value))
+                ordered = left_first + others
+
+            # Prefer the candidate with visible content to avoid black preview when
+            # duplicated streams exist and one of them is invalid/dark.
+            best_value = None
+            best_score = -1.0
+            for _key, value in ordered:
+                score = _preview_score(value)
+                if score > best_score:
+                    best_score = score
+                    best_value = value
+            return best_value
 
         def _first_non_none(*values):
             for value in values:
@@ -329,7 +553,19 @@ class MobilityGenExtension(omni.ext.IExt):
 
     def _refresh_sensor_preview(self, camera_map: dict):
         if not isinstance(camera_map, dict):
+            self._update_sensor_pose_preview_text()
             return
+
+        # Read current ComboBox selection on every refresh to avoid stale index
+        # when UI callbacks are skipped by the host.
+        try:
+            combo = getattr(self, "_sensor_preview_combo", None)
+            if combo is not None:
+                idx = int(combo.model.get_item_value_model().get_value_as_int())
+                if idx >= 0:
+                    self._sensor_preview_selected_index = idx
+        except Exception:
+            pass
 
         camera_names = list(camera_map.keys())
         if camera_names != self._sensor_preview_camera_names:
@@ -346,19 +582,263 @@ class MobilityGenExtension(omni.ext.IExt):
                 pass
 
         if len(self._sensor_preview_camera_names) == 0:
-            blank = np.zeros((144, 256, 4), dtype=np.uint8)
-            self._sensor_preview_image_provider.set_bytes_data(list(blank.tobytes()), [256, 144])
+            blank = np.zeros(
+                (self._sensor_preview_target_height, self._sensor_preview_target_width, 4),
+                dtype=np.uint8,
+            )
+            self._sensor_preview_image_provider.set_bytes_data(
+                list(blank.tobytes()),
+                [self._sensor_preview_target_width, self._sensor_preview_target_height],
+            )
+            self._update_sensor_pose_preview_text()
             return
 
+        self._sensor_preview_selected_index = min(
+            self._sensor_preview_selected_index,
+            len(self._sensor_preview_camera_names) - 1,
+        )
         selected_name = self._sensor_preview_camera_names[self._sensor_preview_selected_index]
         selected_image = camera_map.get(selected_name)
-        preview_rgba = self._resize_rgb_for_preview(selected_image, max_width=256, max_height=144)
+        preview_rgba = self._resize_rgb_for_preview(
+            selected_image,
+            max_width=self._sensor_preview_target_width,
+            max_height=self._sensor_preview_target_height,
+        )
         if preview_rgba is None:
+            self._update_sensor_pose_preview_text()
             return
         self._sensor_preview_image_provider.set_bytes_data(
             list(preview_rgba.tobytes()),
             [int(preview_rgba.shape[1]), int(preview_rgba.shape[0])],
         )
+        self._update_sensor_pose_preview_text()
+
+    def _build_lidar_preview_rgba(self, pointcloud_state: dict):
+        size = int(getattr(self, "_lidar_preview_target_size", 220))
+        canvas = np.zeros((size, size, 4), dtype=np.uint8)
+        canvas[:, :, 3] = 255
+        canvas[:, :, :3] = 26
+
+        # Draw axis guides and robot center.
+        mid = size // 2
+        canvas[mid, :, :3] = 55
+        canvas[:, mid, :3] = 55
+        robot_half = 3
+        canvas[max(0, mid - robot_half):min(size, mid + robot_half + 1),
+               max(0, mid - robot_half):min(size, mid + robot_half + 1), :3] = [220, 180, 60]
+
+        if not isinstance(pointcloud_state, dict) or len(pointcloud_state) == 0:
+            return canvas
+
+        chosen = None
+        for key, value in pointcloud_state.items():
+            if value is None:
+                continue
+            if "lidar" in str(key).lower():
+                chosen = value
+                break
+        if chosen is None:
+            for _key, value in pointcloud_state.items():
+                if value is not None:
+                    chosen = value
+                    break
+        if chosen is None:
+            return canvas
+
+        try:
+            pts = np.asarray(chosen)
+            if pts.ndim != 2 or pts.shape[0] <= 0 or pts.shape[1] < 2:
+                return canvas
+
+            pts = pts[:, :3] if pts.shape[1] >= 3 else pts[:, :2]
+            finite = np.isfinite(pts).all(axis=1)
+            pts = pts[finite]
+            if pts.shape[0] <= 0:
+                return canvas
+
+            # Sample for cheap rendering in UI.
+            max_points = 6000
+            if pts.shape[0] > max_points:
+                idx = np.linspace(0, pts.shape[0] - 1, max_points).astype(np.int32)
+                pts = pts[idx]
+
+            x = pts[:, 0]
+            y = pts[:, 1]
+            d = np.sqrt(x * x + y * y)
+
+            # Robust dynamic range (meters), clamped for stable visualization.
+            r95 = float(np.percentile(d, 95)) if d.size > 0 else 8.0
+            lidar_range = float(np.clip(r95, 4.0, 20.0))
+            scale = (size - 1) / (2.0 * lidar_range)
+
+            # Top-down: +x forward (up in image), +y left (left in image).
+            u = np.round(mid - y * scale).astype(np.int32)
+            v = np.round(mid - x * scale).astype(np.int32)
+            inside = (u >= 0) & (u < size) & (v >= 0) & (v < size)
+            if not np.any(inside):
+                return canvas
+
+            u = u[inside]
+            v = v[inside]
+            d = d[inside]
+
+            # Near points brighter, far points darker.
+            norm = np.clip(d / max(lidar_range, 1e-6), 0.0, 1.0)
+            intensity = np.clip((1.0 - norm) * 255.0, 50.0, 255.0).astype(np.uint8)
+            canvas[v, u, 0] = 80
+            canvas[v, u, 1] = intensity
+            canvas[v, u, 2] = 255
+            return canvas
+        except Exception:
+            return canvas
+
+    def _refresh_lidar_preview(self, pointcloud_state: dict):
+        try:
+            rgba = self._build_lidar_preview_rgba(pointcloud_state)
+            self._lidar_preview_image_provider.set_bytes_data(
+                list(rgba.tobytes()),
+                [int(rgba.shape[1]), int(rgba.shape[0])],
+            )
+        except Exception:
+            pass
+
+    def _resolve_sensor_mount_paths_for_preview(self, robot) -> OrderedDict:
+        paths = OrderedDict()
+        if robot is None:
+            return paths
+
+        def _sensor_prim(sensor_obj):
+            if sensor_obj is None:
+                return None
+            path = getattr(sensor_obj, "_prim_path", None)
+            if isinstance(path, str) and path:
+                return path
+            return None
+
+        # Front stereo base path.
+        front = getattr(robot, "front_stereo", None)
+        if front is None:
+            front = getattr(robot, "front_camera", None)
+        front_path = _sensor_prim(front)
+        if front_path is None and front is not None:
+            left = getattr(front, "left", None)
+            right = getattr(front, "right", None)
+            left_path = _sensor_prim(left)
+            right_path = _sensor_prim(right)
+            if isinstance(left_path, str) and "/left/camera_left" in left_path:
+                front_path = left_path.rsplit("/left/camera_left", 1)[0]
+            elif isinstance(right_path, str) and "/right/camera_right" in right_path:
+                front_path = right_path.rsplit("/right/camera_right", 1)[0]
+            elif isinstance(left_path, str):
+                front_path = os.path.dirname(os.path.dirname(left_path))
+            elif isinstance(right_path, str):
+                front_path = os.path.dirname(os.path.dirname(right_path))
+        if isinstance(front_path, str) and front_path:
+            paths["front_stereo"] = front_path
+
+        left_path = _sensor_prim(getattr(robot, "fisheye_left", None))
+        if isinstance(left_path, str) and left_path:
+            if left_path.endswith("/camera"):
+                left_path = left_path.rsplit("/camera", 1)[0]
+            paths["fisheye_left"] = left_path
+
+        right_path = _sensor_prim(getattr(robot, "fisheye_right", None))
+        if isinstance(right_path, str) and right_path:
+            if right_path.endswith("/camera"):
+                right_path = right_path.rsplit("/camera", 1)[0]
+            paths["fisheye_right"] = right_path
+
+        lidar_path = _sensor_prim(getattr(robot, "lidar", None))
+        if isinstance(lidar_path, str) and lidar_path:
+            paths["lidar"] = lidar_path
+
+        return paths
+
+    def _update_sensor_pose_preview_text(self):
+        scenario = getattr(self, "scenario", None)
+        robot = getattr(scenario, "robot", None) if scenario is not None else None
+        if robot is None:
+            text = "Sensor poses: no active scenario."
+            self._sensor_pose_text = text
+            try:
+                if self._sensor_pose_label is not None:
+                    self._sensor_pose_label.text = text
+            except Exception:
+                pass
+            return
+
+        stage = get_stage()
+        if stage is None:
+            return
+
+        robot_path = getattr(robot, "prim_path", "/World/robot")
+        robot_prim = stage.GetPrimAtPath(robot_path)
+        if robot_prim is None or not robot_prim.IsValid():
+            text = f"Sensor poses: robot prim not found ({robot_path})"
+            self._sensor_pose_text = text
+            try:
+                if self._sensor_pose_label is not None:
+                    self._sensor_pose_label.text = text
+            except Exception:
+                pass
+            return
+
+        xform_cache = UsdGeom.XformCache(Usd.TimeCode.Default())
+        try:
+            robot_world = xform_cache.GetLocalToWorldTransform(robot_prim)
+            robot_world_inv = robot_world.GetInverse()
+        except Exception:
+            return
+
+        lines = [f"Robot: {robot_path}"]
+        sensor_paths = self._resolve_sensor_mount_paths_for_preview(robot)
+        expected_mounts = {
+            "front_stereo": getattr(robot, "front_camera_translation", None),
+            "fisheye_left": getattr(robot, "fisheye_left_translation", None),
+            "fisheye_right": getattr(robot, "fisheye_right_translation", None),
+            "lidar": getattr(robot, "lidar_translation", None),
+        }
+        if len(sensor_paths) == 0:
+            lines.append("No sensors found on robot object.")
+        else:
+            for sensor_name, prim_path in sensor_paths.items():
+                prim = stage.GetPrimAtPath(prim_path)
+                if prim is None or not prim.IsValid():
+                    lines.append(f"{sensor_name}: prim not found ({prim_path})")
+                    continue
+                try:
+                    sensor_world = xform_cache.GetLocalToWorldTransform(prim)
+                    rel = robot_world_inv * sensor_world
+                    rel_t = rel.ExtractTranslation()
+                    world_t = sensor_world.ExtractTranslation()
+                    expected = expected_mounts.get(sensor_name, None)
+                    if isinstance(expected, (tuple, list)) and len(expected) == 3:
+                        ex, ey, ez = [float(v) for v in expected]
+                        dx = float(rel_t[0]) - ex
+                        dy = float(rel_t[1]) - ey
+                        dz = float(rel_t[2]) - ez
+                        lines.append(
+                            f"{sensor_name}: rel=({rel_t[0]:+.2f}, {rel_t[1]:+.2f}, {rel_t[2]:+.2f}) "
+                            f"| expected=({ex:+.2f}, {ey:+.2f}, {ez:+.2f}) "
+                            f"| delta=({dx:+.2f}, {dy:+.2f}, {dz:+.2f})"
+                        )
+                    else:
+                        lines.append(
+                            f"{sensor_name}: rel=({rel_t[0]:+.2f}, {rel_t[1]:+.2f}, {rel_t[2]:+.2f})"
+                        )
+                    lines.append(
+                        f"{sensor_name}: world=({world_t[0]:+.2f}, {world_t[1]:+.2f}, {world_t[2]:+.2f})"
+                    )
+                except Exception:
+                    lines.append(f"{sensor_name}: failed to compute transform ({prim_path})")
+
+        text = "\n".join(lines)
+        self._sensor_pose_text = text
+        try:
+            if self._sensor_pose_label is not None:
+                self._sensor_pose_label.text = text
+        except Exception:
+            pass
 
 
     def update_recording_count(self):
@@ -377,11 +857,11 @@ class MobilityGenExtension(omni.ext.IExt):
         except Exception:
             robot_type = list(ROBOTS.names())[0]
 
-        # try:
-        #     scene_path = self.scene_usd_field_string_model.as_string
-        # except Exception:
-        scene_path = "/home/pdi_4/Documents/Documentos/bevlog-isaac/mundo_pallets.usd"
+        scene_path = self.scene_usd_field_string_model.as_string
+        scene_path = dev_scene_path if  scene_path == "" else scene_path
+        
 
+        
         config = Config(
             scenario_type=scenario_type,
             robot_type=robot_type,
@@ -417,10 +897,7 @@ class MobilityGenExtension(omni.ext.IExt):
         try:
             world = get_world()
             if world is not None:
-                try:
-                    world.remove_physics_callback("scenario_physics", self.on_physics)
-                except Exception:
-                    pass
+                self._detach_physics_callback(world)
         except Exception:
             pass
 
@@ -445,8 +922,61 @@ class MobilityGenExtension(omni.ext.IExt):
         self.recording_step_label.text = "Current recording duration: "
 
     def clear_scenario(self):
+        # Stop simulation before mutating/replacing stages to avoid native
+        # PhysX/StageUpdate crashes during rapid rebuilds.
+        try:
+            world = get_world()
+            if world is not None:
+                try:
+                    world.stop()
+                except Exception:
+                    try:
+                        world.pause()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        try:
+            self._detach_physics_callback(get_world())
+        except Exception:
+            pass
         self.scenario = None
         self.cached_stage_path = None
+
+    def _remove_physics_callback_safe(self, world, name: str) -> bool:
+        """Try one compatible API shape without double-removing."""
+        if world is None:
+            return False
+        try:
+            world.remove_physics_callback(name)
+            return True
+        except TypeError:
+            # Older API requires callback function argument.
+            pass
+        except Exception as exc:
+            if "doesn't exist" in str(exc):
+                return False
+        try:
+            world.remove_physics_callback(name, self.on_physics)
+            return True
+        except Exception:
+            return False
+
+    def _detach_physics_callback(self, world):
+        """Remove physics callback using both old/new Isaac APIs."""
+        target_world = self._physics_callback_world if self._physics_callback_world is not None else world
+        if target_world is None:
+            return
+        if not getattr(self, "_physics_callback_registered", False):
+            return
+        names = [getattr(self, "_physics_callback_name", "scenario_physics")]
+        legacy = "scenario_physics"
+        if legacy not in names:
+            names.append(legacy)
+        for name in names:
+            self._remove_physics_callback_safe(target_world, name)
+        self._physics_callback_registered = False
+        self._physics_callback_world = None
 
     @staticmethod
     def _to_jsonable(value):
@@ -510,33 +1040,76 @@ class MobilityGenExtension(omni.ext.IExt):
 
     def reset(self):
         self.writer = None
-        self.scenario.reset()
+        scenario = getattr(self, "scenario", None)
+        if scenario is None:
+            return
+        scenario.reset()
         if self.recording_enabled:
             self.start_new_recording()
 
     def on_physics(self, step_size: int):
+        scenario = getattr(self, "scenario", None)
+        if scenario is None:
+            return
 
-        if self.scenario is not None:
+        if scenario is not None:
 
-            is_alive = self.scenario.step(step_size)
+            is_alive = scenario.step(step_size)
 
             if not is_alive:
                 self.reset()
 
+            self._preview_frame_counter += 1
+            preview_interval = max(1, int(getattr(self, "_preview_update_interval_frames", 2)))
+            should_update_preview = (self._preview_frame_counter % preview_interval) == 0
+
             rgb_state_for_preview = {}
-            try:
-                rgb_state_for_preview = self.scenario.state_dict_rgb()
-            except Exception:
-                rgb_state_for_preview = {}
-            self._sensor_preview_latest_rgb = rgb_state_for_preview
-            self._sensor_preview_latest_camera_map = self._build_sensor_preview_camera_map(rgb_state_for_preview)
-            try:
-                self._refresh_sensor_preview(self._sensor_preview_latest_camera_map)
-            except Exception:
-                pass
+            pointcloud_state_for_preview = None
+            need_rgb_state = should_update_preview or (self.writer is not None)
+            if need_rgb_state:
+                try:
+                    rgb_state_for_preview = scenario.state_dict_rgb()
+                except Exception:
+                    rgb_state_for_preview = {}
+
+            if should_update_preview:
+                try:
+                    pointcloud_state_for_preview = scenario.state_dict_pointcloud()
+                    if isinstance(pointcloud_state_for_preview, dict) and len(pointcloud_state_for_preview) > 0:
+                        self._sensor_preview_latest_pointcloud = pointcloud_state_for_preview
+                except Exception:
+                    pointcloud_state_for_preview = None
+
+            if should_update_preview:
+                if isinstance(rgb_state_for_preview, dict) and len(rgb_state_for_preview) > 0:
+                    self._sensor_preview_latest_rgb = rgb_state_for_preview
+                camera_input = (
+                    rgb_state_for_preview
+                    if isinstance(rgb_state_for_preview, dict) and len(rgb_state_for_preview) > 0
+                    else self._sensor_preview_latest_rgb
+                )
+                self._sensor_preview_latest_camera_map = self._build_sensor_preview_camera_map(camera_input)
+                try:
+                    self._refresh_sensor_preview(self._sensor_preview_latest_camera_map)
+                except Exception:
+                    pass
+                try:
+                    lidar_input = (
+                        pointcloud_state_for_preview
+                        if isinstance(pointcloud_state_for_preview, dict) and len(pointcloud_state_for_preview) > 0
+                        else self._sensor_preview_latest_pointcloud
+                    )
+                    self._refresh_lidar_preview(lidar_input)
+                except Exception:
+                    pass
+            else:
+                try:
+                    self._update_sensor_pose_preview_text()
+                except Exception:
+                    pass
             
             if self.writer is not None:
-                state_dict_common = self.scenario.state_dict_common()
+                state_dict_common = scenario.state_dict_common()
                 self.writer.write_state_dict_common(state_dict_common, step=self.step)
 
                 # Always persist rendered camera modalities while recording.
@@ -545,22 +1118,25 @@ class MobilityGenExtension(omni.ext.IExt):
                 except Exception:
                     pass
                 try:
-                    self.writer.write_state_dict_segmentation(self.scenario.state_dict_segmentation(), step=self.step)
+                    self.writer.write_state_dict_segmentation(scenario.state_dict_segmentation(), step=self.step)
                 except Exception:
                     pass
                 try:
-                    self.writer.write_state_dict_depth(self.scenario.state_dict_depth(), step=self.step)
+                    self.writer.write_state_dict_depth(scenario.state_dict_depth(), step=self.step)
                 except Exception:
                     pass
                 try:
-                    self.writer.write_state_dict_normals(self.scenario.state_dict_normals(), step=self.step)
+                    self.writer.write_state_dict_normals(scenario.state_dict_normals(), step=self.step)
                 except Exception:
                     pass
 
                 # Always persist pointclouds using the configured format/interval.
                 interval = 1
                 if (self.step % interval) == 0:
-                    state_pc = self.scenario.state_dict_pointcloud()
+                    if isinstance(pointcloud_state_for_preview, dict):
+                        state_pc = pointcloud_state_for_preview
+                    else:
+                        state_pc = scenario.state_dict_pointcloud()
                     fmt = "npy"
                     try:
                         fmt = self._pc_format_items[self._pc_format_index]
@@ -574,7 +1150,7 @@ class MobilityGenExtension(omni.ext.IExt):
                     # Persist per-sensor metadata (pose) next to the pointcloud
                     try:
                         metadata = {}
-                        modules = self.scenario.named_modules()
+                        modules = scenario.named_modules()
                         for full_name, arr_value in state_pc.items():
                             if "." in full_name:
                                 module_name = full_name.rsplit(".", 1)[0]
@@ -826,49 +1402,78 @@ class MobilityGenExtension(omni.ext.IExt):
         """
 
         async def _build_scenario_async():
-            
-            self.clear_recording()
-            self.clear_scenario()
-
-            config = self.create_config()
-
-            self.config = config
-            self.scenario = await build_scenario_from_config(config)
             try:
-                self.scenario.enable_rgb_rendering()
-            except Exception:
-                pass
+                self.clear_recording()
+                self.clear_scenario()
+                # Let Kit process stop/remove events before creating a new stage.
+                try:
+                    await asyncio.sleep(0)
+                except Exception:
+                    pass
+                try:
+                    KeyboardDriver.disconnect()
+                    self.keyboard = KeyboardDriver.connect()
+                except Exception:
+                    pass
+                try:
+                    GamepadDriver.disconnect()
+                    self.gamepad = GamepadDriver.connect()
+                except Exception:
+                    pass
 
-            self.draw_occ_map()
-            try:
-                self._visualize_window.visible = True
-            except Exception:
-                pass
-            try:
-                self._sensor_preview_window.visible = True
-            except Exception:
-                pass
-            
-            world = get_world()
-            await world.reset_async()
+                config = self.create_config()
 
-            self.scenario.reset()
+                self.config = config
+                self.scenario = await build_scenario_from_config(config)
+                try:
+                    self.scenario.enable_rgb_rendering()
+                except Exception:
+                    pass
 
-            world.add_physics_callback("scenario_physics", self.on_physics)
-            # sync UI with the newly created robot/sensors
-            try:
-                self._sync_ui_with_robot()
-            except Exception:
-                pass
+                self.draw_occ_map()
+                try:
+                    self._visualize_window.visible = True
+                except Exception:
+                    pass
+                try:
+                    self._sensor_preview_window.visible = True
+                except Exception:
+                    pass
+                
+                world = get_world()
+                self._detach_physics_callback(world)
+                await world.reset_async()
 
-            # cache stage
-            self.cached_stage_path = os.path.join(tempfile.mkdtemp(), "stage.usd")
-            save_stage(self.cached_stage_path)
+                self.scenario.reset()
+                world.add_physics_callback(self._physics_callback_name, self.on_physics)
+                self._physics_callback_registered = True
+                self._physics_callback_world = world
+                try:
+                    world.play()
+                except Exception:
+                    pass
+                # sync UI with the newly created robot/sensors
+                try:
+                    self._sync_ui_with_robot()
+                except Exception:
+                    pass
 
-            if self.recording_enabled:
-                self.start_new_recording()
+                # cache stage
+                self.cached_stage_path = os.path.join(tempfile.mkdtemp(), "stage.usd")
+                save_stage(self.cached_stage_path)
 
-            # self.scenario.save(path)
+                if self.recording_enabled:
+                    self.start_new_recording()
+            except Exception as exc:
+                import traceback
+
+                print(f"[MobilityGenExtension] build_scenario failed: {exc}")
+                traceback.print_exc()
+                try:
+                    self.clear_recording()
+                    self.clear_scenario()
+                except Exception:
+                    pass
 
         asyncio.ensure_future(_build_scenario_async())
 

@@ -142,7 +142,7 @@ class RandomPathFollowingScenarioRearSteer(Scenario):
         self._min_curve_speed_factor = float(
             getattr(self.robot, "path_following_min_curve_speed_factor", 0.45)
         )
-        self._min_v_cmd = float(getattr(self.robot, "path_following_min_speed", 0.6))
+        self._min_v_cmd = float(getattr(self.robot, "path_following_min_speed", 0.18))
         self._last_v_cmd = 0.0
         self._blocked_steps = 0
         self._planner_info_printed = False
@@ -385,7 +385,7 @@ class KeyboardTeleoperationScenario_forklift_2(Scenario):
         self.pose_sampler = pose_samplers.UniformPoseSampler()
 
         # ganhos vindos do robô (se definidos)
-        self._lin_gain   = float(getattr(self.robot, "keyboard_linear_velocity_gain", 1.0))
+        self._lin_gain   = float(getattr(self.robot, "keyboard_linear_velocity_gain", 1.2))
         self._steer_rate = float(getattr(self.robot, "keyboard_angular_velocity_gain", self._default_steer_rate))
 
         # estados internos

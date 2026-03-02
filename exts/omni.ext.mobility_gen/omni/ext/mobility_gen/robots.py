@@ -62,6 +62,7 @@ from omni.ext.mobility_gen.sensors import (
 from omni.ext.mobility_gen.sensors import (
     Camera,
     Lidar,
+    ensure_single_usd_reference,
     _define_camera_prim,
     _quat_from_euler_xyz,
     _xform_orient_quat,
@@ -127,6 +128,7 @@ class Robot(Module):
 
     chase_camera_base_path: str
     chase_camera_x_offset: float
+    chase_camera_y_offset: float
     chase_camera_z_offset: float
     chase_camera_tilt_angle: float
 
@@ -209,7 +211,7 @@ class Robot(Module):
         prim_rotate_x(camera_prim, self.chase_camera_tilt_angle)
         prim_rotate_y(camera_prim, 0)
         prim_rotate_z(camera_prim, -90)
-        prim_translate(camera_prim, (self.chase_camera_x_offset, 0., self.chase_camera_z_offset))
+        prim_translate(camera_prim, (self.chase_camera_x_offset, self.chase_camera_y_offset, self.chase_camera_z_offset))
 
         return camera_path
     
@@ -439,14 +441,18 @@ class FourWheelRearSteerRobot_V1(Robot):
     """
 
     # ===== Sim / sensores =====
-    physics_dt: float = 0.005
+    physics_dt: float = 0.01
     z_offset: float = 0.25
+    # Attach custom sensors only to the primary MobilityGen robot prim.
+    sensor_owner_root_path: str = "/World/robot"
+    sensor_namespace: str = "mobilitygen"
 
     # Third-person chase camera behind and above the forklift.
     chase_camera_base_path: str = "body"
-    chase_camera_x_offset: float = -4.0
-    chase_camera_z_offset: float = 2.0
-    chase_camera_tilt_angle: float = 35.0
+    chase_camera_x_offset: float = -5.0
+    chase_camera_y_offset: float = 5.0
+    chase_camera_z_offset: float = 5.0
+    chase_camera_tilt_angle: float = 45.0
 
     # ===== Occupancy Map (usado pelo builder) =====
     occupancy_map_radius: float = 1.5
@@ -457,14 +463,43 @@ class FourWheelRearSteerRobot_V1(Robot):
 
     # ===== Câmera frontal =====
     front_camera_type = HawkCamera
-    front_camera_base_path = "sensors/rgb_camera/front_camera"
+    front_camera_base_path = "sensors/mobilitygen/front_stereo"
     front_camera_rotation = (0., 0., 0.)
-    # Front stereo camera mounted near the mast, facing forward.
-    front_camera_translation = (1.10, 0.0, 1.65)
+    # Fallback mounts (used only when body bounds cannot be evaluated).
+    min_sensor_mount_distance: float = 0.25
+    front_camera_translation = (1.25, 0.0, 2.20)
+    fisheye_visual_usd_url: str = (
+        "/home/pdi_4/Documents/Documentos/bevlog-isaac/isaac-assets/"
+        "isaac-sim-assets-robots_and_sensors-5.1.0/Assets/Isaac/5.1/Isaac/"
+        "Sensors/LeopardImaging/Owl/owl.usd"
+    )
+    fisheye_left_translation: Tuple[float, float, float] = (1.15, -0.85, 2.10)
+    fisheye_right_translation: Tuple[float, float, float] = (1.15, 0.85, 2.10)
+    lidar_translation: Tuple[float, float, float] = (0.15, 0.0, 2.55)
+    sensor_mount_xy_margin_ratio: float = 0.12
+    sensor_mount_xy_margin_min: float = 0.25
+    sensor_mount_z_margin_ratio: float = 0.10
+    sensor_mount_z_margin_min: float = 0.18
+
 
     # ===== Teleop =====
-    keyboard_linear_velocity_gain: float = 1.0
-    keyboard_angular_velocity_gain: float = 1.0
+    keyboard_linear_velocity_gain: float = 2.0
+    keyboard_angular_velocity_gain: float = 1.8
+
+    # ===== Path-following tuning (quick wins: faster, smoother, less CPU checks) =====
+    path_following_speed: float = 1.2
+    path_following_angular_gain: float = 1.8
+    path_following_stop_distance_threshold: float = 0.45
+    path_following_target_point_offset_meters: float = 1.25
+    path_following_max_steer_command: float = 0.55
+    path_following_delta_rate_limit: float = 1.8
+    path_following_lookahead_min: float = 0.75
+    path_following_lookahead_max: float = 2.8
+    path_following_min_goal_distance_m: float = 5.0
+    path_following_smoothing_iterations: int = 1
+    path_following_safety_points: int = 5
+    path_following_safety_margin: float = 0.30
+    path_following_min_speed: float = 0.25
 
     # ===== Geometria =====
     wheel_base: float = 1.65
@@ -479,8 +514,9 @@ class FourWheelRearSteerRobot_V1(Robot):
     steering_dof_names:   List[str] = ["left_rotator_joint", "right_rotator_joint"]  # yaw traseiro
 
     # ===== USD =====
-    usd_url: str = ("http://omniverse-content-production.s3-us-west-2.amazonaws.com/"
-                    "Assets/Isaac/4.2/Isaac/Robots/Forklift/forklift_c.usd")
+    #usd_url: str = ("http://omniverse-content-production.s3-us-west-2.amazonaws.com/"
+    #                "Assets/Isaac/4.2/Isaac/Robots/Forklift/forklift_c.usd")
+    usd_url: str = ("/home/pdi_4/Documents/Documentos/bevlog-isaac/isaac-assets/isaac-sim-assets-robots_and_sensors-5.1.0/Assets/Isaac/5.1/Isaac/Robots/IsaacSim/ForkliftC/forklift_c.usd")
     chassis_subpath: str = ""
 
     # ===== Drives de direção (posição) =====
@@ -516,18 +552,390 @@ class FourWheelRearSteerRobot_V1(Robot):
         self._warned_missing_rear = False
         self._warned_missing_steer = False
         self._warned_transient_reset = False
+        self._sensor_setup_done = False
+        self._control_ready = False
+
+    @classmethod
+    def _resolve_sensor_mount_parent(cls, prim_path: str) -> str:
+        """Best-effort sensor mount link that follows articulation motion."""
+        stage = get_stage()
+        candidates = (
+            # Prefer moving body/chassis links so sensors follow articulation.
+            os.path.join(prim_path, "body", "body"),
+            os.path.join(prim_path, "body"),
+            os.path.join(prim_path, "chassis"),
+            os.path.join(prim_path, "chassis_link"),
+            os.path.join(prim_path, "base_link"),
+            prim_path,
+        )
+        for path in candidates:
+            try:
+                prim = stage_get_prim(stage, path)
+                if prim is not None and prim.IsValid():
+                    return path
+            except Exception:
+                pass
+        return prim_path
+
+    @classmethod
+    def _is_sensor_owner_prim(cls, prim_path: str) -> bool:
+        root = str(getattr(cls, "sensor_owner_root_path", "") or "").rstrip("/")
+        if root == "":
+            return True
+        path = str(prim_path or "").rstrip("/")
+        return path == root or path.startswith(root + "/")
+
+    @classmethod
+    def _has_articulation_api(cls, prim) -> bool:
+        if prim is None or not prim.IsValid():
+            return False
+        try:
+            if prim.HasAPI(UsdPhysics.ArticulationRootAPI):
+                return True
+        except Exception:
+            pass
+        try:
+            if prim.HasAPI(PhysxSchema.PhysxArticulationAPI):
+                return True
+        except Exception:
+            pass
+        return False
+
+    @classmethod
+    def _resolve_articulation_root_prim_path(cls, robot_root_path: str) -> str:
+        """Find the articulation root prim path inside a spawned robot subtree."""
+        stage = get_stage()
+        root = stage_get_prim(stage, robot_root_path)
+        if root is None or not root.IsValid():
+            return robot_root_path
+
+        if cls._has_articulation_api(root):
+            return robot_root_path
+
+        # Prefer common candidates first for forklift assets.
+        candidates = (
+            os.path.join(robot_root_path, "body"),
+            os.path.join(robot_root_path, "base_link"),
+            os.path.join(robot_root_path, "chassis"),
+            os.path.join(robot_root_path, "chassis_link"),
+        )
+        for candidate in candidates:
+            try:
+                prim = stage_get_prim(stage, candidate)
+                if cls._has_articulation_api(prim):
+                    return candidate
+            except Exception:
+                pass
+
+        try:
+            for prim in Usd.PrimRange(root):
+                if cls._has_articulation_api(prim):
+                    return prim.GetPath().pathString
+        except Exception:
+            pass
+
+        return robot_root_path
+
+    @classmethod
+    def _find_existing_stereo_sensor_bases(cls, prim_path: str) -> List[str]:
+        """Find existing stereo sensor base paths under this robot prim.
+
+        A stereo base is any prim that contains both:
+        - <base>/left/camera_left
+        - <base>/right/camera_right
+        """
+        stage = get_stage()
+        root = stage_get_prim(stage, prim_path)
+        if root is None or not root.IsValid():
+            return []
+
+        left_suffix = "/left/camera_left"
+        right_suffix = "/right/camera_right"
+        left_bases: set[str] = set()
+        right_bases: set[str] = set()
+
+        try:
+            for prim in Usd.PrimRange(root):
+                if prim.GetTypeName() != "Camera":
+                    continue
+                path = str(prim.GetPath())
+                if path.endswith(left_suffix):
+                    left_bases.add(path[: -len(left_suffix)])
+                elif path.endswith(right_suffix):
+                    right_bases.add(path[: -len(right_suffix)])
+        except Exception:
+            return []
+
+        return sorted(left_bases.intersection(right_bases))
+
+    @classmethod
+    def _choose_stereo_sensor_base(cls, candidates: List[str], preferred: str) -> Optional[str]:
+        if not candidates:
+            return None
+
+        if preferred in candidates:
+            return preferred
+
+        tokens = [tok for tok in cls.front_camera_base_path.lower().split("/") if tok]
+
+        def _rank(path: str):
+            lower = path.lower()
+            token_hits = sum(1 for tok in tokens if tok in lower)
+            # more token hits is better, then shorter path, then lexical
+            return (-token_hits, len(path), path)
+
+        return sorted(candidates, key=_rank)[0]
+
+    @classmethod
+    def _disable_unused_stereo_sensor_bases(
+        cls, prim_path: str, keep_base: Optional[str]
+    ) -> None:
+        """Deactivate duplicate stereo rigs under the same robot prim."""
+        stage = get_stage()
+        for base in cls._find_existing_stereo_sensor_bases(prim_path):
+            if keep_base is not None and base == keep_base:
+                continue
+            try:
+                prim = stage_get_prim(stage, base)
+                if prim is not None and prim.IsValid() and prim.IsActive():
+                    prim.SetActive(False)
+            except Exception:
+                pass
+
+    @classmethod
+    def _validate_sensor_mount_outside_body(
+        cls,
+        sensor_name: str,
+        mount_xyz: Tuple[float, float, float],
+    ) -> None:
+        """Reject mounts too close to robot origin to avoid internal overlap with chassis."""
+        x, y, z = [float(v) for v in mount_xyz]
+        radial = float(math.sqrt(x * x + y * y))
+        distance = float(math.sqrt(x * x + y * y + z * z))
+        min_dist = float(getattr(cls, "min_sensor_mount_distance", 0.25))
+        if distance < min_dist:
+            raise ValueError(
+                f"[{cls.__name__}] Invalid mount for '{sensor_name}': {mount_xyz}. "
+                f"Distance {distance:.3f} is below required minimum {min_dist:.3f}."
+            )
+        # Additional guard for clearly internal mounts near body centerline.
+        if z < 1.20 and radial < 0.80:
+            raise ValueError(
+                f"[{cls.__name__}] Invalid mount for '{sensor_name}': {mount_xyz}. "
+                "Likely inside chassis volume."
+            )
+
+    @classmethod
+    def _compute_body_bounds_for_mount(
+        cls,
+        prim_path: str,
+        sensor_parent: str,
+    ) -> Optional[Tuple[Gf.Vec3d, Gf.Vec3d]]:
+        """Compute body bounds in sensor_parent local frame, excluding custom sensor subtree."""
+        stage = get_stage()
+        parent_prim = stage_get_prim(stage, sensor_parent)
+        if parent_prim is None or not parent_prim.IsValid():
+            return None
+
+        source_candidates = (
+            os.path.join(prim_path, "body", "body"),
+            os.path.join(prim_path, "body", "SM_Forklift_Body"),
+            os.path.join(prim_path, "body"),
+            sensor_parent,
+        )
+        source_prim = None
+        for path in source_candidates:
+            prim = stage_get_prim(stage, path)
+            if prim is not None and prim.IsValid():
+                source_prim = prim
+                break
+        if source_prim is None:
+            return None
+
+        sensor_ns = str(getattr(cls, "sensor_namespace", "mobilitygen") or "mobilitygen")
+        exclude_prefixes = (
+            f"{sensor_parent}/sensors/{sensor_ns}",
+            f"{prim_path}/sensors/{sensor_ns}",
+        )
+
+        bbox_cache = UsdGeom.BBoxCache(
+            Usd.TimeCode.Default(),
+            [UsdGeom.Tokens.default_],
+            useExtentsHint=True,
+        )
+
+        min_vec = Gf.Vec3d(float("inf"), float("inf"), float("inf"))
+        max_vec = Gf.Vec3d(float("-inf"), float("-inf"), float("-inf"))
+        found = False
+
+        try:
+            for prim in Usd.PrimRange(source_prim):
+                path = str(prim.GetPath())
+                if any(path == prefix or path.startswith(prefix + "/") for prefix in exclude_prefixes):
+                    continue
+                if not prim.IsA(UsdGeom.Boundable):
+                    continue
+                try:
+                    rel_bound = bbox_cache.ComputeRelativeBound(prim, parent_prim)
+                    box = rel_bound.GetBox()
+                    mn = box.GetMin()
+                    mx = box.GetMax()
+                except Exception:
+                    continue
+                min_vec = Gf.Vec3d(
+                    min(min_vec[0], float(mn[0])),
+                    min(min_vec[1], float(mn[1])),
+                    min(min_vec[2], float(mn[2])),
+                )
+                max_vec = Gf.Vec3d(
+                    max(max_vec[0], float(mx[0])),
+                    max(max_vec[1], float(mx[1])),
+                    max(max_vec[2], float(mx[2])),
+                )
+                found = True
+        except Exception:
+            return None
+
+        if not found:
+            return None
+        return min_vec, max_vec
+
+    @classmethod
+    def _compute_sensor_mounts_from_body(
+        cls,
+        prim_path: str,
+        sensor_parent: Optional[str] = None,
+    ) -> Dict[str, Tuple[float, float, float]]:
+        """Compute sensor mounts from local AABB of the moving body/chassis prim."""
+        mounts = {
+            "front": tuple(float(v) for v in cls.front_camera_translation),
+            "left": tuple(float(v) for v in cls.fisheye_left_translation),
+            "right": tuple(float(v) for v in cls.fisheye_right_translation),
+            "lidar": tuple(float(v) for v in cls.lidar_translation),
+        }
+
+        stage = get_stage()
+        parent_path = sensor_parent or cls._resolve_sensor_mount_parent(prim_path)
+        prim = stage_get_prim(stage, parent_path)
+        if prim is None or not prim.IsValid():
+            return mounts
+
+        try:
+            bounds = cls._compute_body_bounds_for_mount(
+                prim_path=prim_path,
+                sensor_parent=parent_path,
+            )
+            if bounds is None:
+                return mounts
+            mn, mx = bounds
+            sx = float(mx[0] - mn[0])
+            sy = float(mx[1] - mn[1])
+            sz = float(mx[2] - mn[2])
+            if sx <= 1e-4 or sy <= 1e-4 or sz <= 1e-4:
+                return mounts
+
+            x_margin = max(float(sx) * float(cls.sensor_mount_xy_margin_ratio), float(cls.sensor_mount_xy_margin_min))
+            y_margin = max(float(sy) * float(cls.sensor_mount_xy_margin_ratio), float(cls.sensor_mount_xy_margin_min))
+            z_margin = max(float(sz) * float(cls.sensor_mount_z_margin_ratio), float(cls.sensor_mount_z_margin_min))
+
+            front_x = float(mx[0] + x_margin)
+            mid_x = float(0.5 * (mn[0] + mx[0]))
+            top_z = float(mx[2] + z_margin)
+
+            mounts["front"] = (front_x, 0.0, top_z)
+            mounts["left"] = (float(front_x * 0.90), float(mn[1] - y_margin), top_z)
+            mounts["right"] = (float(front_x * 0.90), float(mx[1] + y_margin), top_z)
+            mounts["lidar"] = (mid_x, 0.0, float(mx[2] + 1.8 * z_margin))
+            return mounts
+        except Exception:
+            return mounts
+
+    @classmethod
+    def build_front_camera(cls, prim_path):
+        if not cls._is_sensor_owner_prim(prim_path):
+            print(
+                f"[{cls.__name__}] skipping front camera attach for non-primary robot prim: {prim_path}"
+            )
+            return None
+
+        # Mount on the articulation body/chassis so the sensor follows robot motion.
+        mount_parent = cls._resolve_sensor_mount_parent(prim_path)
+        mounts = cls._compute_sensor_mounts_from_body(prim_path, sensor_parent=mount_parent)
+        front_mount = tuple(float(v) for v in mounts["front"])
+        preferred_path = os.path.join(mount_parent, cls.front_camera_base_path)
+        camera_path = preferred_path
+
+        existing_bases = cls._find_existing_stereo_sensor_bases(prim_path)
+        if camera_path in existing_bases:
+            cls._disable_unused_stereo_sensor_bases(prim_path, keep_base=camera_path)
+            try:
+                # Re-apply transform even when reusing an existing rig.
+                qw, qx, qy, qz = _quat_from_euler_xyz(
+                    cls.front_camera_rotation[0],
+                    cls.front_camera_rotation[1],
+                    cls.front_camera_rotation[2],
+                )
+                _xform_orient_quat(camera_path, (qw, qx, qy, qz))
+                _xform_translate(camera_path, front_mount)
+                print(
+                    f"[{cls.__name__}] reusing stereo sensor: {camera_path} "
+                    f"rot={cls.front_camera_rotation} trans={front_mount}"
+                )
+                return cls.front_camera_type.attach(prim_path=camera_path)
+            except Exception:
+                pass
+
+        XFormPrim(camera_path)
+
+        cls._validate_sensor_mount_outside_body("front_stereo", front_mount)
+        qw, qx, qy, qz = _quat_from_euler_xyz(
+            cls.front_camera_rotation[0],
+            cls.front_camera_rotation[1],
+            cls.front_camera_rotation[2],
+        )
+        _xform_orient_quat(camera_path, (qw, qx, qy, qz))
+        _xform_translate(camera_path, front_mount)
+        try:
+            print(
+                f"[{cls.__name__}] front_camera mount={camera_path} "
+                f"rot={cls.front_camera_rotation} trans={front_mount}"
+            )
+        except Exception:
+            pass
+
+        cls._disable_unused_stereo_sensor_bases(prim_path, keep_base=camera_path)
+        return cls.front_camera_type.build(prim_path=camera_path)
 
     # ---------- Build ----------
     @classmethod
     def build(cls, prim_path: str) -> "FourWheelRearSteerRobot":
         world = get_world()
-        robot = world.scene.add(_WheeledRobot(
-            prim_path,
-            wheel_dof_names=cls.rear_wheel_dof_names,   # só as traseiras recebem ω
-            create_robot=True,
-            usd_path=cls.usd_url
-        ))
-        view_path = os.path.join(prim_path, cls.chassis_subpath) if cls.chassis_subpath else prim_path
+        stage = get_stage()
+
+        # Spawn USD first, then bind WheeledRobot to the articulation root path.
+        stage_add_usd_ref(stage, prim_path, cls.usd_url)
+        articulation_root_path = cls._resolve_articulation_root_prim_path(prim_path)
+        if articulation_root_path == prim_path:
+            root_prim = stage_get_prim(stage, prim_path)
+            if not cls._has_articulation_api(root_prim):
+                raise RuntimeError(
+                    f"[{cls.__name__}] Could not locate articulation root under '{prim_path}'. "
+                    f"Check robot USD path/accessibility: {cls.usd_url}"
+                )
+
+        robot = world.scene.add(
+            _WheeledRobot(
+                articulation_root_path,
+                wheel_dof_names=cls.rear_wheel_dof_names,   # só as traseiras recebem ω
+                create_robot=False,
+                usd_path=cls.usd_url,
+            )
+        )
+        view_path = (
+            os.path.join(articulation_root_path, cls.chassis_subpath)
+            if cls.chassis_subpath
+            else articulation_root_path
+        )
         view = _ArticulationView(view_path)
         world.scene.add(view)
 
@@ -543,37 +951,141 @@ class FourWheelRearSteerRobot_V1(Robot):
 
     def _attach_aux_sensors(self):
         """Attach fisheye pair + lidar and expose a single front stereo handle."""
+        if self._sensor_setup_done:
+            return
+        if not self._is_sensor_owner_prim(self.prim_path):
+            self.front_stereo = self.front_camera
+            self._sensor_setup_done = True
+            return
         self.front_stereo = self.front_camera
+        stage = get_stage()
+        sensor_parent = self._resolve_sensor_mount_parent(self.prim_path)
+        mounts = self._compute_sensor_mounts_from_body(self.prim_path, sensor_parent=sensor_parent)
+        front_mount = tuple(float(v) for v in mounts["front"])
+        left_mount = tuple(float(v) for v in mounts["left"])
+        right_mount = tuple(float(v) for v in mounts["right"])
+        lidar_mount = tuple(float(v) for v in mounts["lidar"])
+        # Expose resolved values for preview/readback coherence.
+        self.front_camera_translation = front_mount
+        self.fisheye_left_translation = left_mount
+        self.fisheye_right_translation = right_mount
+        self.lidar_translation = lidar_mount
+        sensor_base = os.path.join(sensor_parent, "sensors", self.sensor_namespace)
+
+        def _ensure_sensor_marker(
+            base_path: str,
+            color_rgb: Tuple[float, float, float],
+            marker_shape: str = "cylinder",
+        ):
+            """Create a visible 3D marker mesh for sensor visualization on robot."""
+            try:
+                marker_path = os.path.join(base_path, "model")
+                if marker_shape == "cube":
+                    marker = UsdGeom.Cube.Define(stage, marker_path)
+                    marker.CreateSizeAttr(0.12)
+                else:
+                    marker = UsdGeom.Cylinder.Define(stage, marker_path)
+                    marker.CreateRadiusAttr(0.05)
+                    marker.CreateHeightAttr(0.12)
+                    marker.CreateAxisAttr("X")
+                prim = stage.GetPrimAtPath(marker_path)
+                if prim is not None and prim.IsValid():
+                    gprim = UsdGeom.Gprim(prim)
+                    gprim.CreateDisplayColorAttr([Gf.Vec3f(*[float(c) for c in color_rgb])])
+            except Exception:
+                pass
+
+        def _assert_camera_slot(path: str, label: str):
+            prim = stage.GetPrimAtPath(path)
+            if prim is not None and prim.IsValid():
+                prim_type = str(prim.GetTypeName() or "")
+                if prim_type not in ("", "Camera"):
+                    raise RuntimeError(
+                        f"[{self.__class__.__name__}] {label} slot conflict at '{path}'. "
+                        f"Expected Camera prim or empty slot, found '{prim_type}'."
+                    )
+
+        # Front stereo marker (fallback visual, independent from sensor USD model).
+        try:
+            front_base = os.path.join(sensor_parent, self.front_camera_base_path)
+            UsdGeom.Xform.Define(stage, front_base)
+            _ensure_sensor_marker(front_base, (1.0, 0.8, 0.25), marker_shape="cube")
+        except Exception:
+            pass
 
         # Left fisheye
         try:
-            left_path = os.path.join(self.prim_path, "sensors/fisheye_left")
-            _define_camera_prim(left_path)
-            self.fisheye_left = Camera(left_path, (640, 480))
-            _xform_translate(left_path, (1.05, -0.38, 1.58))
-            qw, qx, qy, qz = _quat_from_euler_xyz(0.0, 0.0, 28.0)
+            left_path = os.path.join(sensor_base, "fisheye_left")
+            UsdGeom.Xform.Define(stage, left_path)
+            ensure_single_usd_reference(
+                stage=stage,
+                path=os.path.join(left_path, "model_3d"),
+                usd_path=self.fisheye_visual_usd_url,
+                context=f"{self.__class__.__name__}.fisheye_left",
+            )
+            _ensure_sensor_marker(left_path, (0.15, 0.7, 1.0))
+            left_cam_path = os.path.join(left_path, "camera")
+            _assert_camera_slot(left_cam_path, "fisheye_left")
+            _define_camera_prim(left_cam_path)
+            self.fisheye_left = Camera(left_cam_path, (640, 480))
+            # Mount slightly forward/left and rotate to look forward-left.
+            self._validate_sensor_mount_outside_body("fisheye_left", left_mount)
+            _xform_translate(left_path, left_mount)
+            qw, qx, qy, qz = _quat_from_euler_xyz(0.0, 90.0, 30.0)
             _xform_orient_quat(left_path, (qw, qx, qy, qz))
+        except RuntimeError as exc:
+            print(str(exc))
+            raise
         except Exception:
             self.fisheye_left = None
 
         # Right fisheye
         try:
-            right_path = os.path.join(self.prim_path, "sensors/fisheye_right")
-            _define_camera_prim(right_path)
-            self.fisheye_right = Camera(right_path, (640, 480))
-            _xform_translate(right_path, (1.05, 0.38, 1.58))
-            qw, qx, qy, qz = _quat_from_euler_xyz(0.0, 0.0, -28.0)
+            right_path = os.path.join(sensor_base, "fisheye_right")
+            UsdGeom.Xform.Define(stage, right_path)
+            ensure_single_usd_reference(
+                stage=stage,
+                path=os.path.join(right_path, "model_3d"),
+                usd_path=self.fisheye_visual_usd_url,
+                context=f"{self.__class__.__name__}.fisheye_right",
+            )
+            _ensure_sensor_marker(right_path, (0.15, 1.0, 0.35))
+            right_cam_path = os.path.join(right_path, "camera")
+            _assert_camera_slot(right_cam_path, "fisheye_right")
+            _define_camera_prim(right_cam_path)
+            self.fisheye_right = Camera(right_cam_path, (640, 480))
+            # Mount slightly forward/right and rotate to look forward-right.
+            self._validate_sensor_mount_outside_body("fisheye_right", right_mount)
+            _xform_translate(right_path, right_mount)
+            qw, qx, qy, qz = _quat_from_euler_xyz(0.0, 90.0, -30.0)
             _xform_orient_quat(right_path, (qw, qx, qy, qz))
+        except RuntimeError as exc:
+            print(str(exc))
+            raise
         except Exception:
             self.fisheye_right = None
 
         # Roof lidar
         try:
-            lidar_path = os.path.join(self.prim_path, "sensors/lidar")
-            self.lidar = Lidar(lidar_path)
-            _xform_translate(lidar_path, (0.25, 0.0, 2.10))
+            lidar_path = os.path.join(sensor_base, "lidar")
+            # Build lidar in camera-like style: logical sensor + referenced 3D USD model.
+            self.lidar = Lidar.build(lidar_path)
+            self._validate_sensor_mount_outside_body("lidar", lidar_mount)
+            _xform_translate(lidar_path, lidar_mount)
+            qw, qx, qy, qz = _quat_from_euler_xyz(0.0, 0.0, 0.0)
+            _xform_orient_quat(lidar_path, (qw, qx, qy, qz))
             self.lidar.enable_lidar()
+            # Re-apply mount after enabling in case backend recreated internal prim data.
+            _xform_translate(lidar_path, lidar_mount)
+        except RuntimeError as exc:
+            print(str(exc))
+            raise
         except Exception:
+            # Fallback marker if the lidar asset fails to load in this environment.
+            try:
+                _ensure_sensor_marker(lidar_path, (1.0, 0.35, 0.25), marker_shape="cylinder")
+            except Exception:
+                pass
             self.lidar = None
 
         # Ensure RGB streams are available for preview/recording.
@@ -592,6 +1104,24 @@ class FourWheelRearSteerRobot_V1(Robot):
         try:
             if self.fisheye_right is not None:
                 self.fisheye_right.enable_rgb_rendering()
+        except Exception:
+            pass
+        self._sensor_setup_done = True
+        try:
+            print(
+                f"[{self.__class__.__name__}] sensor markers active at "
+                f"{os.path.join(sensor_parent, self.front_camera_base_path)}, "
+                f"{os.path.join(sensor_base, 'fisheye_left')}, "
+                f"{os.path.join(sensor_base, 'fisheye_right')}, "
+                f"{os.path.join(sensor_base, 'lidar')}"
+            )
+            print(
+                f"[{self.__class__.__name__}] sensor mounts "
+                f"front={front_mount}, "
+                f"left={left_mount}, "
+                f"right={right_mount}, "
+                f"lidar={lidar_mount}"
+            )
         except Exception:
             pass
 
@@ -615,6 +1145,33 @@ class FourWheelRearSteerRobot_V1(Robot):
             try: idx.append(self.articulation_view.get_dof_index(n))
             except Exception: idx.append(-1)
         return np.asarray(idx, np.int32)
+
+    def _ensure_physics_view_ready(self) -> bool:
+        """Best-effort check/rebind for articulation physics view after stage/reset."""
+        has_private_physics_view = hasattr(self.articulation_view, "_physics_view")
+        if has_private_physics_view:
+            try:
+                physics_view = getattr(self.articulation_view, "_physics_view")
+            except Exception:
+                physics_view = None
+            if physics_view is not None:
+                return True
+
+        try:
+            self.articulation_view.initialize()
+        except Exception:
+            return False
+
+        # Some Isaac builds don't expose _physics_view as a Python attribute.
+        # In that case, a successful initialize() is the readiness signal.
+        if not has_private_physics_view:
+            return True
+
+        try:
+            physics_view = getattr(self.articulation_view, "_physics_view")
+        except Exception:
+            physics_view = None
+        return physics_view is not None
 
     def _auto_find_rear_wheel_dofs(self) -> Optional[List[str]]:
         names = self._get_dof_names()
@@ -672,6 +1229,9 @@ class FourWheelRearSteerRobot_V1(Robot):
                 pass
 
     def _ensure_indices_limits_and_drive(self) -> bool:
+        if self._control_ready and self._rear_idx is not None and self._steer_idx is not None:
+            return True
+
         try:
             self.articulation_view.initialize()
         except Exception:
@@ -760,6 +1320,7 @@ class FourWheelRearSteerRobot_V1(Robot):
                 )
         except Exception:
             pass
+        self._control_ready = True
         return True
     # ---------- ciclo de vida ----------
     def post_reset(self):
@@ -768,6 +1329,9 @@ class FourWheelRearSteerRobot_V1(Robot):
         self._frame = 0
         self._rebind_warmup_frames = max(self._rebind_warmup_frames, 60)
         self._warned_transient_reset = False
+        self._control_ready = False
+        self._rear_idx = None
+        self._steer_idx = None
         try:
             self.articulation_view.initialize()
         except Exception:
@@ -776,7 +1340,11 @@ class FourWheelRearSteerRobot_V1(Robot):
     def write_action(self, step_size: float):
         def _is_transient_articulation_error(exc: Exception) -> bool:
             text = str(exc)
-            return ("NoneType" in text and "joint_positions" in text) or (
+            return (
+                "_physics_view" in text
+                or ("NoneType" in text and "joint_positions" in text)
+                or ("NoneType" in text and "physics_view" in text)
+            ) or (
                 "Physics Simulation View is not created yet" in text
             )
 
@@ -785,6 +1353,7 @@ class FourWheelRearSteerRobot_V1(Robot):
             self._rebind_warmup_frames -= 1
 
         if not self._ensure_indices_limits_and_drive():
+            self._rebind_warmup_frames = max(self._rebind_warmup_frames, 20)
             return
 
         # 1) rodas traseiras
@@ -869,15 +1438,7 @@ class FourWheelRearSteerRobot_V1(Robot):
 
         self._last_cmd = steer_targets.copy()
 
-        # Debug: print indices and commands (small-volume) so we can trace when wheels not moving
-        try:
-            print(
-                "[FourWheelRearSteerRobot_V1] "
-                f"rear_idx={self._rear_idx}, steer_idx={self._steer_idx}, "
-                f"v_mps={v_mps:.3f}, steer_cmd={steer_cmd:.3f}, steer_targets={steer_targets}"
-            )
-        except Exception:
-            pass
+        # Intentionally no per-frame prints here to keep physics loop lightweight.
 
 
 #  @ROBOTS.register()
@@ -1787,7 +2348,7 @@ class ForkliftRobotV3(FourWheelRearSteerRobot_V1):
     front_camera_type: Type[Sensor] = ZedStereoCamera
     front_camera_base_path: str = "sensors/front_stereo"
     front_camera_rotation: Tuple[float, float, float] = (0.0, 0.0, 0.0)
-    front_camera_translation: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    front_camera_translation: Tuple[float, float, float] = (1.00, 0.0, 1.75)
 
     def __init__(
         self,
@@ -1884,38 +2445,44 @@ class ForkliftRobotV3(FourWheelRearSteerRobot_V1):
         # Já temos self.front_camera (ZedStereoCamera) via build_front_camera,
         # mas expomos também em self.front_stereo para ficar explícito.
         self.front_stereo = self.front_camera
+        sensor_parent = self._resolve_sensor_mount_parent(self.prim_path)
 
         # Câmera fisheye esquerda
         try:
-            left_path = os.path.join(self.prim_path, "sensors/fisheye_left")
+            left_path = os.path.join(sensor_parent, "sensors/fisheye_left")
             _define_camera_prim(left_path)
             self.fisheye_left = Camera(left_path, (640, 480))
-            _xform_translate(left_path, (1.05, -0.38, 1.58))
-            qw, qx, qy, qz = _quat_from_euler_xyz(0.0, 0.0, 28.0)
+            _xform_translate(left_path, (1.00, -0.55, 1.85))
+            qw, qx, qy, qz = _quat_from_euler_xyz(0.0, 90.0, 30.0)
             _xform_orient_quat(left_path, (qw, qx, qy, qz))
         except Exception:
             self.fisheye_left = None
 
         # Câmera fisheye direita
         try:
-            right_path = os.path.join(self.prim_path, "sensors/fisheye_right")
+            right_path = os.path.join(sensor_parent, "sensors/fisheye_right")
             _define_camera_prim(right_path)
             self.fisheye_right = Camera(right_path, (640, 480))
-            _xform_translate(right_path, (1.05, 0.38, 1.58))
-            qw, qx, qy, qz = _quat_from_euler_xyz(0.0, 0.0, -28.0)
+            _xform_translate(right_path, (1.00, 0.55, 1.85))
+            qw, qx, qy, qz = _quat_from_euler_xyz(0.0, 90.0, -30.0)
             _xform_orient_quat(right_path, (qw, qx, qy, qz))
         except Exception:
             self.fisheye_right = None
 
         # Lidar 3D no topo
         try:
-            lidar_path = os.path.join(self.prim_path, "sensors/lidar")
+            lidar_path = os.path.join(sensor_parent, "sensors/lidar")
+            UsdGeom.Xform.Define(get_stage(), lidar_path)
             self.lidar = Lidar(lidar_path)
-            _xform_translate(lidar_path, (0.25, 0.0, 2.10))
+            lidar_mount = (0.15, 0.0, 2.15)
+            _xform_translate(lidar_path, lidar_mount)
+            qw, qx, qy, qz = _quat_from_euler_xyz(0.0, 0.0, 0.0)
+            _xform_orient_quat(lidar_path, (qw, qx, qy, qz))
             try:
                 self.lidar.enable_lidar()
             except Exception:
                 pass
+            _xform_translate(lidar_path, lidar_mount)
         except Exception:
             self.lidar = None
 

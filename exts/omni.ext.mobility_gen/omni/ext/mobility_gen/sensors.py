@@ -16,7 +16,7 @@
 
 import os
 import math
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List
 
 import numpy as np
 import omni.usd
@@ -29,6 +29,99 @@ from isaacsim.core.prims import SingleXFormPrim as XFormPrim
 from omni.ext.mobility_gen.utils.global_utils import get_stage
 from omni.ext.mobility_gen.utils.stage_utils import stage_add_usd_ref
 from omni.ext.mobility_gen.common import Module, Buffer
+
+
+def _normalize_asset_path(asset_path: str) -> str:
+    text = str(asset_path or "").strip()
+    if "://" in text:
+        return text
+    return os.path.normpath(text)
+
+
+def _list_authored_reference_assets(
+    prim,
+    layer_ids: Optional[set[str]] = None,
+) -> List[str]:
+    assets: List[str] = []
+    if prim is None or not prim.IsValid():
+        return assets
+    try:
+        for spec in prim.GetPrimStack():
+            try:
+                layer_id = str(spec.layer.identifier)
+            except Exception:
+                layer_id = ""
+            if layer_ids is not None and layer_id not in layer_ids:
+                continue
+            ref_list = getattr(spec, "referenceList", None)
+            if ref_list is None:
+                continue
+            for field_name in ("prependedItems", "explicitItems", "addedItems", "appendedItems"):
+                try:
+                    items = list(getattr(ref_list, field_name, []) or [])
+                except Exception:
+                    items = []
+                for item in items:
+                    try:
+                        asset = getattr(item, "assetPath", None)
+                        if asset:
+                            assets.append(str(asset))
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return assets
+
+
+def ensure_single_usd_reference(stage, path: str, usd_path: str, context: str = "sensor"):
+    """Add a USD reference, but fail if the prim already references another asset.
+
+    This prevents silent USD overlap/stacking at the same mount slot.
+    """
+    prim = stage.DefinePrim(path)
+    target = _normalize_asset_path(usd_path)
+
+    # Consider only references authored on the current stage layers.
+    layer_ids = set()
+    try:
+        root_layer = stage.GetRootLayer()
+        if root_layer is not None:
+            layer_ids.add(str(root_layer.identifier))
+    except Exception:
+        pass
+    try:
+        session_layer = stage.GetSessionLayer()
+        if session_layer is not None:
+            layer_ids.add(str(session_layer.identifier))
+    except Exception:
+        pass
+    if len(layer_ids) == 0:
+        layer_ids = None
+
+    existing = _list_authored_reference_assets(prim, layer_ids=layer_ids)
+    existing_norm = sorted({ _normalize_asset_path(ref) for ref in existing if str(ref).strip() != "" })
+
+    if len(existing_norm) > 1:
+        raise RuntimeError(
+            f"[{context}] USD overlap detected at '{path}'. Existing references={existing_norm}"
+        )
+    if len(existing_norm) == 1 and target not in existing_norm:
+        raise RuntimeError(
+            f"[{context}] USD overlap detected at '{path}'. "
+            f"Existing reference='{existing_norm[0]}', requested='{target}'."
+        )
+
+    # No reference yet -> add it. If same reference already exists, keep as-is.
+    if len(existing_norm) == 0:
+        prim.GetReferences().AddReference(usd_path)
+        after = _list_authored_reference_assets(prim, layer_ids=layer_ids)
+        after_norm = sorted({ _normalize_asset_path(ref) for ref in after if str(ref).strip() != "" })
+        if len(after_norm) > 1 or (len(after_norm) == 1 and target not in after_norm):
+            raise RuntimeError(
+                f"[{context}] USD overlap detected after add at '{path}'. References={after_norm}"
+            )
+
+    return prim
 
 
 class Sensor(Module):
@@ -205,14 +298,56 @@ class Lidar(Sensor):
       numpy array of shape (N, 3) or (N, 4).
     """
 
-    def __init__(self, prim_path: str):
+    # Local Isaac Sim 5.1 asset used as visual 3D model for the lidar.
+    usd_url: str = (
+        "/home/pdi_4/Documents/Documentos/bevlog-isaac/isaac-assets/"
+        "isaac-sim-assets-robots_and_sensors-5.1.0/Assets/Isaac/5.1/"
+        "Isaac/Sensors/Slamtec/RPLidar_S2e.usd"
+    )
+    visual_model_subpath: str = "model_3d"
+
+    def __init__(self, prim_path: str, visual_model_path: Optional[str] = None):
         self._prim_path = prim_path
+        self._visual_model_path = visual_model_path or os.path.join(
+            prim_path, self.visual_model_subpath
+        )
         self._xform_prim = XFormPrim(self._prim_path)
         self.pointcloud = Buffer(tags=["pointcloud"])  # the buffer consumers will look for
         # expose position/orientation so we can persist sensor pose if needed
         self.position = Buffer()
         self.orientation = Buffer()
+        self._rtx = None
         self._annotator = None
+
+    @classmethod
+    def build(cls, prim_path: str) -> "Lidar":
+        """Create lidar prim and attach a visual USD model under model_3d."""
+        stage = get_stage()
+        UsdGeom.Xform.Define(stage, prim_path)
+        ensure_single_usd_reference(
+            stage=stage,
+            path=os.path.join(prim_path, cls.visual_model_subpath),
+            usd_path=cls.usd_url,
+            context="Lidar",
+        )
+        return cls.attach(prim_path)
+
+    @classmethod
+    def attach(cls, prim_path: str) -> "Lidar":
+        return cls(
+            prim_path=prim_path,
+            visual_model_path=os.path.join(prim_path, cls.visual_model_subpath),
+        )
+
+    def ensure_visual_model(self):
+        """Best-effort model injection for existing lidar prims."""
+        stage = get_stage()
+        ensure_single_usd_reference(
+            stage=stage,
+            path=self._visual_model_path,
+            usd_path=self.usd_url,
+            context="Lidar",
+        )
 
     def enable_lidar(self):
         """Enable a Lidar source.
@@ -225,6 +360,9 @@ class Lidar(Sensor):
         After enabling, call `add_point_cloud_data_to_frame()` on RTX lidar
         to ensure point-clouds are captured into `get_current_frame()`.
         """
+        # Ensure visual representation exists (same style as camera wrappers).
+        self.ensure_visual_model()
+
         # Try RTX Lidar first
         try:
             from isaacsim.sensors.rtx import LidarRtx
@@ -323,8 +461,9 @@ class Lidar(Sensor):
 
 class HawkCamera(Sensor):
 
-    usd_url: str = "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.2/Isaac/LeopardImaging/Hawk/hawk_v1.1_nominal.usd"
-    resolution: Tuple[int, int] = (960, 600)
+    #usd_url: str = "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.2/Isaac/LeopardImaging/Hawk/hawk_v1.1_nominal.usd"
+    usd_url: str = "/home/pdi_4/Documents/Documentos/bevlog-isaac/isaac-assets/isaac-sim-assets-robots_and_sensors-5.1.0/Assets/Isaac/5.1/Isaac/Sensors/LeopardImaging/Hawk/hawk_v1.1_nominal.usd"
+    resolution: Tuple[int, int] = (640, 400)
     left_camera_path: str = "left/camera_left"
     right_camera_path: str = "right/camera_right"
 
@@ -340,10 +479,11 @@ class HawkCamera(Sensor):
         
         stage = get_stage()
 
-        stage_add_usd_ref(
+        ensure_single_usd_reference(
             stage=stage,
             path=prim_path,
-            usd_path=cls.usd_url
+            usd_path=cls.usd_url,
+            context="HawkCamera",
         )
 
         return cls.attach(prim_path)
@@ -369,8 +509,9 @@ class RealSenseRGBDCamera(Sensor):
     """
     # Ajuste para o caminho real do asset no seu servidor/Omniverse
    
-    usd_url: str = "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.2/Isaac/Sensors/RealSense/RealSense_D435.usd"
-    resolution: Tuple[int, int] = (1280, 720)
+    #usd_url: str = "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.2/Isaac/Sensors/RealSense/RealSense_D435.usd"
+    usd_url: str = "/home/pdi_4/Documents/Documentos/bevlog-isaac/isaac-assets/isaac-sim-assets-robots_and_sensors-5.1.0/Assets/Isaac/5.1/Isaac/Sensors/RealSense/RealSense_D435.usd"   
+    resolution: Tuple[int, int] = (640, 360)
     camera_path: str = "camera"  # subcaminho do prim de câmera dentro do USD referenciado
 
     def __init__(self, cam: Camera):
@@ -384,10 +525,11 @@ class RealSenseRGBDCamera(Sensor):
         """
         stage = get_stage()
 
-        stage_add_usd_ref(
+        ensure_single_usd_reference(
             stage=stage,
             path=prim_path,
             usd_path=cls.usd_url,
+            context="RealSenseRGBDCamera",
         )
 
         return cls.attach(prim_path)
@@ -414,8 +556,9 @@ class ZedStereoCamera(Sensor):
     - attach(): empacota os dois prims internos em duas Cameras (left/right)
     """
     # Ajuste para o caminho real do asset no seu servidor/Omniverse
-    usd_url: str = "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.2/Isaac/Sensors/Stereolabs/ZED_X/ZED_X.usd"
-    resolution: Tuple[int, int] = (1280, 720)
+    #usd_url: str = "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.2/Isaac/Sensors/Stereolabs/ZED_X/ZED_X.usd"
+    usd_url: str = "/home/pdi_4/Documents/Documentos/bevlog-isaac/isaac-assets/isaac-sim-assets-robots_and_sensors-5.1.0/Assets/Isaac/5.1/Isaac/Sensors/Stereolabs/ZED_X/ZED_X.usd"
+    resolution: Tuple[int, int] = (640, 360)
     left_camera_path: str = "left/camera_left"     # confirme no USD
     right_camera_path: str = "right/camera_right"  # confirme no USD
 
@@ -431,10 +574,11 @@ class ZedStereoCamera(Sensor):
         """
         stage = get_stage()
 
-        stage_add_usd_ref(
+        ensure_single_usd_reference(
             stage=stage,
             path=prim_path,
             usd_path=cls.usd_url,
+            context="ZedStereoCamera",
         )
 
         return cls.attach(prim_path)

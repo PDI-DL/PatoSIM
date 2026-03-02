@@ -29,7 +29,6 @@ from omni.ext.mobility_gen.robots import ROBOTS
 from omni.ext.mobility_gen.reader import Reader
 
 
-
 def load_scenario(path: str) -> Scenario:
     reader = Reader(path)
     config = reader.read_config()
