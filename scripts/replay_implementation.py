@@ -16,9 +16,7 @@
 """
 Replay and render a recording with Isaac Sim.
 
-This script supports:
-  - regular replay/render with SimulationApp
-  - dry-run mode to copy/write outputs without launching Isaac Sim
+This script replays a recording with SimulationApp and re-renders outputs.
 """
 
 import argparse
@@ -36,6 +34,11 @@ import tqdm
 
 STOP_REQUESTED = False
 
+if "MOBILITY_GEN_DATA" in os.environ:
+    DATA_DIR = os.environ["MOBILITY_GEN_DATA"]
+else:
+    DATA_DIR = os.path.expanduser("~/MobilityGenData")
+
 
 def parse_bool(value: Any) -> bool:
     if isinstance(value, bool):
@@ -50,28 +53,21 @@ def parse_bool(value: Any) -> bool:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input_path", type=str, required=True)
-    parser.add_argument("--output_path", type=str, required=True)
+    parser.add_argument("--input_path", type=str, default=os.path.join(DATA_DIR, "recordings"))
+    parser.add_argument("--output_path", type=str, default=os.path.join(DATA_DIR, "replays"))
     parser.add_argument("--rgb_enabled", type=parse_bool, default=True)
     parser.add_argument("--segmentation_enabled", type=parse_bool, default=True)
     parser.add_argument("--depth_enabled", type=parse_bool, default=True)
     parser.add_argument("--instance_id_segmentation_enabled", type=parse_bool, default=True)
     parser.add_argument("--normals_enabled", type=parse_bool, default=False)
     parser.add_argument("--render_rt_subframes", type=int, default=1)
-    parser.add_argument("--render_interval", type=int, default=1)
+    parser.add_argument("--render_interval", type=int, default=20)
     parser.add_argument("--pc_enabled", type=parse_bool, default=True)
     parser.add_argument("--pc_format", type=str, default="npy", choices=["npy", "ply", "pcd"])
     parser.add_argument("--annotations_enabled", type=parse_bool, default=True)
     parser.add_argument("--pc_interval", type=int, default=1)
     parser.add_argument("--overwrite", type=parse_bool, default=False)
     parser.add_argument("--verbose", type=parse_bool, default=False)
-    parser.add_argument(
-        "--dry_run",
-        type=parse_bool,
-        default=False,
-        help="If True, skip SimulationApp and copy/write data from recording to output only.",
-    )
-
     args, unknown = parser.parse_known_args()
     if unknown:
         print(f"[replay] Ignoring unknown args: {' '.join(unknown)}")
@@ -95,10 +91,6 @@ def enforce_full_capture(args: argparse.Namespace) -> None:
     if int(getattr(args, "pc_interval", 1)) != 1:
         print("[replay] Overriding --pc_interval to 1 to keep full per-frame pointcloud capture.")
     args.pc_interval = 1
-    if int(getattr(args, "render_interval", 1)) != 1:
-        print("[replay] Overriding --render_interval to 1 to keep full per-frame replay coverage.")
-    args.render_interval = 1
-
 
 def install_signal_handlers() -> None:
     def _signal_handler(sig: int, _frame: Any) -> None:
@@ -141,12 +133,9 @@ def init_simulation_app(headless: bool = True) -> Tuple[Any, Any]:
     return simulation_app, rep
 
 
-def load_runtime_modules(dry_run: bool):
+def load_runtime_modules():
     from omni.ext.mobility_gen.reader import Reader
     from omni.ext.mobility_gen.writer import Writer
-
-    if dry_run:
-        return Reader, Writer, None, None
 
     from omni.ext.mobility_gen.build import load_scenario
     from omni.ext.mobility_gen.utils.global_utils import get_world
@@ -264,6 +253,41 @@ def build_pointcloud_metadata(scenario: Any, state_pc: Dict[str, Any]) -> Dict[s
     return metadata
 
 
+def _camera_projection_contexts(stage: Any, xform_cache: Any, image_w: int = 640, image_h: int = 480):
+    from pxr import UsdGeom
+
+    cameras = []
+    for prim in stage.Traverse():
+        if prim.GetTypeName() != "Camera" or not prim.IsActive():
+            continue
+        try:
+            cam = UsdGeom.Camera(prim)
+            focal = cam.GetFocalLengthAttr().Get()
+            h_ap = cam.GetHorizontalApertureAttr().Get()
+            v_ap = cam.GetVerticalApertureAttr().Get()
+            fx = focal * image_w / h_ap if (h_ap and image_w) else 1.0
+            fy = focal * image_h / v_ap if (v_ap and image_h) else fx
+            cam_world = xform_cache.GetLocalToWorldTransform(prim)
+            cam_mat = cam_world.GetInverse()
+        except Exception:
+            continue
+        cameras.append(
+            {
+                "prim": prim,
+                "name": prim.GetName(),
+                "prim_path": prim.GetPath().pathString,
+                "image_w": image_w,
+                "image_h": image_h,
+                "fx": fx,
+                "fy": fy,
+                "cx": image_w / 2.0,
+                "cy": image_h / 2.0,
+                "cam_mat": cam_mat,
+            }
+        )
+    return cameras
+
+
 def gather_annotations(stage: Any) -> Dict[str, Any]:
     from pxr import Gf, Usd, UsdGeom
 
@@ -273,26 +297,10 @@ def gather_annotations(stage: Any) -> Dict[str, Any]:
 
     bbox_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
     xform_cache = UsdGeom.XformCache(Usd.TimeCode.Default())
-
-    image_w, image_h = 640, 480
-    camera_prim = None
-    for prim in stage.Traverse():
-        if prim.GetTypeName() == "Camera":
-            camera_prim = prim
-            break
-
-    cam_params = None
-    if camera_prim is not None:
-        cam = UsdGeom.Camera(camera_prim)
-        focal = cam.GetFocalLengthAttr().Get()
-        h_ap = cam.GetHorizontalApertureAttr().Get()
-        v_ap = cam.GetVerticalApertureAttr().Get()
-        fx = focal * image_w / h_ap if (h_ap and image_w) else 1.0
-        fy = focal * image_h / v_ap if (v_ap and image_h) else fx
-        cam_params = {"fx": fx, "fy": fy, "cx": image_w / 2.0, "cy": image_h / 2.0}
+    camera_contexts = _camera_projection_contexts(stage, xform_cache)
 
     for prim in stage.Traverse():
-        if prim.IsPseudoRoot() or not prim.IsActive():
+        if prim.IsPseudoRoot() or not prim.IsActive() or prim.GetTypeName() == "Camera":
             continue
 
         bound = bbox_cache.ComputeWorldBound(prim)
@@ -321,35 +329,34 @@ def gather_annotations(stage: Any) -> Dict[str, Any]:
             }
         )
 
-        if cam_params is None or camera_prim is None:
-            continue
+        for cam_ctx in camera_contexts:
+            xs = []
+            ys = []
+            for corner in corners:
+                wc = Gf.Vec4d(corner[0], corner[1], corner[2], 1.0)
+                cc = cam_ctx["cam_mat"] * wc
+                if cc[2] <= 0.0:
+                    continue
+                xs.append(float((cam_ctx["fx"] * (cc[0] / cc[2])) + cam_ctx["cx"]))
+                ys.append(float((cam_ctx["fy"] * (cc[1] / cc[2])) + cam_ctx["cy"]))
 
-        cam_world = xform_cache.GetLocalToWorldTransform(camera_prim)
-        cam_mat = cam_world.GetInverse()
-        xs = []
-        ys = []
-        for corner in corners:
-            wc = Gf.Vec4d(corner[0], corner[1], corner[2], 1.0)
-            cc = cam_mat * wc
-            if cc[2] <= 0.0:
-                continue
-            xs.append(float((cam_params["fx"] * (cc[0] / cc[2])) + cam_params["cx"]))
-            ys.append(float((cam_params["fy"] * (cc[1] / cc[2])) + cam_params["cy"]))
-
-        if xs and ys:
-            annotations["bboxes2d"].append(
-                {
-                    "prim_path": prim.GetPath().pathString,
-                    "class": class_name,
-                    "semantic_labels": semantic_labels,
-                    "bbox": [
-                        max(0.0, min(xs)),
-                        max(0.0, min(ys)),
-                        min(image_w - 1.0, max(xs)),
-                        min(image_h - 1.0, max(ys)),
-                    ],
-                }
-            )
+            if xs and ys:
+                annotations["bboxes2d"].append(
+                    {
+                        "prim_path": prim.GetPath().pathString,
+                        "camera_name": cam_ctx["name"],
+                        "camera_prim_path": cam_ctx["prim_path"],
+                        "image_size": [cam_ctx["image_w"], cam_ctx["image_h"]],
+                        "class": class_name,
+                        "semantic_labels": semantic_labels,
+                        "bbox": [
+                            max(0.0, min(xs)),
+                            max(0.0, min(ys)),
+                            min(cam_ctx["image_w"] - 1.0, max(xs)),
+                            min(cam_ctx["image_h"] - 1.0, max(ys)),
+                        ],
+                    }
+                )
 
     annotations["classes"] = sorted(
         {entry.get("class", "") for entry in annotations["bboxes3d"] if entry.get("class", "")}
@@ -357,14 +364,12 @@ def gather_annotations(stage: Any) -> Dict[str, Any]:
     return annotations
 
 
-def read_annotation_file(path: str) -> Optional[Dict[str, Any]]:
+def read_json_file(path: str) -> Optional[Any]:
     if not os.path.exists(path):
         return None
     try:
         with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            return data
+            return json.load(f)
     except Exception:
         pass
     return None
@@ -398,13 +403,28 @@ def build_annotation_payload(
     return payload
 
 
+def read_split_annotations(base_path: str, step: int) -> Optional[Dict[str, Any]]:
+    payload = {
+        "step": int(step),
+        "bboxes2d": read_json_file(os.path.join(base_path, "state", "bboxes2d", f"{step:08d}.json")) or [],
+        "bboxes3d": read_json_file(os.path.join(base_path, "state", "bboxes3d", f"{step:08d}.json")) or [],
+        "classes": read_json_file(os.path.join(base_path, "state", "classes", f"{step:08d}.json")) or [],
+        "semantic": read_json_file(os.path.join(base_path, "state", "semantic", f"{step:08d}.json")) or {},
+    }
+    if any((payload["bboxes2d"], payload["bboxes3d"], payload["classes"], payload["semantic"])):
+        return payload
+    legacy = read_json_file(os.path.join(base_path, "state", "annotations", f"{step:08d}.json"))
+    if isinstance(legacy, dict):
+        return legacy
+    return None
+
+
 def write_summary(
     output_path: str,
     input_path: str,
     pc_written_count: int,
     annotations_written_count: int,
     verbose: bool,
-    dry_run: bool,
 ) -> None:
     print("\n=== Replay summary ===")
     print(f"Pointcloud entries written: {pc_written_count}")
@@ -413,7 +433,7 @@ def write_summary(
     os.makedirs(output_path, exist_ok=True)
     summary_path = os.path.join(output_path, "replay_summary.txt")
     with open(summary_path, "w", encoding="utf-8") as f:
-        f.write("Replay summary (dry_run)\n" if dry_run else "Replay summary\n")
+        f.write("Replay summary\n")
         f.write(f"Input: {input_path}\n")
         f.write(f"Output: {output_path}\n")
         f.write(f"Pointcloud entries written: {pc_written_count}\n")
@@ -427,21 +447,34 @@ def write_summary(
         )
         depth_files = glob.glob(os.path.join(output_path, "state", "depth", "*", "*.png"))
         normals_files = glob.glob(os.path.join(output_path, "state", "normals", "*", "*.npy"))
-        ann_files = glob.glob(os.path.join(output_path, "state", "annotations", "*.json"))
+        bbox2d_files = glob.glob(os.path.join(output_path, "state", "bboxes2d", "*.json"))
+        bbox3d_files = glob.glob(os.path.join(output_path, "state", "bboxes3d", "*.json"))
+        class_files = glob.glob(os.path.join(output_path, "state", "classes", "*.json"))
+        semantic_files = glob.glob(os.path.join(output_path, "state", "semantic", "*.json"))
         f.write(f"state/common files: {len(common_files)}\n")
         f.write(f"state/rgb images: {len(rgb_files)}\n")
         f.write(f"state/segmentation images: {len(seg_files)}\n")
         f.write(f"state/instance_id_segmentation images: {len(inst_seg_files)}\n")
         f.write(f"state/depth images: {len(depth_files)}\n")
         f.write(f"state/normals arrays: {len(normals_files)}\n")
-        f.write(f"state/annotations files: {len(ann_files)}\n")
+        f.write(f"state/bboxes2d files: {len(bbox2d_files)}\n")
+        f.write(f"state/bboxes3d files: {len(bbox3d_files)}\n")
+        f.write(f"state/classes files: {len(class_files)}\n")
+        f.write(f"state/semantic files: {len(semantic_files)}\n")
 
         total_bbox2d = 0
         total_bbox3d = 0
-        semantic_files = 0
+        semantic_payload_files = 0
         class_labels = set()
-        for ann_path in ann_files:
-            ann_data = read_annotation_file(ann_path)
+        annotation_steps = sorted(
+            {
+                int(Path(p).stem)
+                for p in (bbox2d_files + bbox3d_files + class_files + semantic_files)
+                if Path(p).stem.isdigit()
+            }
+        )
+        for step in annotation_steps:
+            ann_data = read_split_annotations(output_path, step)
             if not isinstance(ann_data, dict):
                 continue
             b2d = ann_data.get("bboxes2d")
@@ -454,10 +487,10 @@ def write_summary(
                     if isinstance(entry, dict) and "class" in entry:
                         class_labels.add(str(entry["class"]))
             if isinstance(ann_data.get("semantic"), dict) and ann_data["semantic"]:
-                semantic_files += 1
+                semantic_payload_files += 1
         f.write(f"Total bbox2d entries: {total_bbox2d}\n")
         f.write(f"Total bbox3d entries: {total_bbox3d}\n")
-        f.write(f"Annotation files with semantic payload: {semantic_files}\n")
+        f.write(f"Annotation files with semantic payload: {semantic_payload_files}\n")
         f.write(f"Detected class labels: {len(class_labels)}\n")
 
         pc_root = os.path.join(output_path, "state", "pointcloud")
@@ -475,55 +508,6 @@ def write_summary(
                     f.write(f"  {sensor}: {file_count} files\n")
     if verbose:
         print(f"Wrote replay summary to: {summary_path}")
-
-
-def run_dry_run(args: argparse.Namespace, reader: Any, writer: Any) -> Tuple[int, int]:
-    pc_written_count = 0
-    annotations_written_count = 0
-    num_steps = len(reader)
-    pc_interval = max(1, int(args.pc_interval))
-
-    print("[replay] Running in dry_run mode")
-    for step in range(0, num_steps, args.render_interval):
-        if STOP_REQUESTED:
-            print("[replay] Stop requested; leaving dry_run loop.")
-            break
-
-        state_dict_common = reader.read_state_dict_common(index=step)
-        writer.write_state_dict_common(state_dict_common, step)
-
-        if args.rgb_enabled:
-            writer.write_state_dict_rgb(reader.read_state_dict_rgb(index=step), step)
-        if args.segmentation_enabled:
-            writer.write_state_dict_segmentation(reader.read_state_dict_segmentation(index=step), step)
-        if args.instance_id_segmentation_enabled:
-            writer.write_state_dict_instance_id_segmentation(
-                reader.read_state_dict_instance_id_segmentation(index=step), step
-            )
-        if args.depth_enabled:
-            writer.write_state_dict_depth(reader.read_state_dict_depth(index=step), step)
-        if args.normals_enabled:
-            writer.write_state_dict_normals(reader.read_state_dict_normals(index=step), step)
-
-        if args.pc_enabled and (step % pc_interval) == 0:
-            pc_from_reader = reader.read_state_dict_pointcloud(index=step)
-            if has_any_data(pc_from_reader):
-                writer.write_state_dict_pointcloud(pc_from_reader, step, save_format=args.pc_format)
-                pc_written_count += count_non_none(pc_from_reader)
-
-        if args.annotations_enabled:
-            src_ann = os.path.join(args.input_path, "state", "annotations", f"{step:08d}.json")
-            src_payload = read_annotation_file(src_ann)
-            semantic_state = extract_semantic_state_from_state_dict(state_dict_common)
-            payload = build_annotation_payload(
-                step=step,
-                base_annotations=src_payload,
-                semantic_state=semantic_state,
-            )
-            writer.write_annotations(payload, step)
-            annotations_written_count += 1
-
-    return pc_written_count, annotations_written_count
 
 
 def run_replay(
@@ -573,7 +557,7 @@ def run_replay(
             print("[replay] Stop requested; leaving replay loop.")
             break
 
-        replay_state = reader.read_state_dict(index=step)
+        replay_state = reader.read_state_dict_flat(index=step)
         scenario.load_state_dict(replay_state)
         scenario.write_replay_data()
 
@@ -643,30 +627,26 @@ def main() -> int:
     args.input_path = os.path.expanduser(args.input_path)
     args.output_path = os.path.expanduser(args.output_path)
 
+    if os.path.isdir(args.input_path) and not os.path.isdir(os.path.join(args.input_path, "state")):
+        candidates = sorted(
+            [p for p in glob.glob(os.path.join(args.input_path, "*")) if os.path.isdir(p)],
+            key=os.path.getmtime,
+        )
+        if not candidates:
+            print(f"[replay] No recording directories found in: {args.input_path}")
+            return 1
+        args.input_path = candidates[-1]
+
+    input_name = os.path.basename(os.path.normpath(args.input_path))
+    if (
+        args.output_path.endswith("/replays")
+        or args.output_path.endswith(os.path.sep + "replays")
+        or (os.path.isdir(args.output_path) and not os.path.isdir(os.path.join(args.output_path, "state")))
+    ):
+        args.output_path = os.path.join(args.output_path, input_name)
+
     install_signal_handlers()
     bootstrap_repo_paths()
-
-    if args.dry_run:
-        try:
-            Reader, Writer, _, _ = load_runtime_modules(dry_run=True)
-        except Exception as exc:
-            print(f"[replay] Failed to import Reader/Writer modules for dry_run: {exc}")
-            return 1
-
-        reader = Reader(args.input_path)
-        writer = Writer(args.output_path)
-        writer.copy_init(args.input_path, overwrite=args.overwrite, verbose=args.verbose)
-        print("============== Replaying ==============")
-        print(f"\tInput path: {args.input_path}")
-        print(f"\tOutput path: {args.output_path}")
-        print(f"\tRgb enabled: {args.rgb_enabled}")
-        print(f"\tSegmentation enabled: {args.segmentation_enabled}")
-        print(f"\tRendering RT subframes: {args.render_rt_subframes}")
-        print(f"\tRender interval: {args.render_interval}")
-        print(f"\tDry run: {args.dry_run}")
-        pc_count, ann_count = run_dry_run(args, reader, writer)
-        write_summary(args.output_path, args.input_path, pc_count, ann_count, args.verbose, dry_run=True)
-        return 0
 
     try:
         simulation_app, rep = init_simulation_app(headless=True)
@@ -676,7 +656,7 @@ def main() -> int:
 
     try:
         bootstrap_repo_paths()
-        Reader, Writer, load_scenario, get_world = load_runtime_modules(dry_run=False)
+        Reader, Writer, load_scenario, get_world = load_runtime_modules()
         reader = Reader(args.input_path)
         writer = Writer(args.output_path)
         writer.copy_init(args.input_path, overwrite=args.overwrite, verbose=args.verbose)
@@ -687,7 +667,6 @@ def main() -> int:
         print(f"\tSegmentation enabled: {args.segmentation_enabled}")
         print(f"\tRendering RT subframes: {args.render_rt_subframes}")
         print(f"\tRender interval: {args.render_interval}")
-        print(f"\tDry run: {args.dry_run}")
         pc_count, ann_count = run_replay(
             args=args,
             reader=reader,
@@ -701,7 +680,7 @@ def main() -> int:
         print(f"[replay] Replay failed: {exc}")
         return 1
 
-    write_summary(args.output_path, args.input_path, pc_count, ann_count, args.verbose, dry_run=False)
+    write_summary(args.output_path, args.input_path, pc_count, ann_count, args.verbose)
     return 0
 
 

@@ -45,22 +45,21 @@ def parse_bool(value: Any) -> bool:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", type=str, default=None)
-    parser.add_argument("--output", type=str, default=None)
+    parser.add_argument("--input", type=str, default=os.path.join(DATA_DIR, "recordings"))
+    parser.add_argument("--output", type=str, default=os.path.join(DATA_DIR, "replays"))
     parser.add_argument("--rgb_enabled", type=parse_bool, default=True)
     parser.add_argument("--segmentation_enabled", type=parse_bool, default=True)
     parser.add_argument("--depth_enabled", type=parse_bool, default=True)
     parser.add_argument("--instance_id_segmentation_enabled", type=parse_bool, default=True)
     parser.add_argument("--normals_enabled", type=parse_bool, default=False)
     parser.add_argument("--render_rt_subframes", type=int, default=1)
-    parser.add_argument("--render_interval", type=int, default=1)
+    parser.add_argument("--render_interval", type=int, default=20)
     parser.add_argument("--pc_enabled", type=parse_bool, default=True)
     parser.add_argument("--pc_format", type=str, default="npy", choices=["npy", "ply", "pcd"])
     parser.add_argument("--annotations_enabled", type=parse_bool, default=True)
     parser.add_argument("--pc_interval", type=int, default=1)
     parser.add_argument("--overwrite", type=parse_bool, default=False)
     parser.add_argument("--verbose", type=parse_bool, default=False)
-    parser.add_argument("--dry_run", type=parse_bool, default=False)
     args = parser.parse_args()
     return args
 
@@ -132,16 +131,24 @@ def warn_if_inotify_pressure(prefix: str) -> None:
 def main() -> int:
     args = parse_args()
 
-    if args.input is None:
-        print("[replay] Missing --input for single-recording replay.")
-        return 1
-    if args.output is None:
-        print("[replay] Missing --output for single-recording replay.")
-        return 1
-
     recording_path = os.path.expanduser(args.input)
     output_path = os.path.expanduser(args.output)
+
+    if os.path.isdir(recording_path) and os.path.isdir(os.path.join(recording_path, "state")) is False:
+        candidates = sorted(
+            [p for p in glob.glob(os.path.join(recording_path, "*")) if os.path.isdir(p)],
+            key=os.path.getmtime,
+        )
+        if not candidates:
+            print(f"[replay] No recording directories found in: {recording_path}")
+            return 1
+        recording_path = candidates[-1]
+
     name = os.path.basename(recording_path)
+    if output_path.endswith("/replays") or output_path.endswith(os.path.sep + "replays") or (
+        os.path.isdir(output_path) and os.path.isdir(os.path.join(output_path, "state")) is False
+    ):
+        output_path = os.path.join(output_path, name)
 
     if not os.path.isdir(recording_path):
         print(f"[replay] Input recording path not found: {recording_path}")
@@ -199,8 +206,6 @@ def main() -> int:
         str(args.overwrite),
         "--verbose",
         str(args.verbose),
-        "--dry_run",
-        str(args.dry_run),
     ]
 
     try:

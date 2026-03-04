@@ -2202,48 +2202,47 @@ class MobilityGenExtension(omni.ext.IExt):
         """Collect 3D and 2D bounding boxes for prims in the stage.
 
         3D boxes are returned as 8-corner lists in world coordinates. 2D
-        boxes are projected into the first camera found on the stage and
-        reported as [xmin, ymin, xmax, ymax] in pixel coordinates. Classes
-        are defaulted to the prim name if no explicit metadata is present.
-        This is a best-effort helper intended for synthetic data generation.
+        boxes are projected for every camera found on the stage and each
+        entry records the camera path/name used for the projection.
         """
         annotations = {"bboxes2d": [], "bboxes3d": [], "classes": []}
         stage = get_stage()
         if stage is None:
             return annotations
 
-        # Build bbox cache and xform cache
         bbox_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
         xform_cache = UsdGeom.XformCache(Usd.TimeCode.Default())
-
-        # Find a camera to project to (first Camera prim)
-        camera_prim = None
+        camera_contexts = []
         for prim in stage.Traverse():
-            if prim.GetTypeName() == "Camera":
-                camera_prim = prim
-                break
-
-        # Determine image size and camera intrinsics if camera found
-        image_w, image_h = 640, 480
-        cam_params = None
-        if camera_prim is not None:
-            cam = UsdGeom.Camera(camera_prim)
+            if prim.GetTypeName() != "Camera" or not prim.IsActive():
+                continue
             try:
+                image_w, image_h = 640, 480
+                cam = UsdGeom.Camera(prim)
                 focal = cam.GetFocalLengthAttr().Get()
                 h_ap = cam.GetHorizontalApertureAttr().Get()
                 v_ap = cam.GetVerticalApertureAttr().Get()
-                # assume default image size; derive focal length in pixels
                 fx = focal * image_w / h_ap if (h_ap and image_w) else 1.0
                 fy = focal * image_h / v_ap if (v_ap and image_h) else fx
-                cx = image_w / 2.0
-                cy = image_h / 2.0
-                cam_params = {"fx": fx, "fy": fy, "cx": cx, "cy": cy}
+                cam_world = xform_cache.GetLocalToWorldTransform(prim)
+                camera_contexts.append(
+                    {
+                        "name": prim.GetName(),
+                        "prim_path": prim.GetPath().pathString,
+                        "image_w": image_w,
+                        "image_h": image_h,
+                        "fx": fx,
+                        "fy": fy,
+                        "cx": image_w / 2.0,
+                        "cy": image_h / 2.0,
+                        "cam_mat": cam_world.GetInverse(),
+                    }
+                )
             except Exception:
-                cam_params = None
+                continue
 
-        # Iterate prims and compute bounds
         for prim in stage.Traverse():
-            if prim.IsPseudoRoot() or not prim.IsActive():
+            if prim.IsPseudoRoot() or not prim.IsActive() or prim.GetTypeName() == "Camera":
                 continue
             try:
                 bound = bbox_cache.ComputeWorldBound(prim)
@@ -2269,37 +2268,30 @@ class MobilityGenExtension(omni.ext.IExt):
                     "corners": corners,
                 })
 
-                # 2D projection (first camera only)
-                if cam_params is not None and camera_prim is not None:
-                    # compute world-to-camera matrix
-                    cam_world = xform_cache.GetLocalToWorldTransform(camera_prim)
-                    try:
-                        cam_mat = cam_world.GetInverse()
-                    except Exception:
-                        cam_mat = None
+                for cam_ctx in camera_contexts:
+                    cam_mat = cam_ctx["cam_mat"]
                     if cam_mat is not None:
-                        # project corners
                         xs = []
                         ys = []
                         for c in corners:
-                            # Gf.Matrix4d multiply with Gf.Vec4d
                             wc = Gf.Vec4d(c[0], c[1], c[2], 1.0)
                             cc = cam_mat * wc
-                            # camera coordinates: cc[0], cc[1], cc[2]
                             if cc[2] <= 0.0:
-                                # behind camera: skip point
                                 continue
-                            x_pix = (cam_params["fx"] * (cc[0] / cc[2])) + cam_params["cx"]
-                            y_pix = (cam_params["fy"] * (cc[1] / cc[2])) + cam_params["cy"]
+                            x_pix = (cam_ctx["fx"] * (cc[0] / cc[2])) + cam_ctx["cx"]
+                            y_pix = (cam_ctx["fy"] * (cc[1] / cc[2])) + cam_ctx["cy"]
                             xs.append(float(x_pix))
                             ys.append(float(y_pix))
                         if len(xs) > 0 and len(ys) > 0:
                             xmin = max(0.0, min(xs))
                             ymin = max(0.0, min(ys))
-                            xmax = min(image_w - 1.0, max(xs))
-                            ymax = min(image_h - 1.0, max(ys))
+                            xmax = min(cam_ctx["image_w"] - 1.0, max(xs))
+                            ymax = min(cam_ctx["image_h"] - 1.0, max(ys))
                             annotations["bboxes2d"].append({
                                 "prim_path": prim.GetPath().pathString,
+                                "camera_name": cam_ctx["name"],
+                                "camera_prim_path": cam_ctx["prim_path"],
+                                "image_size": [cam_ctx["image_w"], cam_ctx["image_h"]],
                                 "class": class_name,
                                 "semantic_labels": semantic_labels,
                                 "bbox": [xmin, ymin, xmax, ymax],

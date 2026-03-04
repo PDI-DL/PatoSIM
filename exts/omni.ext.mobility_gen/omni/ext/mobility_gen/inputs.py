@@ -80,13 +80,25 @@ class KeyboardDriver(object):
         self._input = carb.input.acquire_input_interface()
         self._keyboard = self._appwindow.get_keyboard() if self._appwindow is not None else None
 
+    def _needs_reconnect(self) -> bool:
+        current_appwindow = omni.appwindow.get_default_app_window()
+        current_input = carb.input.acquire_input_interface()
+        current_keyboard = current_appwindow.get_keyboard() if current_appwindow is not None else None
+        return (
+            self._event_handle is None
+            or self._appwindow is not current_appwindow
+            or self._input is not current_input
+            or self._keyboard is not current_keyboard
+            or self._keyboard is None
+        )
+
     def _connect(self):
+        if self._event_handle is not None:
+            self._disconnect()
         self._refresh_interfaces()
         if self._keyboard is None or self._input is None:
             self._event_handle = None
             return False
-        if self._event_handle is not None:
-            self._disconnect()
         self._event_handle = self._input.subscribe_to_keyboard_events(
             self._keyboard,
             self._event_callback
@@ -116,7 +128,7 @@ class KeyboardDriver(object):
     @staticmethod
     def ensure_connected():
         instance = KeyboardDriver.instance()
-        if instance._event_handle is None:
+        if instance._needs_reconnect():
             instance._connect()
         return instance
     
@@ -133,6 +145,8 @@ class KeyboardDriver(object):
         return KeyboardDriver._instance
 
     def get_button_values(self) -> np.ndarray:
+        if self._needs_reconnect():
+            self._connect()
         return np.array([b.value for b in self.buttons])
     
 

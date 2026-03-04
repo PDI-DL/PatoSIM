@@ -176,17 +176,27 @@ class Writer:
                     f.write(f"{p[0]} {p[1]} {p[2]}\n")
 
     def write_annotations(self, annotations: dict, step: int):
-        """Write annotation dict to state/annotations/<step>.json.
+        """Write annotations into split folders under state/.
 
-        The annotations dict should be JSON-serializable and contain any
-        entries (2D/3D boxes, classes, etc.).
+        Output layout:
+          - state/bboxes2d/<step>.json
+          - state/bboxes3d/<step>.json
+          - state/classes/<step>.json
+          - state/semantic/<step>.json
         """
-        ann_folder = os.path.join(self.path, "state", "annotations")
-        if not os.path.exists(ann_folder):
-            os.makedirs(ann_folder)
-        ann_path = os.path.join(ann_folder, f"{step:08d}.json")
-        with open(ann_path, "w") as f:
-            json.dump(annotations, f, indent=2)
+        payload = annotations if isinstance(annotations, dict) else {}
+        self._write_json_state_entry("bboxes2d", payload.get("bboxes2d", []), step)
+        self._write_json_state_entry("bboxes3d", payload.get("bboxes3d", []), step)
+        self._write_json_state_entry("classes", payload.get("classes", []), step)
+        self._write_json_state_entry("semantic", payload.get("semantic", {}), step)
+
+    def _write_json_state_entry(self, folder_name: str, data, step: int):
+        folder = os.path.join(self.path, "state", folder_name)
+        if not os.path.exists(folder):
+            os.makedirs(folder)
+        output_path = os.path.join(folder, f"{step:08d}.json")
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
 
     def write_pointcloud_metadata(self, metadata: dict, step: int):
         """Write per-sensor metadata for pointclouds.

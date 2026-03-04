@@ -50,6 +50,10 @@ class Reader:
         self.depth_folders = glob.glob(os.path.join(self.recording_path, "state", "depth", "*"))
         self.normals_folders = glob.glob(os.path.join(self.recording_path, "state", "normals", "*"))
         self.pointcloud_folders = glob.glob(os.path.join(self.recording_path, "state", "pointcloud", "*"))
+        self.bboxes2d_paths = glob.glob(os.path.join(self.recording_path, "state", "bboxes2d", "*.json"))
+        self.bboxes3d_paths = glob.glob(os.path.join(self.recording_path, "state", "bboxes3d", "*.json"))
+        self.classes_paths = glob.glob(os.path.join(self.recording_path, "state", "classes", "*.json"))
+        self.semantic_paths = glob.glob(os.path.join(self.recording_path, "state", "semantic", "*.json"))
         self.annotation_paths = glob.glob(os.path.join(self.recording_path, "state", "annotations", "*.json"))
 
         self.rgb_names = [os.path.basename(folder) for folder in self.rgb_folders]
@@ -60,12 +64,19 @@ class Reader:
         self.depth_names = [os.path.basename(folder) for folder in self.depth_folders]
         self.normals_names = [os.path.basename(folder) for folder in self.normals_folders]
         self.pointcloud_names = [os.path.basename(folder) for folder in self.pointcloud_folders]
+        annotation_sources = (
+            self.bboxes2d_paths
+            + self.bboxes3d_paths
+            + self.classes_paths
+            + self.semantic_paths
+            + self.annotation_paths
+        )
         self.annotation_steps = sorted(
-            [
+            {
                 int(os.path.basename(path).split(".")[0])
-                for path in self.annotation_paths
+                for path in annotation_sources
                 if os.path.basename(path).split(".")[0].isdigit()
-            ]
+            }
         )
 
     def read_config(self) -> Config:
@@ -212,6 +223,27 @@ class Reader:
 
     def read_annotations(self, index: int):
         step = self.steps[index]
+        bboxes2d = self._read_json_state_entry("bboxes2d", step, default=[])
+        bboxes3d = self._read_json_state_entry("bboxes3d", step, default=[])
+        classes = self._read_json_state_entry("classes", step, default=[])
+        semantic = self._read_json_state_entry("semantic", step, default={})
+
+        if any(
+            (
+                bboxes2d not in (None, []),
+                bboxes3d not in (None, []),
+                classes not in (None, []),
+                semantic not in (None, {}),
+            )
+        ):
+            return {
+                "step": int(step),
+                "bboxes2d": bboxes2d if isinstance(bboxes2d, list) else [],
+                "bboxes3d": bboxes3d if isinstance(bboxes3d, list) else [],
+                "classes": classes if isinstance(classes, list) else [],
+                "semantic": semantic if isinstance(semantic, dict) else {},
+            }
+
         ann_path = os.path.join(self.recording_path, "state", "annotations", f"{step:08d}.json")
         if not os.path.exists(ann_path):
             return None
@@ -221,7 +253,51 @@ class Reader:
         except Exception:
             return None
 
+    def _read_json_state_entry(self, folder_name: str, step: int, default=None):
+        path = os.path.join(self.recording_path, "state", folder_name, f"{step:08d}.json")
+        if not os.path.exists(path):
+            return default
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return default
+
+    def read_bboxes2d(self, index: int):
+        step = self.steps[index]
+        data = self._read_json_state_entry("bboxes2d", step, default=None)
+        if data is not None:
+            return data
+        annotations = self.read_annotations(index)
+        if isinstance(annotations, dict):
+            return annotations.get("bboxes2d", [])
+        return []
+
+    def read_bboxes3d(self, index: int):
+        step = self.steps[index]
+        data = self._read_json_state_entry("bboxes3d", step, default=None)
+        if data is not None:
+            return data
+        annotations = self.read_annotations(index)
+        if isinstance(annotations, dict):
+            return annotations.get("bboxes3d", [])
+        return []
+
+    def read_classes(self, index: int):
+        step = self.steps[index]
+        data = self._read_json_state_entry("classes", step, default=None)
+        if data is not None:
+            return data
+        annotations = self.read_annotations(index)
+        if isinstance(annotations, dict):
+            return annotations.get("classes", [])
+        return []
+
     def read_semantic_annotations(self, index: int):
+        step = self.steps[index]
+        data = self._read_json_state_entry("semantic", step, default=None)
+        if isinstance(data, dict):
+            return data
         annotations = self.read_annotations(index)
         if not isinstance(annotations, dict):
             return None
@@ -230,8 +306,7 @@ class Reader:
             return semantic
         return None
 
-    def read_state_dict(self, index: int):
-
+    def read_state_dict_flat(self, index: int):
         state_dict = self.read_state_dict_common(index)
         rgb_dict = self.read_state_dict_rgb(index)
         segmentation_dict = self.read_state_dict_segmentation(index)
@@ -248,8 +323,29 @@ class Reader:
         full_dict.update(depth_dict)
         full_dict.update(normals_dict)
         full_dict.update(pc_dict)
-
         return full_dict
+
+    def read_state_dict(self, index: int):
+        pointcloud_metadata = OrderedDict()
+        for name in self.pointcloud_names:
+            pointcloud_metadata[name] = self.read_pointcloud_metadata(name, index)
+
+        return OrderedDict(
+            [
+                ("common", self.read_state_dict_common(index)),
+                ("rgb", self.read_state_dict_rgb(index)),
+                ("segmentation", self.read_state_dict_segmentation(index)),
+                ("instance_id_segmentation", self.read_state_dict_instance_id_segmentation(index)),
+                ("depth", self.read_state_dict_depth(index)),
+                ("normals", self.read_state_dict_normals(index)),
+                ("pointcloud", self.read_state_dict_pointcloud(index)),
+                ("pointcloud_metadata", pointcloud_metadata),
+                ("bboxes2d", self.read_bboxes2d(index)),
+                ("bboxes3d", self.read_bboxes3d(index)),
+                ("classes", self.read_classes(index)),
+                ("semantic", self.read_semantic_annotations(index) or {}),
+            ]
+        )
     
     def __len__(self) -> int:
         return len(self.steps)

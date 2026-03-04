@@ -45,22 +45,21 @@ def parse_bool(value: Any) -> bool:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", type=str, default=None)
-    parser.add_argument("--output", type=str, default=None)
+    parser.add_argument("--input", type=str, default=os.path.join(DATA_DIR, "recordings"))
+    parser.add_argument("--output", type=str, default=os.path.join(DATA_DIR, "replays"))
     parser.add_argument("--rgb_enabled", type=parse_bool, default=True)
     parser.add_argument("--segmentation_enabled", type=parse_bool, default=True)
     parser.add_argument("--depth_enabled", type=parse_bool, default=True)
     parser.add_argument("--instance_id_segmentation_enabled", type=parse_bool, default=True)
     parser.add_argument("--normals_enabled", type=parse_bool, default=False)
     parser.add_argument("--render_rt_subframes", type=int, default=1)
-    parser.add_argument("--render_interval", type=int, default=1)
+    parser.add_argument("--render_interval", type=int, default=20)
     parser.add_argument("--pc_enabled", type=parse_bool, default=True)
     parser.add_argument("--pc_format", type=str, default="npy", choices=["npy", "ply", "pcd"])
     parser.add_argument("--annotations_enabled", type=parse_bool, default=True)
     parser.add_argument("--pc_interval", type=int, default=1)
     parser.add_argument("--overwrite", type=parse_bool, default=False)
     parser.add_argument("--verbose", type=parse_bool, default=False)
-    parser.add_argument("--dry_run", type=parse_bool, default=False)
     return parser.parse_args()
 
 
@@ -130,11 +129,6 @@ def warn_if_inotify_pressure(prefix: str) -> None:
 
 def main() -> int:
     args = parse_args()
-
-    if args.input is None:
-        args.input = os.path.join(DATA_DIR, "recordings")
-    if args.output is None:
-        args.output = os.path.join(DATA_DIR, "replays")
 
     args.input = os.path.expanduser(args.input)
     args.output = os.path.expanduser(args.output)
@@ -214,8 +208,6 @@ def main() -> int:
             str(args.overwrite),
             "--verbose",
             str(args.verbose),
-            "--dry_run",
-            str(args.dry_run),
         ]
 
         try:
