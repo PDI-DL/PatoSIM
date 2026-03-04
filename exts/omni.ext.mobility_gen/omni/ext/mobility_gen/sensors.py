@@ -31,6 +31,92 @@ from omni.ext.mobility_gen.utils.stage_utils import stage_add_usd_ref
 from omni.ext.mobility_gen.common import Module, Buffer
 
 
+def _structured_pointcloud_to_array(array: np.ndarray) -> Optional[np.ndarray]:
+    if array is None:
+        return None
+    try:
+        if getattr(array.dtype, "names", None):
+            names = list(array.dtype.names or [])
+            lower_map = {str(name).lower(): name for name in names}
+            if not {"x", "y", "z"}.issubset(lower_map.keys()):
+                return None
+            cols = [
+                np.asarray(array[lower_map["x"]], dtype=np.float32).reshape(-1, 1),
+                np.asarray(array[lower_map["y"]], dtype=np.float32).reshape(-1, 1),
+                np.asarray(array[lower_map["z"]], dtype=np.float32).reshape(-1, 1),
+            ]
+            if "intensity" in lower_map:
+                cols.append(np.asarray(array[lower_map["intensity"]], dtype=np.float32).reshape(-1, 1))
+            return np.concatenate(cols, axis=1)
+    except Exception:
+        return None
+    return None
+
+
+def _extract_pointcloud_array(payload) -> Optional[np.ndarray]:
+    if payload is None:
+        return None
+
+    if isinstance(payload, dict):
+        for key in (
+            "point_cloud_data",
+            "point_cloud",
+            "data",
+            "points",
+            "dataCpu",
+            "dataPtr",
+        ):
+            if key in payload:
+                extracted = _extract_pointcloud_array(payload[key])
+                if extracted is not None:
+                    return extracted
+        for value in payload.values():
+            extracted = _extract_pointcloud_array(value)
+            if extracted is not None:
+                return extracted
+        return None
+
+    try:
+        arr = np.asarray(payload)
+    except Exception:
+        return None
+
+    structured = _structured_pointcloud_to_array(arr)
+    if structured is not None:
+        return structured
+
+    if arr.ndim == 1 and arr.size >= 3:
+        if arr.size % 4 == 0:
+            arr = arr.reshape(-1, 4)
+        elif arr.size % 3 == 0:
+            arr = arr.reshape(-1, 3)
+        else:
+            return None
+
+    if arr.ndim != 2 or arr.shape[0] <= 0 or arr.shape[1] < 3:
+        return None
+
+    return np.asarray(arr[:, : min(arr.shape[1], 4)], dtype=np.float32)
+
+
+def _sanitize_pointcloud_array(array: Optional[np.ndarray]) -> Optional[np.ndarray]:
+    if array is None:
+        return None
+    try:
+        pts = np.asarray(array, dtype=np.float32)
+    except Exception:
+        return None
+    if pts.ndim != 2 or pts.shape[0] <= 0 or pts.shape[1] < 3:
+        return None
+    finite_mask = np.all(np.isfinite(pts[:, :3]), axis=1)
+    if not np.any(finite_mask):
+        return None
+    pts = pts[finite_mask]
+    if pts.shape[0] <= 0:
+        return None
+    return np.ascontiguousarray(pts)
+
+
 def _normalize_asset_path(asset_path: str) -> str:
     text = str(asset_path or "").strip()
     if "://" in text:
@@ -305,9 +391,11 @@ class Lidar(Sensor):
         "Isaac/Sensors/Slamtec/RPLidar_S2e.usd"
     )
     visual_model_subpath: str = "model_3d"
+    sensor_prim_subpath: str = "rtx_sensor"
 
     def __init__(self, prim_path: str, visual_model_path: Optional[str] = None):
         self._prim_path = prim_path
+        self._sensor_prim_path = os.path.join(prim_path, self.sensor_prim_subpath)
         self._visual_model_path = visual_model_path or os.path.join(
             prim_path, self.visual_model_subpath
         )
@@ -316,8 +404,12 @@ class Lidar(Sensor):
         # expose position/orientation so we can persist sensor pose if needed
         self.position = Buffer()
         self.orientation = Buffer()
+        self.status = Buffer("idle")
         self._rtx = None
         self._annotator = None
+        self._render_product = None
+        self._pointcloud_enabled = False
+        self._rtx_initialized = False
 
     @classmethod
     def build(cls, prim_path: str) -> "Lidar":
@@ -367,36 +459,56 @@ class Lidar(Sensor):
         try:
             from isaacsim.sensors.rtx import LidarRtx
 
-            # LidarRtx expects a prim path corresponding to an Isaac Lidar prim.
-            # If the prim does not exist, LidarRtx will create one.
-            self._rtx = LidarRtx(prim_path=self._prim_path, name="lidar")
+            # Use a dedicated child prim for the actual RTX sensor. The mount path
+            # itself is an Xform used to position the sensor on the robot.
+            self._rtx = LidarRtx(prim_path=self._sensor_prim_path, name="lidar")
             # request point cloud data on frames
             try:
                 self._rtx.add_point_cloud_data_to_frame()
             except Exception:
                 pass
+            try:
+                self._rtx.initialize()
+                self._rtx_initialized = True
+            except Exception:
+                self._rtx_initialized = False
             # mark annotator source as RTX
             self._annotator = None
+            self.status.set_value("rtx_ready")
             return
-        except Exception:
+        except Exception as exc:
             # RTX Lidar not available in this environment
             self._rtx = None
+            self.status.set_value(f"rtx_init_error:{type(exc).__name__}")
 
         # Fallback: replicator annotator
         try:
             self._annotator = rep.AnnotatorRegistry.get_annotator("point_cloud")
-            # Many annotators expect a render product; attach to prim or render product
             try:
-                self._annotator.attach(self._prim_path)
+                self._render_product = rep.create.render_product(
+                    self._sensor_prim_path,
+                    resolution=(1, 1),
+                    force_new=False,
+                )
             except Exception:
-                # some annotators expect a list
+                self._render_product = None
+            # Many annotators expect a render product; attach to render product first
+            try:
+                if self._render_product is not None:
+                    self._annotator.attach([self._render_product.path])
+                else:
+                    raise RuntimeError("render product unavailable")
+            except Exception:
+                # fallback to prim path
                 try:
-                    self._annotator.attach([self._prim_path])
+                    self._annotator.attach([self._sensor_prim_path])
                 except Exception:
-                    pass
+                    self._annotator.attach(self._sensor_prim_path)
+            self.status.set_value("annotator_ready")
         except Exception:
             # no annotator available
             self._annotator = None
+            self.status.set_value("no_lidar_backend")
 
     def disable_lidar(self):
         if self._annotator is not None:
@@ -405,41 +517,94 @@ class Lidar(Sensor):
             except Exception:
                 pass
             self._annotator = None
+        if self._render_product is not None:
+            try:
+                self._render_product.destroy()
+            except Exception:
+                pass
+            self._render_product = None
+        self._pointcloud_enabled = False
+        self.status.set_value("disabled")
+
+    def set_pointcloud_enabled(self, enabled: bool):
+        self._pointcloud_enabled = bool(enabled)
+        if not self._pointcloud_enabled:
+            self.pointcloud.set_value(None)
+            self.status.set_value("pointcloud_disabled")
+        elif self._rtx is not None or self._annotator is not None:
+            self.status.set_value("pointcloud_enabled")
+
+    def _extract_rtx_pointcloud(self):
+        pts = None
+        source = "rtx_no_pointcloud"
+
+        try:
+            if not self._rtx_initialized and hasattr(self._rtx, "initialize"):
+                try:
+                    self._rtx.initialize()
+                    self._rtx_initialized = True
+                except Exception:
+                    self._rtx_initialized = False
+
+            frame = self._rtx.get_current_frame()
+            pts = _sanitize_pointcloud_array(_extract_pointcloud_array(frame))
+            if pts is not None:
+                return pts, "rtx_frame"
+        except Exception:
+            pass
+
+        try:
+            annotator = getattr(self._rtx, "_point_cloud_annotator", None)
+            if annotator is not None:
+                pts = _sanitize_pointcloud_array(_extract_pointcloud_array(annotator.get_data()))
+                if pts is not None:
+                    return pts, "rtx_annotator"
+        except Exception:
+            pass
+
+        try:
+            callback = getattr(self._rtx, "_data_acquisition_callback", None)
+            if callable(callback):
+                callback(None)
+                frame = self._rtx.get_current_frame()
+                pts = _sanitize_pointcloud_array(_extract_pointcloud_array(frame))
+                if pts is not None:
+                    return pts, "rtx_callback"
+        except Exception:
+            pass
+
+        return None, source
 
     def update_state(self):
-        # If we have an annotator, try to get its data
-        if self._rtx is not None:
-            try:
-                frame = self._rtx.get_current_frame()
-                # RTX returns point_cloud_data under 'point_cloud_data'
-                if "point_cloud_data" in frame:
-                    pts = np.asarray(frame["point_cloud_data"])
-                elif "point_cloud" in frame:
-                    pts = np.asarray(frame["point_cloud"])
-                else:
-                    pts = None
+        if self._pointcloud_enabled:
+            # If we have an annotator, try to get its data
+            if self._rtx is not None:
+                pts, source = self._extract_rtx_pointcloud()
                 self.pointcloud.set_value(pts)
-            except Exception:
-                self.pointcloud.set_value(None)
-        elif self._annotator is not None:
-            try:
-                pc = self._annotator.get_data()
-                # Annotator may return a dict or numpy array depending on impl;
-                # normalize to an Nx3 numpy array if possible
-                if isinstance(pc, dict) and "points" in pc:
-                    pts = np.asarray(pc["points"])
+                if pts is None:
+                    self.status.set_value(source)
                 else:
-                    pts = np.asarray(pc)
-
-                # pts should be Nx3 or Nx4; store as-is
-                self.pointcloud.set_value(pts)
-            except Exception:
-                # If annotator fails, leave pointcloud as-is (or set to None)
+                    self.status.set_value(f"{source}:{int(pts.shape[0])}")
+            elif self._annotator is not None:
+                try:
+                    pc = self._annotator.get_data()
+                    pts = _sanitize_pointcloud_array(_extract_pointcloud_array(pc))
+                    self.pointcloud.set_value(pts)
+                    if pts is None:
+                        self.status.set_value("annotator_no_pointcloud")
+                    else:
+                        self.status.set_value(f"annotator_points:{int(pts.shape[0])}")
+                except Exception:
+                    # If annotator fails, leave pointcloud as-is (or set to None)
+                    self.pointcloud.set_value(None)
+                    self.status.set_value("annotator_error")
+            else:
+                # No annotator attached: device-specific API should populate
+                # the buffer here.
                 self.pointcloud.set_value(None)
+                self.status.set_value("no_lidar_backend")
         else:
-            # No annotator attached: device-specific API should populate
-            # the buffer here.
-            pass
+            self.pointcloud.set_value(None)
 
         # always update pose buffers from prim transform
         try:

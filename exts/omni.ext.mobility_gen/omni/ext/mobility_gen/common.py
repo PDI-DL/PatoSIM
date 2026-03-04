@@ -312,6 +312,15 @@ class Module:
         for child in self.children().values():
             child.enable_normals_rendering()
 
+    def set_pointcloud_enabled(self, enabled: bool):
+        """Enable or disable pointcloud production for this module tree.
+
+        By default, this method propagates the request to all child modules.
+        Sensors that actually produce pointcloud data can override it.
+        """
+        for child in self.children().values():
+            child.set_pointcloud_enabled(enabled)
+
     def write_replay_data(self):
         """Write module state to Isaac Sim for replay
 

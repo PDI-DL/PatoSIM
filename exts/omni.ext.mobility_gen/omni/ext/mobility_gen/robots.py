@@ -241,6 +241,9 @@ class Robot(Module):
         self.joint_velocities.set_value(self.robot.get_joint_velocities())
         super().update_state()
 
+    def set_pointcloud_enabled(self, enabled: bool):
+        super().set_pointcloud_enabled(enabled)
+
     def write_replay_data(self):
         self.robot.set_local_pose(
             self.position.get_value(),

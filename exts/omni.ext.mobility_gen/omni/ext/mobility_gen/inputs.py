@@ -55,9 +55,10 @@ class KeyboardDriver(object):
     def __init__(self):
         if self._instance is not None:
             raise RuntimeError("Keyboard singleton already instantiated.  Please call Keyboard.instance() instead.")
-        self._appwindow = omni.appwindow.get_default_app_window()
-        self._input = carb.input.acquire_input_interface()
-        self._keyboard = self._appwindow.get_keyboard()
+        self._appwindow = None
+        self._input = None
+        self._keyboard = None
+        self._event_handle = None
 
         key_input_types = [
             carb.input.KeyboardInput.W,
@@ -74,13 +75,32 @@ class KeyboardDriver(object):
         for button in self.buttons:
             button._event_callback(event, *args, **kwargs)
 
+    def _refresh_interfaces(self):
+        self._appwindow = omni.appwindow.get_default_app_window()
+        self._input = carb.input.acquire_input_interface()
+        self._keyboard = self._appwindow.get_keyboard() if self._appwindow is not None else None
+
     def _connect(self):
+        self._refresh_interfaces()
+        if self._keyboard is None or self._input is None:
+            self._event_handle = None
+            return False
+        if self._event_handle is not None:
+            self._disconnect()
         self._event_handle = self._input.subscribe_to_keyboard_events(
             self._keyboard,
             self._event_callback
         )
+        return self._event_handle is not None
 
     def _disconnect(self):
+        if self._event_handle is None:
+            return
+        if self._input is None or self._keyboard is None:
+            self._refresh_interfaces()
+        if self._input is None or self._keyboard is None:
+            self._event_handle = None
+            return
         self._input.unsubscribe_to_keyboard_events(
             self._keyboard,
             self._event_handle
@@ -91,6 +111,13 @@ class KeyboardDriver(object):
     def connect():
         instance = KeyboardDriver.instance()
         instance._connect()
+        return instance
+
+    @staticmethod
+    def ensure_connected():
+        instance = KeyboardDriver.instance()
+        if instance._event_handle is None:
+            instance._connect()
         return instance
     
     @staticmethod

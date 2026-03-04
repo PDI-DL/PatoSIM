@@ -72,6 +72,7 @@ class Scenario(Module):
         self.robot = robot
         self.occupancy_map = occupancy_map
         self.buffered_occupancy_map = occupancy_map.buffered_meters(self.robot.occupancy_map_radius)
+        self._pointcloud_enabled = False
 
     @classmethod
     def from_robot_occupancy_map(cls, robot: Robot, occupancy_map: OccupancyMap):
@@ -79,6 +80,18 @@ class Scenario(Module):
     
     def reset(self):
         raise NotImplementedError
+
+    def set_pointcloud_enabled(self, enabled: bool):
+        self._pointcloud_enabled = bool(enabled)
+        try:
+            self.robot.set_pointcloud_enabled(self._pointcloud_enabled)
+        except Exception:
+            pass
+
+    def state_dict_pointcloud_preview(self, prefix: str = ""):
+        if not self._pointcloud_enabled:
+            return {}
+        return super().state_dict_pointcloud(prefix)
     
     def step(self, step_size: float) -> bool:
         raise NotImplementedError
@@ -101,6 +114,7 @@ class RandomPathFollowingScenarioRearSteer(Scenario):
         self.pose_sampler = pose_samplers.UniformPoseSampler()
         self.is_alive = True
         self.target_path = Buffer()
+        self._helper = None
         self.collision_occupancy_map = occupancy_map.buffered(robot.occupancy_map_collision_radius)
 
         # parâmetros do seguidor de caminho vindos do robô (com fallbacks seguros)
@@ -259,8 +273,17 @@ class RandomPathFollowingScenarioRearSteer(Scenario):
     def reset(self):
         # zera e posiciona
         self.robot.action.set_value(np.zeros(2, dtype=np.float32))
+        self._helper = None
         pose = self.pose_sampler.sample(self.buffered_occupancy_map)
         self.robot.set_pose_2d(pose)
+        try:
+            self.robot.post_reset()
+        except Exception:
+            pass
+        try:
+            self.robot.update_state()
+        except Exception:
+            pass
 
         # novo caminho e estado
         self._set_random_target_path()
@@ -268,6 +291,14 @@ class RandomPathFollowingScenarioRearSteer(Scenario):
         self._last_v_cmd = 0.0
         self._blocked_steps = 0
         self.is_alive = True
+        try:
+            dt = float(getattr(self.robot, "physics_dt", 0.005))
+        except Exception:
+            dt = 0.005
+        try:
+            self.robot.write_action(dt)
+        except Exception:
+            pass
 
     # ---------- passo ----------
     def step(self, step_size: float) -> bool:
@@ -287,6 +318,9 @@ class RandomPathFollowingScenarioRearSteer(Scenario):
 
         # ponto mais próximo e ponto de lookahead dinâmico
         path = self.target_path.get_value()
+        if path is None or len(path) < 2 or self._helper is None:
+            self._set_random_target_path()
+            return True
         pt_robot = np.array([current_pose.x, current_pose.y], dtype=np.float32)
         _, s_near, _, _ = self._helper.find_nearest(pt_robot)
         if s_near is None:
@@ -634,6 +668,7 @@ class KeyboardTeleoperationScenario_forklift(Scenario):
             pass
         try:
             # Force a fresh read path from the shared keyboard singleton after rebuild/reset.
+            inputs.KeyboardDriver.ensure_connected()
             self.keyboard = inputs.Keyboard()
             self.keyboard.update_state()
         except Exception:
@@ -652,7 +687,7 @@ class KeyboardTeleoperationScenario_forklift(Scenario):
         # Read keyboard directly each physics tick so teleop remains responsive
         # even if parent module state propagation gets out of sync after rebuilds.
         try:
-            buttons = inputs.KeyboardDriver.instance().get_button_values()
+            buttons = inputs.KeyboardDriver.ensure_connected().get_button_values()
         except Exception:
             buttons = None
         try:

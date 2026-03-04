@@ -95,9 +95,21 @@ class MobilityGenExtension(omni.ext.IExt):
         self._sensor_preview_latest_pointcloud = {}
         self._sensor_pose_text = "Sensor poses: waiting for scenario..."
         self._sensor_pose_label = None
-        self._preview_update_interval_frames = 4
+        self._sensor_preview_enabled = True
+        self._preview_update_interval_frames = 8
         self._preview_frame_counter = 0
         self._lidar_preview_enabled = False
+        self._lidar_preview_auto_range = True
+        self._lidar_preview_manual_range_m = 8
+        self._lidar_preview_point_size = 2
+        self._lidar_preview_flip_x = False
+        self._lidar_preview_flip_y = False
+        self._lidar_preview_swap_xy = False
+        self._lidar_preview_history_frames = 2
+        self._lidar_preview_history_max_points_per_frame = 600
+        self._lidar_preview_history = []
+        self._lidar_preview_stats_text = "LiDAR stats: waiting for pointcloud..."
+        self._lidar_preview_stats_label = None
 
         # Visualization window for occupancy map
         self._visualize_window = omni.ui.Window("MobilityGen - Occupancy Map", width=300, height=300)
@@ -115,14 +127,14 @@ class MobilityGenExtension(omni.ext.IExt):
         self._lidar_preview_target_size = 180
         self._sensor_preview_window = omni.ui.Window("MobilityGen - Sensor Preview", width=500, height=560)
         try:
-            self._sensor_preview_window.visible = True
+            self._sensor_preview_window.visible = self._sensor_preview_enabled
         except Exception:
             pass
         with self._sensor_preview_window.frame:
             self._sensor_preview_frame = ui.Frame()
             self._sensor_preview_frame.set_build_fn(self._build_sensor_preview_frame)
 
-        self._lidar_preview_window = omni.ui.Window("MobilityGen - LiDAR Preview", width=260, height=300)
+        self._lidar_preview_window = omni.ui.Window("MobilityGen - LiDAR Preview", width=280, height=360)
         try:
             self._lidar_preview_window.visible = False
         except Exception:
@@ -150,6 +162,15 @@ class MobilityGenExtension(omni.ext.IExt):
             )
         except Exception:
             pass
+        self._lidar_preview_toggle_model = ui.SimpleBoolModel(self._lidar_preview_enabled)
+        self._sensor_preview_toggle_model = ui.SimpleBoolModel(self._sensor_preview_enabled)
+        self._lidar_preview_auto_range_model = ui.SimpleBoolModel(self._lidar_preview_auto_range)
+        self._lidar_preview_range_model = ui.SimpleIntModel(self._lidar_preview_manual_range_m)
+        self._lidar_preview_point_size_model = ui.SimpleIntModel(self._lidar_preview_point_size)
+        self._lidar_preview_history_frames_model = ui.SimpleIntModel(self._lidar_preview_history_frames)
+        self._lidar_preview_flip_x_model = ui.SimpleBoolModel(self._lidar_preview_flip_x)
+        self._lidar_preview_flip_y_model = ui.SimpleBoolModel(self._lidar_preview_flip_y)
+        self._lidar_preview_swap_xy_model = ui.SimpleBoolModel(self._lidar_preview_swap_xy)
 
         # discover available USD worlds in the working directory and DATA_DIR
         try:
@@ -174,6 +195,25 @@ class MobilityGenExtension(omni.ext.IExt):
                     with ui.HStack():
                         ui.Label("Robot Type")
                         self.robot_combo_box = ui.ComboBox(0, *ROBOTS.names())
+
+                    with ui.HStack(height=24):
+                        ui.Label("Camera Preview")
+                        ui.CheckBox(model=self._sensor_preview_toggle_model, width=22)
+                        try:
+                            self._sensor_preview_toggle_model.add_value_changed_fn(
+                                self._on_sensor_preview_toggle_changed
+                            )
+                        except Exception:
+                            pass
+                        ui.Spacer(width=12)
+                        ui.Label("LiDAR Preview")
+                        ui.CheckBox(model=self._lidar_preview_toggle_model, width=22)
+                        try:
+                            self._lidar_preview_toggle_model.add_value_changed_fn(
+                                self._on_lidar_preview_toggle_changed
+                            )
+                        except Exception:
+                            pass
                 
                     # -- Build button --
                     ui.Button("Build", clicked_fn=self.build_scenario)
@@ -222,7 +262,6 @@ class MobilityGenExtension(omni.ext.IExt):
                     with ui.HStack():
                         ui.Button("Start Recording", clicked_fn=self.enable_recording)
                         ui.Button("Stop Recording", clicked_fn=self.disable_recording)
-                    ui.Button("Toggle LiDAR Preview", clicked_fn=self._toggle_lidar_preview)
 
         self.update_recording_count()
         self.clear_recording()
@@ -279,6 +318,69 @@ class MobilityGenExtension(omni.ext.IExt):
                 ui.Label("LiDAR Preview (Top-Down)")
                 ui.Spacer(width=8)
                 ui.Label(f"{self._lidar_preview_target_size}x{self._lidar_preview_target_size}")
+            with ui.HStack(height=22):
+                ui.Label("Auto Range")
+                ui.CheckBox(model=self._lidar_preview_auto_range_model, width=22)
+                try:
+                    self._lidar_preview_auto_range_model.add_value_changed_fn(
+                        self._on_lidar_preview_params_changed
+                    )
+                except Exception:
+                    pass
+                ui.Spacer(width=8)
+                ui.Label("Range (m)")
+                ui.IntField(model=self._lidar_preview_range_model, height=20, width=56)
+                try:
+                    self._lidar_preview_range_model.add_value_changed_fn(
+                        self._on_lidar_preview_params_changed
+                    )
+                except Exception:
+                    pass
+            with ui.HStack(height=22):
+                ui.Label("Point Size")
+                ui.IntField(model=self._lidar_preview_point_size_model, height=20, width=56)
+                try:
+                    self._lidar_preview_point_size_model.add_value_changed_fn(
+                        self._on_lidar_preview_params_changed
+                    )
+                except Exception:
+                    pass
+                ui.Spacer(width=8)
+                ui.Label("History")
+                ui.IntField(model=self._lidar_preview_history_frames_model, height=20, width=56)
+                try:
+                    self._lidar_preview_history_frames_model.add_value_changed_fn(
+                        self._on_lidar_preview_params_changed
+                    )
+                except Exception:
+                    pass
+            with ui.HStack(height=22):
+                ui.Label("Swap XY")
+                ui.CheckBox(model=self._lidar_preview_swap_xy_model, width=22)
+                try:
+                    self._lidar_preview_swap_xy_model.add_value_changed_fn(
+                        self._on_lidar_preview_params_changed
+                    )
+                except Exception:
+                    pass
+            with ui.HStack(height=22):
+                ui.Label("Flip X")
+                ui.CheckBox(model=self._lidar_preview_flip_x_model, width=22)
+                try:
+                    self._lidar_preview_flip_x_model.add_value_changed_fn(
+                        self._on_lidar_preview_params_changed
+                    )
+                except Exception:
+                    pass
+                ui.Spacer(width=8)
+                ui.Label("Flip Y")
+                ui.CheckBox(model=self._lidar_preview_flip_y_model, width=22)
+                try:
+                    self._lidar_preview_flip_y_model.add_value_changed_fn(
+                        self._on_lidar_preview_params_changed
+                    )
+                except Exception:
+                    pass
             with ui.HStack(height=self._lidar_preview_target_size + 8):
                 ui.Spacer(width=6)
                 ui.ImageWithProvider(
@@ -287,11 +389,139 @@ class MobilityGenExtension(omni.ext.IExt):
                     height=self._lidar_preview_target_size,
                 )
                 ui.Spacer(width=6)
+            self._lidar_preview_stats_label = ui.Label(self._lidar_preview_stats_text)
 
     def _toggle_lidar_preview(self):
+        self._set_lidar_preview_enabled(
+            not bool(getattr(self, "_lidar_preview_enabled", False))
+        )
+
+    def _set_sensor_preview_enabled(self, enabled: bool):
+        enabled = bool(enabled)
+        self._sensor_preview_enabled = enabled
         try:
-            self._lidar_preview_enabled = not bool(getattr(self, "_lidar_preview_enabled", False))
-            self._lidar_preview_window.visible = self._lidar_preview_enabled
+            self._sensor_preview_window.visible = enabled
+        except Exception:
+            pass
+        try:
+            model = getattr(self, "_sensor_preview_toggle_model", None)
+            if model is not None and bool(model.as_bool) != enabled:
+                model.set_value(enabled)
+        except Exception:
+            pass
+        if enabled:
+            try:
+                scenario = getattr(self, "scenario", None)
+                if scenario is not None:
+                    scenario.enable_rgb_rendering()
+            except Exception:
+                pass
+        else:
+            try:
+                blank = np.zeros(
+                    (self._sensor_preview_target_height, self._sensor_preview_target_width, 4),
+                    dtype=np.uint8,
+                )
+                self._sensor_preview_image_provider.set_bytes_data(
+                    list(blank.tobytes()),
+                    [self._sensor_preview_target_width, self._sensor_preview_target_height],
+                )
+            except Exception:
+                pass
+
+    def _set_lidar_preview_enabled(self, enabled: bool):
+        enabled = bool(enabled)
+        self._lidar_preview_enabled = enabled
+        if not enabled:
+            self._lidar_preview_history = []
+        try:
+            self._lidar_preview_window.visible = enabled
+        except Exception:
+            pass
+        try:
+            model = getattr(self, "_lidar_preview_toggle_model", None)
+            if model is not None and bool(model.as_bool) != enabled:
+                model.set_value(enabled)
+        except Exception:
+            pass
+        if not enabled:
+            try:
+                blank_lidar = np.zeros(
+                    (self._lidar_preview_target_size, self._lidar_preview_target_size, 4),
+                    dtype=np.uint8,
+                )
+                blank_lidar[:, :, 3] = 255
+                self._lidar_preview_image_provider.set_bytes_data(
+                    list(blank_lidar.tobytes()),
+                    [self._lidar_preview_target_size, self._lidar_preview_target_size],
+                )
+            except Exception:
+                pass
+        try:
+            scenario = getattr(self, "scenario", None)
+            if scenario is not None:
+                scenario.set_pointcloud_enabled(enabled or (self.writer is not None))
+        except Exception:
+            pass
+
+    def _on_lidar_preview_toggle_changed(self, model):
+        try:
+            enabled = bool(model.as_bool)
+        except Exception:
+            try:
+                enabled = bool(model.get_value_as_bool())
+            except Exception:
+                enabled = False
+        self._set_lidar_preview_enabled(enabled)
+
+    def _on_sensor_preview_toggle_changed(self, model):
+        try:
+            enabled = bool(model.as_bool)
+        except Exception:
+            try:
+                enabled = bool(model.get_value_as_bool())
+            except Exception:
+                enabled = False
+        self._set_sensor_preview_enabled(enabled)
+
+    def _on_lidar_preview_params_changed(self, *_args):
+        try:
+            self._lidar_preview_auto_range = bool(self._lidar_preview_auto_range_model.as_bool)
+        except Exception:
+            pass
+        try:
+            self._lidar_preview_manual_range_m = max(
+                1, int(self._lidar_preview_range_model.as_int)
+            )
+        except Exception:
+            pass
+        try:
+            self._lidar_preview_point_size = max(
+                1, int(self._lidar_preview_point_size_model.as_int)
+            )
+        except Exception:
+            pass
+        try:
+            self._lidar_preview_history_frames = max(
+                1, int(self._lidar_preview_history_frames_model.as_int)
+            )
+            self._lidar_preview_history = self._lidar_preview_history[-self._lidar_preview_history_frames:]
+        except Exception:
+            pass
+        try:
+            self._lidar_preview_flip_x = bool(self._lidar_preview_flip_x_model.as_bool)
+        except Exception:
+            pass
+        try:
+            self._lidar_preview_flip_y = bool(self._lidar_preview_flip_y_model.as_bool)
+        except Exception:
+            pass
+        try:
+            self._lidar_preview_swap_xy = bool(self._lidar_preview_swap_xy_model.as_bool)
+        except Exception:
+            pass
+        try:
+            self._refresh_lidar_preview(self._sensor_preview_latest_pointcloud, update_history=False)
         except Exception:
             pass
 
@@ -635,23 +865,19 @@ class MobilityGenExtension(omni.ext.IExt):
         )
         self._update_sensor_pose_preview_text()
 
-    def _build_lidar_preview_rgba(self, pointcloud_state: dict):
-        size = int(getattr(self, "_lidar_preview_target_size", 220))
-        canvas = np.zeros((size, size, 4), dtype=np.uint8)
-        canvas[:, :, 3] = 255
-        canvas[:, :, :3] = 26
+    def _get_lidar_backend_status(self):
+        try:
+            scenario = getattr(self, "scenario", None)
+            robot = getattr(scenario, "robot", None)
+            lidar = getattr(robot, "lidar", None)
+            status = getattr(getattr(lidar, "status", None), "value", None)
+            return str(status) if status else "unknown"
+        except Exception:
+            return "unknown"
 
-        # Draw axis guides and robot center.
-        mid = size // 2
-        canvas[mid, :, :3] = 55
-        canvas[:, mid, :3] = 55
-        robot_half = 3
-        canvas[max(0, mid - robot_half):min(size, mid + robot_half + 1),
-               max(0, mid - robot_half):min(size, mid + robot_half + 1), :3] = [220, 180, 60]
-
+    def _select_lidar_preview_points(self, pointcloud_state: dict):
         if not isinstance(pointcloud_state, dict) or len(pointcloud_state) == 0:
-            return canvas
-
+            return None
         chosen = None
         for key, value in pointcloud_state.items():
             if value is None:
@@ -665,32 +891,95 @@ class MobilityGenExtension(omni.ext.IExt):
                     chosen = value
                     break
         if chosen is None:
+            return None
+        try:
+            pts = np.asarray(chosen)
+        except Exception:
+            return None
+        if pts.ndim != 2 or pts.shape[0] <= 0 or pts.shape[1] < 2:
+            return None
+        pts = pts[:, :3] if pts.shape[1] >= 3 else pts[:, :2]
+        finite = np.isfinite(pts).all(axis=1)
+        pts = pts[finite]
+        if pts.shape[0] <= 0:
+            return None
+        return np.asarray(pts, dtype=np.float32)
+
+    def _format_lidar_preview_stats(
+        self,
+        *,
+        status: str,
+        current_points: int = 0,
+        shown_points: int = 0,
+        lidar_range: float | None = None,
+        shape=None,
+        x=None,
+        y=None,
+        z=None,
+        history_frames: int = 0,
+        note: str | None = None,
+    ):
+        lines = [
+            "LiDAR stats",
+            f"status: {status}",
+        ]
+        if note:
+            lines.append(note)
+        else:
+            range_text = f"{lidar_range:.2f}m" if lidar_range is not None else "-"
+            lines.append(
+                f"current: {int(current_points)}  shown: {int(shown_points)}  history: {int(history_frames)}"
+            )
+            lines.append(f"range: {range_text}  shape: {shape}")
+            if x is not None and y is not None and z is not None:
+                lines.append(f"x: [{x[0]:.2f}, {x[1]:.2f}]")
+                lines.append(f"y: [{y[0]:.2f}, {y[1]:.2f}]")
+                lines.append(f"z: [{z[0]:.2f}, {z[1]:.2f}]")
+        self._lidar_preview_stats_text = "\n".join(lines)
+
+    def _build_lidar_preview_rgba(self, pointcloud_state: dict):
+        backend_status = self._get_lidar_backend_status()
+
+        size = int(getattr(self, "_lidar_preview_target_size", 220))
+        canvas = np.zeros((size, size, 4), dtype=np.uint8)
+        canvas[:, :, 3] = 255
+        canvas[:, :, :3] = 26
+
+        # Draw axis guides and robot center.
+        mid = size // 2
+        canvas[mid, :, :3] = 55
+        canvas[:, mid, :3] = 55
+        robot_half = 3
+        canvas[max(0, mid - robot_half):min(size, mid + robot_half + 1),
+               max(0, mid - robot_half):min(size, mid + robot_half + 1), :3] = [220, 180, 60]
+        self._format_lidar_preview_stats(status=backend_status, note="no pointcloud data")
+
+        current_pts = self._select_lidar_preview_points(pointcloud_state)
+        if current_pts is None:
             return canvas
 
         try:
-            pts = np.asarray(chosen)
-            if pts.ndim != 2 or pts.shape[0] <= 0 or pts.shape[1] < 2:
-                return canvas
+            history_sets = [pts for pts in getattr(self, "_lidar_preview_history", []) if pts is not None and len(pts) > 0]
+            draw_sets = history_sets + [current_pts]
+            combined = np.concatenate(draw_sets, axis=0) if len(draw_sets) > 1 else current_pts
 
-            pts = pts[:, :3] if pts.shape[1] >= 3 else pts[:, :2]
-            finite = np.isfinite(pts).all(axis=1)
-            pts = pts[finite]
-            if pts.shape[0] <= 0:
-                return canvas
-
-            # Sample for cheap rendering in UI.
-            max_points = 6000
-            if pts.shape[0] > max_points:
-                idx = np.linspace(0, pts.shape[0] - 1, max_points).astype(np.int32)
-                pts = pts[idx]
-
-            x = pts[:, 0]
-            y = pts[:, 1]
+            x = combined[:, 0]
+            y = combined[:, 1]
+            z = combined[:, 2] if combined.shape[1] >= 3 else np.zeros_like(x)
+            if bool(getattr(self, "_lidar_preview_swap_xy", False)):
+                x, y = y, x
+            if bool(getattr(self, "_lidar_preview_flip_x", False)):
+                x = -x
+            if bool(getattr(self, "_lidar_preview_flip_y", False)):
+                y = -y
             d = np.sqrt(x * x + y * y)
 
             # Robust dynamic range (meters), clamped for stable visualization.
-            r95 = float(np.percentile(d, 95)) if d.size > 0 else 8.0
-            lidar_range = float(np.clip(r95, 4.0, 20.0))
+            if bool(getattr(self, "_lidar_preview_auto_range", True)):
+                r95 = float(np.percentile(d, 95)) if d.size > 0 else 8.0
+                lidar_range = float(np.clip(r95, 4.0, 20.0))
+            else:
+                lidar_range = float(max(1.0, int(getattr(self, "_lidar_preview_manual_range_m", 8))))
             scale = (size - 1) / (2.0 * lidar_range)
 
             # Top-down: +x forward (up in image), +y left (left in image).
@@ -698,29 +987,98 @@ class MobilityGenExtension(omni.ext.IExt):
             v = np.round(mid - x * scale).astype(np.int32)
             inside = (u >= 0) & (u < size) & (v >= 0) & (v < size)
             if not np.any(inside):
+                self._format_lidar_preview_stats(
+                    status=backend_status,
+                    current_points=current_pts.shape[0],
+                    shown_points=0,
+                    lidar_range=lidar_range,
+                    shape=tuple(combined.shape),
+                    x=(float(np.min(x)), float(np.max(x))),
+                    y=(float(np.min(y)), float(np.max(y))),
+                    z=(float(np.min(z)), float(np.max(z))),
+                    history_frames=len(history_sets),
+                    note=f"0/{combined.shape[0]} points inside view",
+                )
                 return canvas
 
-            u = u[inside]
-            v = v[inside]
-            d = d[inside]
-
-            # Near points brighter, far points darker.
-            norm = np.clip(d / max(lidar_range, 1e-6), 0.0, 1.0)
-            intensity = np.clip((1.0 - norm) * 255.0, 50.0, 255.0).astype(np.uint8)
-            canvas[v, u, 0] = 80
-            canvas[v, u, 1] = intensity
-            canvas[v, u, 2] = 255
+            offset = 0
+            point_size = int(max(1, getattr(self, "_lidar_preview_point_size", 2)))
+            half = max(0, point_size // 2)
+            shown_points = 0
+            for set_index, pts_set in enumerate(draw_sets):
+                count = pts_set.shape[0]
+                set_x = pts_set[:, 0]
+                set_y = pts_set[:, 1]
+                if bool(getattr(self, "_lidar_preview_swap_xy", False)):
+                    set_x, set_y = set_y, set_x
+                if bool(getattr(self, "_lidar_preview_flip_x", False)):
+                    set_x = -set_x
+                if bool(getattr(self, "_lidar_preview_flip_y", False)):
+                    set_y = -set_y
+                set_d = np.sqrt(set_x * set_x + set_y * set_y)
+                set_u = np.round(mid - set_y * scale).astype(np.int32)
+                set_v = np.round(mid - set_x * scale).astype(np.int32)
+                set_inside = (set_u >= 0) & (set_u < size) & (set_v >= 0) & (set_v < size)
+                if not np.any(set_inside):
+                    offset += count
+                    continue
+                set_u = set_u[set_inside]
+                set_v = set_v[set_inside]
+                set_d = set_d[set_inside]
+                shown_points += set_u.shape[0]
+                if set_index < len(history_sets):
+                    green = np.full(set_u.shape[0], 90, dtype=np.uint8)
+                    blue = np.full(set_u.shape[0], 150, dtype=np.uint8)
+                    red = np.full(set_u.shape[0], 45, dtype=np.uint8)
+                else:
+                    norm = np.clip(set_d / max(lidar_range, 1e-6), 0.0, 1.0)
+                    green = np.clip((1.0 - norm) * 255.0, 50.0, 255.0).astype(np.uint8)
+                    blue = np.full(set_u.shape[0], 255, dtype=np.uint8)
+                    red = np.full(set_u.shape[0], 80, dtype=np.uint8)
+                for px, py, p_r, p_g, p_b in zip(set_u, set_v, red, green, blue):
+                    x0 = max(0, px - half)
+                    x1 = min(size, px + half + 1)
+                    y0 = max(0, py - half)
+                    y1 = min(size, py + half + 1)
+                    canvas[y0:y1, x0:x1, 0] = p_r
+                    canvas[y0:y1, x0:x1, 1] = p_g
+                    canvas[y0:y1, x0:x1, 2] = p_b
+                offset += count
+            self._format_lidar_preview_stats(
+                status=backend_status,
+                current_points=current_pts.shape[0],
+                shown_points=shown_points,
+                lidar_range=lidar_range,
+                shape=tuple(combined.shape),
+                x=(float(np.min(x)), float(np.max(x))),
+                y=(float(np.min(y)), float(np.max(y))),
+                z=(float(np.min(z)), float(np.max(z))),
+                history_frames=len(history_sets),
+            )
             return canvas
         except Exception:
+            self._format_lidar_preview_stats(status=backend_status, note="preview rendering failed")
             return canvas
 
-    def _refresh_lidar_preview(self, pointcloud_state: dict):
+    def _refresh_lidar_preview(self, pointcloud_state: dict, update_history: bool = True):
         try:
+            if update_history:
+                pts = self._select_lidar_preview_points(pointcloud_state)
+                if pts is not None and pts.shape[0] > 0:
+                    max_points = int(max(200, getattr(self, "_lidar_preview_history_max_points_per_frame", 1500)))
+                    if pts.shape[0] > max_points:
+                        idx = np.linspace(0, pts.shape[0] - 1, max_points).astype(np.int32)
+                        pts = pts[idx]
+                    self._lidar_preview_history.append(np.asarray(pts, dtype=np.float32))
+                    keep = int(max(1, getattr(self, "_lidar_preview_history_frames", 4)))
+                    self._lidar_preview_history = self._lidar_preview_history[-keep:]
             rgba = self._build_lidar_preview_rgba(pointcloud_state)
             self._lidar_preview_image_provider.set_bytes_data(
                 list(rgba.tobytes()),
                 [int(rgba.shape[1]), int(rgba.shape[0])],
             )
+            if self._lidar_preview_stats_label is not None:
+                self._lidar_preview_stats_label.text = self._lidar_preview_stats_text
         except Exception:
             pass
 
@@ -1184,6 +1542,13 @@ class MobilityGenExtension(omni.ext.IExt):
             return
 
         if scenario is not None:
+            sensor_preview_enabled = bool(getattr(self, "_sensor_preview_enabled", True))
+            lidar_preview_enabled = bool(getattr(self, "_lidar_preview_enabled", False))
+            need_pointcloud_state = lidar_preview_enabled or (self.writer is not None)
+            try:
+                scenario.set_pointcloud_enabled(need_pointcloud_state)
+            except Exception:
+                pass
 
             is_alive = scenario.step(step_size)
 
@@ -1196,8 +1561,7 @@ class MobilityGenExtension(omni.ext.IExt):
 
             rgb_state_for_preview = {}
             pointcloud_state_for_preview = None
-            need_rgb_state = should_update_preview or (self.writer is not None)
-            lidar_preview_enabled = bool(getattr(self, "_lidar_preview_enabled", False))
+            need_rgb_state = ((should_update_preview and sensor_preview_enabled) or (self.writer is not None))
             if need_rgb_state:
                 try:
                     rgb_state_for_preview = scenario.state_dict_rgb()
@@ -1206,13 +1570,13 @@ class MobilityGenExtension(omni.ext.IExt):
 
             if should_update_preview and lidar_preview_enabled:
                 try:
-                    pointcloud_state_for_preview = scenario.state_dict_pointcloud()
+                    pointcloud_state_for_preview = scenario.state_dict_pointcloud_preview()
                     if isinstance(pointcloud_state_for_preview, dict) and len(pointcloud_state_for_preview) > 0:
                         self._sensor_preview_latest_pointcloud = pointcloud_state_for_preview
                 except Exception:
                     pointcloud_state_for_preview = None
 
-            if should_update_preview:
+            if should_update_preview and sensor_preview_enabled:
                 if isinstance(rgb_state_for_preview, dict) and len(rgb_state_for_preview) > 0:
                     self._sensor_preview_latest_rgb = rgb_state_for_preview
                 camera_input = (
@@ -1235,9 +1599,21 @@ class MobilityGenExtension(omni.ext.IExt):
                         self._refresh_lidar_preview(lidar_input)
                     except Exception:
                         pass
+            elif should_update_preview:
+                if lidar_preview_enabled:
+                    try:
+                        lidar_input = (
+                            pointcloud_state_for_preview
+                            if isinstance(pointcloud_state_for_preview, dict) and len(pointcloud_state_for_preview) > 0
+                            else self._sensor_preview_latest_pointcloud
+                        )
+                        self._refresh_lidar_preview(lidar_input)
+                    except Exception:
+                        pass
             else:
                 try:
-                    self._update_sensor_pose_preview_text()
+                    if sensor_preview_enabled:
+                        self._update_sensor_pose_preview_text()
                 except Exception:
                     pass
             
@@ -1565,7 +1941,8 @@ class MobilityGenExtension(omni.ext.IExt):
                 self.config = config
                 self.scenario = await build_scenario_from_config(config)
                 try:
-                    self.scenario.enable_rgb_rendering()
+                    if bool(getattr(self, "_sensor_preview_enabled", True)):
+                        self.scenario.enable_rgb_rendering()
                 except Exception:
                     pass
 
@@ -1575,7 +1952,11 @@ class MobilityGenExtension(omni.ext.IExt):
                 except Exception:
                     pass
                 try:
-                    self._sensor_preview_window.visible = True
+                    self._sensor_preview_window.visible = bool(getattr(self, "_sensor_preview_enabled", True))
+                except Exception:
+                    pass
+                try:
+                    self._lidar_preview_window.visible = bool(getattr(self, "_lidar_preview_enabled", False))
                 except Exception:
                     pass
                 
