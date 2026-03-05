@@ -1,0 +1,16 @@
+name: mobgen
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - numpy
+  - matplotlib
+  - tqdm
+  - opencv
+  - openexr
+  - imath
+  - pip
+  - pip:
+      - gradio
+    - open3d
+

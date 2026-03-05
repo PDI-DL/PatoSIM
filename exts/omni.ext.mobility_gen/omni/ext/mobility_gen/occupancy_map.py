@@ -351,15 +351,44 @@ free_thresh: {free_thresh}
         """
 
         buffer_distance_pixels = int(buffer_distance_pixels)
-        
+
+        # Defensive checks: if the occupancy map data is empty, bail out with
+        # a clear error message rather than letting OpenCV raise a low-level
+        # assertion (which becomes hard to debug inside async tasks).
+        if self.data is None or self.data.size == 0:
+            raise RuntimeError(
+                "OccupancyMap.buffered: occupancy map data is empty (shape=%r).\n"
+                "This likely means the occupancy map failed to generate or an asset failed to load.\n"
+                "Check the stage, referenced USDs and any earlier warnings about missing assets (see omni.usd logs)."
+                % (None if self.data is None else tuple(self.data.shape),)
+            )
+
+        # zero buffer => no-op
+        if buffer_distance_pixels <= 0:
+            return OccupancyMap(
+                data=self.data.copy(),
+                resolution=self.resolution,
+                origin=self.origin,
+            )
+
         radius = buffer_distance_pixels
-        diameter = radius * 2
+        diameter = max(1, radius * 2)
         kernel = np.zeros((diameter, diameter), np.uint8)
+        # draw a filled circle kernel for dilation
         cv2.circle(kernel, (radius, radius), radius, 255, -1)
+
         occupied = self.occupied_mask().astype(np.uint8) * 255
+        if occupied.size == 0:
+            # defensive: same message as above but slightly different context
+            raise RuntimeError(
+                "OccupancyMap.buffered: occupied mask is empty (shape=%r).\n"
+                "Cannot perform dilation. Verify occupancy map generation and asset loading." % (tuple(occupied.shape),)
+            )
+
         occupied_dilated = cv2.dilate(occupied, kernel, iterations=1)
         occupied_mask = occupied_dilated == 255
         free_mask = self.freespace_mask()
+        free_mask = free_mask.copy()
         free_mask[occupied_mask] = False
 
         return OccupancyMap.from_masks(

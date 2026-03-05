@@ -87,8 +87,18 @@ async def occupancy_map_generate_from_prim_async(
     if stage_scale != 1.0:
         raise RuntimeError("Stage unit must be 1 meter.")
     
-    # Apply physics
-    UsdPhysics.Scene.Define(stage, Sdf.Path("/World/physicsScene"))
+    # Apply physics: only define the physics scene if it doesn't already exist
+    try:
+        existing = stage.GetPrimAtPath(Sdf.Path("/World/physicsScene"))
+        if existing is None or not existing.IsValid():
+            UsdPhysics.Scene.Define(stage, Sdf.Path("/World/physicsScene"))
+    except Exception:
+        try:
+            UsdPhysics.Scene.Define(stage, Sdf.Path("/World/physicsScene"))
+        except Exception:
+            # best-effort: if defining the physics scene fails, continue —
+            # downstream code already guards for missing physics in many places
+            pass
     
     await app.next_update_async()
     

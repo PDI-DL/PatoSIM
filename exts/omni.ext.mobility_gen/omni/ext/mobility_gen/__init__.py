@@ -14,4 +14,15 @@
 # limitations under the License.
 
 
-from .extension import *
+try:
+    from .extension import *
+except ModuleNotFoundError as exc:
+    missing = exc.name or ""
+    # Allow utility imports (reader/writer/config/etc.) outside Kit UI context.
+    if not (
+        missing.startswith("omni")
+        or missing.startswith("isaacsim")
+        or missing.startswith("pxr")
+        or missing.startswith("carb")
+    ):
+        raise

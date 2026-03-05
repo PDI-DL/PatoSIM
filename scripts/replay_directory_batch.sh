@@ -1,0 +1,1 @@
+python scripts/replay_directory.py --render_interval=200

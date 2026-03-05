@@ -23,12 +23,36 @@ from isaacsim.core.utils.stage import add_reference_to_stage
 
 from omni.ext.mobility_gen.occupancy_map import OccupancyMap
 from omni.ext.mobility_gen.config import Config
-from omni.ext.mobility_gen.utils.occupancy_map_utils import occupancy_map_generate_from_prim_async
 from omni.ext.mobility_gen.utils.global_utils import new_stage, new_world, set_viewport_camera
 from omni.ext.mobility_gen.scenarios import Scenario, SCENARIOS
 from omni.ext.mobility_gen.robots import ROBOTS
 from omni.ext.mobility_gen.reader import Reader
 
+
+def _validate_scene_usd_path(scene_path: str) -> str:
+    scene_path = str(scene_path or "").strip()
+    if scene_path == "":
+        raise RuntimeError(
+            "build_scenario_from_config: 'scene_usd' is empty. "
+            "Please set the USD Path / URL in the UI before clicking Build."
+        )
+
+    lower = scene_path.lower()
+    supported_suffixes = (".usd", ".usda", ".usdc", ".usdz")
+    if not lower.endswith(supported_suffixes):
+        raise RuntimeError(
+            "build_scenario_from_config: unsupported scene asset path "
+            f"'{scene_path}'. Expected a USD asset ({', '.join(supported_suffixes)}), "
+            "not a zip/archive or another file type."
+        )
+
+    if "://" not in scene_path and not os.path.exists(scene_path):
+        raise RuntimeError(
+            "build_scenario_from_config: scene asset does not exist at "
+            f"'{scene_path}'."
+        )
+
+    return scene_path
 
 
 def load_scenario(path: str) -> Scenario:
@@ -52,12 +76,15 @@ def load_scenario(path: str) -> Scenario:
 
 
 async def build_scenario_from_config(config: Config):
+    from omni.ext.mobility_gen.utils.occupancy_map_utils import occupancy_map_generate_from_prim_async
+
     robot_type = ROBOTS.get(config.robot_type)
     scenario_type = SCENARIOS.get(config.scenario_type)
+    scene_usd = _validate_scene_usd_path(getattr(config, "scene_usd", ""))
     new_stage()
     world = new_world(physics_dt=robot_type.physics_dt)
     await world.initialize_simulation_context_async()
-    add_reference_to_stage(config.scene_usd,"/World/scene")
+    add_reference_to_stage(scene_usd, "/World/scene")
     objects.GroundPlane("/World/ground_plane", visible=False)
     robot = robot_type.build("/World/robot")
     occupancy_map = await occupancy_map_generate_from_prim_async(
@@ -66,6 +93,12 @@ async def build_scenario_from_config(config: Config):
         z_min=robot.occupancy_map_z_min,
         z_max=robot.occupancy_map_z_max
     )
+    if getattr(occupancy_map, "data", None) is None or occupancy_map.data.size == 0:
+        raise RuntimeError(
+            "build_scenario_from_config: occupancy map generation returned an empty map. "
+            f"Scene asset='{scene_usd}'. Check whether the USD loaded successfully and "
+            "whether the referenced stage contains visible geometry under /World/scene."
+        )
     chase_camera_path = robot.build_chase_camera()
     set_viewport_camera(chase_camera_path)
     scenario = scenario_type.from_robot_occupancy_map(robot, occupancy_map)

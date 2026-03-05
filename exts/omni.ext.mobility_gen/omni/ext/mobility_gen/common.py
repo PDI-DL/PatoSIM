@@ -191,7 +191,7 @@ class Module:
         Returns:
             _type_: The module's state dictionary, including only common types.
         """
-        return self.state_dict(prefix, exclude_tags=["rgb", "segmentation", "depth", "normals"])
+        return self.state_dict(prefix, exclude_tags=["rgb", "segmentation", "depth", "normals", "pointcloud"])
 
     def state_dict_rgb(self, prefix: str = ""):
         """Get the state dictionary, including only values tagged "rgb"
@@ -213,7 +213,21 @@ class Module:
         Returns:
             _type_: The module's state dictionary, including only values tagged "segmentation".
         """
-        return self.state_dict(prefix, include_tags=["segmentation"])
+        state = self.state_dict(prefix, include_tags=["segmentation"])
+        return OrderedDict(
+            (name, value)
+            for name, value in state.items()
+            if not str(name).endswith("instance_id_segmentation_image")
+        )
+
+    def state_dict_instance_id_segmentation(self, prefix: str = ""):
+        """Get the state dictionary for instance-id segmentation images only."""
+        state = self.state_dict(prefix, include_tags=["segmentation"])
+        return OrderedDict(
+            (name, value)
+            for name, value in state.items()
+            if str(name).endswith("instance_id_segmentation_image")
+        )
     
     def state_dict_depth(self, prefix: str = ""):
         """Get the state dictionary, including only values tagged "depth"
@@ -236,6 +250,17 @@ class Module:
             _type_: The module's state dictionary, including only values tagged "normals".
         """
         return self.state_dict(prefix, include_tags=["normals"])
+    
+    def state_dict_pointcloud(self, prefix: str = ""):
+        """Get the state dictionary, including only values tagged "pointcloud"
+
+        Args:
+            prefix (str, optional): A prefix for state value names. Defaults to "".
+
+        Returns:
+            Dict[str, any]: The module's state dictionary, including only values tagged "pointcloud".
+        """
+        return self.state_dict(prefix, include_tags=["pointcloud"])
 
     def enable_rgb_rendering(self):
         """Enable RGB rendering for this module.
@@ -286,6 +311,15 @@ class Module:
         """
         for child in self.children().values():
             child.enable_normals_rendering()
+
+    def set_pointcloud_enabled(self, enabled: bool):
+        """Enable or disable pointcloud production for this module tree.
+
+        By default, this method propagates the request to all child modules.
+        Sensors that actually produce pointcloud data can override it.
+        """
+        for child in self.children().values():
+            child.set_pointcloud_enabled(enabled)
 
     def write_replay_data(self):
         """Write module state to Isaac Sim for replay
@@ -350,4 +384,3 @@ class Module:
         for k, v in self.named_buffers().items():
             if k in state_dict:
                 v.set_value(state_dict[k])
-

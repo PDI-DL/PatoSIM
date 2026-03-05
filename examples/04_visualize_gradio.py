@@ -74,7 +74,9 @@ class Context:
             state_dict['robot.front_camera.left.rgb_image'],
             np.clip(1.0 / state_dict['robot.front_camera.left.depth_image'], 0., 1.),
             state_dict['robot.front_camera.right.rgb_image'],
-            np.clip(1.0 / state_dict['robot.front_camera.right.depth_image'], 0., 1.)
+            np.clip(1.0 / state_dict['robot.front_camera.right.depth_image'], 0., 1.),
+            state_dict['robot.front_camera.right.segmentation_image'],
+            np.clip(1.0 / state_dict['robot.front_camera.right.depth_image'], 0., 1.)  # é aqui para adicionar as imagnes ao servidor 
         ]
 
 

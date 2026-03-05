@@ -17,7 +17,31 @@ from typing import Tuple, List
 import numpy as np
 import random
 from dataclasses import dataclass
-import mobility_gen_path_planner._mobility_gen_path_planner_C as _C
+import os
+import importlib
+import importlib.util
+
+# Try the normal import first; if the compiled extension was built for a
+# different Python ABI (e.g. cpython-3.10) the standard import may fail on
+# another interpreter (e.g. Python 3.11). In that case, look for a
+# corresponding .so in the package directory and load it directly.
+try:
+    import mobility_gen_path_planner._mobility_gen_path_planner_C as _C
+except ModuleNotFoundError:
+    _C = None
+    pkg_dir = os.path.dirname(__file__)
+    # find a .so file that starts with the expected module name
+    for fname in os.listdir(pkg_dir):
+        if fname.startswith("_mobility_gen_path_planner_C") and fname.endswith(".so"):
+            so_path = os.path.join(pkg_dir, fname)
+            spec = importlib.util.spec_from_file_location("mobility_gen_path_planner._mobility_gen_path_planner_C", so_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _C = module
+            break
+    if _C is None:
+        # re-raise the original error for visibility
+        raise
 
 
 @dataclass
