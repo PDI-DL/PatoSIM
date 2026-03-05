@@ -12,4 +12,6 @@ _*/
 /app
 data
 
-*__pycache__/robot_assets/ForkliftC/
+*__pycache__/
+robot_assets/ForkliftC/*
+
