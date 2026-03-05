@@ -38,7 +38,7 @@ from omni.ext.mobility_gen.robots import ROBOTS
 from omni.ext.mobility_gen.config import Config
 from omni.ext.mobility_gen.build import build_scenario_from_config
 
-dev_scene_path = "/robot_assets/world/mundo_pallets.usd
+dev_scene_path = "/home/pdi_4/Documents/Documentos/bevlog-isaac/MobilityGen/robot_assets/world/mundo_pallets.usd"
 
 if "MOBILITY_GEN_DATA" in os.environ:
     DATA_DIR = os.environ['MOBILITY_GEN_DATA']

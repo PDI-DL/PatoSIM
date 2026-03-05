@@ -17,6 +17,7 @@
 import os
 import math
 from typing import Tuple, Optional, List
+from pathlib import Path
 
 import numpy as np
 import omni.usd
@@ -29,6 +30,37 @@ from isaacsim.core.prims import SingleXFormPrim as XFormPrim
 from omni.ext.mobility_gen.utils.global_utils import get_stage
 from omni.ext.mobility_gen.utils.stage_utils import stage_add_usd_ref
 from omni.ext.mobility_gen.common import Module, Buffer
+
+
+def _mobilitygen_repo_root() -> Path:
+    # sensors.py -> mobility_gen -> ext -> omni -> omni.ext.mobility_gen -> exts -> MobilityGen
+    return Path(__file__).resolve().parents[5]
+
+
+def _resolve_asset_path(*candidates: str) -> str:
+    """Return the first existing asset path from candidates.
+
+    Candidates can be:
+      - absolute paths
+      - workspace-relative paths (e.g., robot_assets/...)
+      - URLs (kept as-is when no local file exists)
+    """
+    repo_root = _mobilitygen_repo_root()
+    first_non_empty = ""
+    for cand in candidates:
+        text = str(cand or "").strip()
+        if not text:
+            continue
+        if not first_non_empty:
+            first_non_empty = text
+        if "://" in text:
+            continue
+        path = Path(text)
+        if not path.is_absolute():
+            path = repo_root / text
+        if path.exists():
+            return str(path)
+    return first_non_empty
 
 
 def _structured_pointcloud_to_array(array: np.ndarray) -> Optional[np.ndarray]:
@@ -385,10 +417,12 @@ class Lidar(Sensor):
     """
 
     # Local Isaac Sim 5.1 asset used as visual 3D model for the lidar.
-    usd_url: str = (
+    usd_url: str = _resolve_asset_path(
+        "robot_assets/Slamtec/RPLidar_S2e.usd",
+        "robot_assets/Slamtec/RPLIDAR_S2E/Slamtec_RPLIDAR_S2E.usd",
         "/home/pdi_4/Documents/Documentos/bevlog-isaac/isaac-assets/"
         "isaac-sim-assets-robots_and_sensors-5.1.0/Assets/Isaac/5.1/"
-        "Isaac/Sensors/Slamtec/RPLidar_S2e.usd"
+        "Isaac/Sensors/Slamtec/RPLidar_S2e.usd",
     )
     visual_model_subpath: str = "model_3d"
     sensor_prim_subpath: str = "rtx_sensor"
@@ -627,7 +661,12 @@ class Lidar(Sensor):
 class HawkCamera(Sensor):
 
     #usd_url: str = "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.2/Isaac/LeopardImaging/Hawk/hawk_v1.1_nominal.usd"
-    usd_url: str = "/home/pdi_4/Documents/Documentos/bevlog-isaac/isaac-assets/isaac-sim-assets-robots_and_sensors-5.1.0/Assets/Isaac/5.1/Isaac/Sensors/LeopardImaging/Hawk/hawk_v1.1_nominal.usd"
+    usd_url: str = _resolve_asset_path(
+        "robot_assets/LeopardImaging/Hawk/hawk_v1.1_nominal.usd",
+        "/home/pdi_4/Documents/Documentos/bevlog-isaac/isaac-assets/"
+        "isaac-sim-assets-robots_and_sensors-5.1.0/Assets/Isaac/5.1/"
+        "Isaac/Sensors/LeopardImaging/Hawk/hawk_v1.1_nominal.usd",
+    )
     resolution: Tuple[int, int] = (640, 400)
     left_camera_path: str = "left/camera_left"
     right_camera_path: str = "right/camera_right"
@@ -675,7 +714,12 @@ class RealSenseRGBDCamera(Sensor):
     # Ajuste para o caminho real do asset no seu servidor/Omniverse
    
     #usd_url: str = "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.2/Isaac/Sensors/RealSense/RealSense_D435.usd"
-    usd_url: str = "/home/pdi_4/Documents/Documentos/bevlog-isaac/isaac-assets/isaac-sim-assets-robots_and_sensors-5.1.0/Assets/Isaac/5.1/Isaac/Sensors/RealSense/RealSense_D435.usd"   
+    usd_url: str = _resolve_asset_path(
+        "robot_assets/RealSense/RealSense_D435.usd",
+        "/home/pdi_4/Documents/Documentos/bevlog-isaac/isaac-assets/"
+        "isaac-sim-assets-robots_and_sensors-5.1.0/Assets/Isaac/5.1/"
+        "Isaac/Sensors/RealSense/RealSense_D435.usd",
+    )
     resolution: Tuple[int, int] = (640, 360)
     camera_path: str = "camera"  # subcaminho do prim de câmera dentro do USD referenciado
 
@@ -722,7 +766,13 @@ class ZedStereoCamera(Sensor):
     """
     # Ajuste para o caminho real do asset no seu servidor/Omniverse
     #usd_url: str = "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.2/Isaac/Sensors/Stereolabs/ZED_X/ZED_X.usd"
-    usd_url: str = "/home/pdi_4/Documents/Documentos/bevlog-isaac/isaac-assets/isaac-sim-assets-robots_and_sensors-5.1.0/Assets/Isaac/5.1/Isaac/Sensors/Stereolabs/ZED_X/ZED_X.usd"
+    usd_url: str = _resolve_asset_path(
+        "robot_assets/Stereolabs/ZED_X/ZED_X.usdc",
+        "robot_assets/Stereolabs/ZED_X/ZED_X.usd",
+        "/home/pdi_4/Documents/Documentos/bevlog-isaac/isaac-assets/"
+        "isaac-sim-assets-robots_and_sensors-5.1.0/Assets/Isaac/5.1/"
+        "Isaac/Sensors/Stereolabs/ZED_X/ZED_X.usd",
+    )
     resolution: Tuple[int, int] = (640, 360)
     left_camera_path: str = "left/camera_left"     # confirme no USD
     right_camera_path: str = "right/camera_right"  # confirme no USD
@@ -929,7 +979,3 @@ class BevFrontDownCamera(Sensor):
     def attach(cls, prim_path: str, resolution: Tuple[int, int] = None) -> "BevFrontDownCamera":
         res = resolution if resolution is not None else cls.resolution
         return BevFrontDownCamera(Camera(prim_path, res))
-
-
-
-
