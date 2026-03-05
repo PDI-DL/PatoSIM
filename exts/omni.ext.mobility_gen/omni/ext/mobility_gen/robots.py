@@ -67,6 +67,7 @@ from omni.ext.mobility_gen.sensors import (
     _quat_from_euler_xyz,
     _xform_orient_quat,
     _xform_translate,
+    _resolve_asset_path,
 )
 #lidar 
 
@@ -489,10 +490,11 @@ class FourWheelRearSteerRobot_V1(Robot):
 
     # Fallback translations (used only when body bounds cannot be evaluated).
     front_camera_translation = (1.25, 0.0, 2.20)
-    fisheye_visual_usd_url: str = (
+    fisheye_visual_usd_url: str = _resolve_asset_path(
+        "robot_assets/LeopardImaging/Owl/owl.usd",
         "/home/pdi_4/Documents/Documentos/bevlog-isaac/isaac-assets/"
         "isaac-sim-assets-robots_and_sensors-5.1.0/Assets/Isaac/5.1/Isaac/"
-        "Sensors/LeopardImaging/Owl/owl.usd"
+        "Sensors/LeopardImaging/Owl/owl.usd",
     )
     fisheye_left_translation: Tuple[float, float, float] = (1.15, -0.85, 2.10)
     fisheye_right_translation: Tuple[float, float, float] = (1.15, 0.85, 2.10)
@@ -551,7 +553,13 @@ class FourWheelRearSteerRobot_V1(Robot):
     # ===== USD =====
     #usd_url: str = ("http://omniverse-content-production.s3-us-west-2.amazonaws.com/"
     #                "Assets/Isaac/4.2/Isaac/Robots/Forklift/forklift_c.usd")
-    usd_url: str = ("/home/pdi_4/Documents/Documentos/bevlog-isaac/isaac-assets/isaac-sim-assets-robots_and_sensors-5.1.0/Assets/Isaac/5.1/Isaac/Robots/IsaacSim/ForkliftC/forklift_c.usd")
+    usd_url: str = _resolve_asset_path(
+        "robot_assets/ForkliftC/forklift_c.usd",
+        "/home/pdi_4/Documents/Documentos/bevlog-isaac/MobilityGen/robot_assets/ForkliftC/forklift_c.usd",
+        "/home/pdi_4/Documents/Documentos/bevlog-isaac/isaac-assets/"
+        "isaac-sim-assets-robots_and_sensors-5.1.0/Assets/Isaac/5.1/Isaac/"
+        "Robots/IsaacSim/ForkliftC/forklift_c.usd",
+    )
     chassis_subpath: str = ""
 
     # ===== Drives de direção (posição) =====
@@ -2464,9 +2472,11 @@ class ForkliftRobotV3(FourWheelRearSteerRobot_V1):
     rear_wheel_dof_names: List[str] = ["left_back_wheel_joint", "right_back_wheel_joint"]
     steering_dof_names:   List[str] = ["left_rotator_joint", "right_rotator_joint"]
 
-    usd_url: str = (
+    usd_url: str = _resolve_asset_path(
+        "robot_assets/ForkliftC/forklift_c.usd",
+        "/home/pdi_4/Documents/Documentos/bevlog-isaac/MobilityGen/robot_assets/ForkliftC/forklift_c.usd",
         "http://omniverse-content-production.s3-us-west-2.amazonaws.com/"
-        "Assets/Isaac/4.2/Isaac/Robots/Forklift/forklift_c.usd"
+        "Assets/Isaac/4.2/Isaac/Robots/Forklift/forklift_c.usd",
     )
     chassis_subpath: str = ""  # articulação raiz é o próprio prim do robô
 

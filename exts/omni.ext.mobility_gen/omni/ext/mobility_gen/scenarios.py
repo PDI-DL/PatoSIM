@@ -157,6 +157,12 @@ class RandomPathFollowingScenarioRearSteer(Scenario):
             getattr(self.robot, "path_following_min_curve_speed_factor", 0.45)
         )
         self._min_v_cmd = float(getattr(self.robot, "path_following_min_speed", 0.18))
+        self._crawl_speed = float(
+            getattr(self.robot, "path_following_crawl_speed", max(0.14, 0.55 * self._min_v_cmd))
+        )
+        self._heading_speed_floor = float(
+            getattr(self.robot, "path_following_heading_speed_floor", 0.28)
+        )
         self._last_v_cmd = 0.0
         self._blocked_steps = 0
         self._stall_steps = 0
@@ -171,6 +177,27 @@ class RandomPathFollowingScenarioRearSteer(Scenario):
         self._goal_idle_replan_steps = int(
             getattr(self.robot, "path_following_goal_idle_replan_steps", 75)
         )
+        self._replan_cooldown_s = float(
+            getattr(self.robot, "path_following_replan_cooldown_seconds", 0.75)
+        )
+        self._linear_accel_limit = float(
+            getattr(self.robot, "path_following_linear_accel_limit", 1.25)
+        )
+        self._goal_replan_rearm_dist = float(
+            getattr(self.robot, "path_following_goal_replan_rearm_distance", max(self._stop_dist * 1.35, 0.65))
+        )
+        self._progress_replan_seconds = float(
+            getattr(self.robot, "path_following_progress_replan_seconds", 3.0)
+        )
+        self._blocked_replan_steps = int(
+            getattr(self.robot, "path_following_blocked_replan_steps", 28)
+        )
+        self._sim_time_s = 0.0
+        self._last_replan_time_s = -1e9
+        self._goal_replan_armed = True
+        self._time_without_progress_s = 0.0
+        self._best_goal_dist = float("inf")
+        self._avoidance_turn_sign = 1.0
         self._planner_info_printed = False
 
     # ---------- utilidades ----------
@@ -263,6 +290,30 @@ class RandomPathFollowingScenarioRearSteer(Scenario):
             return None
         return np.asarray(points, dtype=np.float32)
 
+    def _can_replan_now(self) -> bool:
+        return (self._sim_time_s - self._last_replan_time_s) >= self._replan_cooldown_s
+
+    def _request_replan(self, reason: str = "") -> bool:
+        if not self._can_replan_now():
+            return False
+        ok = self._set_random_target_path()
+        self._last_replan_time_s = self._sim_time_s
+        if reason:
+            print(f"[RandomPathFollowingRearSteer] replan reason={reason} ok={ok}")
+        return ok
+
+    def _apply_linear_speed_slew(self, v_target: float, step_size: float) -> float:
+        max_step = max(1e-4, float(self._linear_accel_limit) * float(step_size))
+        dv = float(v_target) - float(self._last_v_cmd)
+        dv = float(np.clip(dv, -max_step, +max_step))
+        return float(self._last_v_cmd + dv)
+
+    def _publish_crawl_action(self, step_size: float, steer_sign: float = 0.0) -> None:
+        v = float(max(self._crawl_speed, 0.08))
+        d = float(np.clip(steer_sign * 0.35 * self._delta_cmd_lim, -self._delta_cmd_lim, +self._delta_cmd_lim))
+        self.robot.action.set_value(np.array([v, d], dtype=np.float32))
+        self.robot.write_action(step_size)
+
     def _set_random_target_path(self):
         """Gera um caminho aleatório a partir da pose atual."""
         if not self._planner_info_printed:
@@ -314,6 +365,8 @@ class RandomPathFollowingScenarioRearSteer(Scenario):
             if path is not None:
                 self.target_path.set_value(path)
                 self._helper = PathHelper(path)
+                self._best_goal_dist = float("inf")
+                self._time_without_progress_s = 0.0
                 return True
 
         fallback_path = self._build_short_forward_fallback_path()
@@ -329,7 +382,15 @@ class RandomPathFollowingScenarioRearSteer(Scenario):
             print(f"[RandomPathFollowingRearSteer] replan failed, keeping previous path: {last_error}")
             return False
 
-        raise RuntimeError(f"Generated path is invalid after retries: {last_error}")
+        # Last-resort fail-safe: create a tiny forward path instead of raising.
+        pose = self.robot.get_pose_2d()
+        origin = np.array([float(pose.x), float(pose.y)], dtype=np.float32)
+        forward = np.array([math.cos(float(pose.theta)), math.sin(float(pose.theta))], dtype=np.float32)
+        emergency = np.asarray([origin, origin + 0.25 * forward], dtype=np.float32)
+        self.target_path.set_value(emergency)
+        self._helper = PathHelper(emergency)
+        print(f"[RandomPathFollowingRearSteer] planner failed, using emergency micro-path: {last_error}")
+        return False
 
     # ---------- ciclo de vida ----------
     def reset(self):
@@ -355,6 +416,12 @@ class RandomPathFollowingScenarioRearSteer(Scenario):
         self._stall_steps = 0
         self._last_progress_s = None
         self._goal_idle_steps = 0
+        self._sim_time_s = 0.0
+        self._last_replan_time_s = -1e9
+        self._goal_replan_armed = True
+        self._time_without_progress_s = 0.0
+        self._best_goal_dist = float("inf")
+        self._avoidance_turn_sign = 1.0
         self.is_alive = True
         try:
             dt = float(getattr(self.robot, "physics_dt", 0.005))
@@ -367,6 +434,7 @@ class RandomPathFollowingScenarioRearSteer(Scenario):
 
     # ---------- passo ----------
     def step(self, step_size: float) -> bool:
+        self._sim_time_s += float(step_size)
         try:
             self.robot.update_state()
         except Exception:
@@ -375,21 +443,30 @@ class RandomPathFollowingScenarioRearSteer(Scenario):
         # checagens de segurança
         current_pose = self.robot.get_pose_2d()
         if not self.collision_occupancy_map.check_world_point_in_bounds(current_pose):
-            self.is_alive = False
-            return False
+            self._request_replan("robot_out_of_bounds")
+            self.robot.action.set_value(np.array([0.0, 0.0], dtype=np.float32))
+            self.robot.write_action(step_size)
+            return True
         if not self.collision_occupancy_map.check_world_point_in_freespace(current_pose):
-            self.is_alive = False
-            return False
+            self._request_replan("robot_in_collision")
+            # keep scenario alive; try to recover instead of stopping execution
+            self.robot.action.set_value(np.array([0.0, 0.0], dtype=np.float32))
+            self.robot.write_action(step_size)
+            return True
 
         # ponto mais próximo e ponto de lookahead dinâmico
         path = self.target_path.get_value()
         if path is None or len(path) < 2 or self._helper is None:
-            self._set_random_target_path()
-            return True
+            self._request_replan("missing_or_invalid_path")
+            path = self.target_path.get_value()
+            if path is None or len(path) < 2 or self._helper is None:
+                self._publish_crawl_action(step_size, steer_sign=self._avoidance_turn_sign)
+                return True
         pt_robot = np.array([current_pose.x, current_pose.y], dtype=np.float32)
         _, s_near, _, _ = self._helper.find_nearest(pt_robot)
         if s_near is None:
-            self._set_random_target_path()
+            self._request_replan("nearest_projection_failed")
+            self._publish_crawl_action(step_size, steer_sign=self._avoidance_turn_sign)
             return True
         pt_target_near = self._helper.get_point_by_distance(distance=s_near + self._lookahead)
         v_robot = np.array([np.cos(current_pose.theta), np.sin(current_pose.theta)], dtype=np.float32)
@@ -404,12 +481,14 @@ class RandomPathFollowingScenarioRearSteer(Scenario):
 
         # condição de chegada
         dist_to_goal = float(np.linalg.norm(pt_robot - path[-1]))
-        if dist_to_goal < self._stop_dist:
-            self._set_random_target_path()
+        if dist_to_goal > self._goal_replan_rearm_dist:
+            self._goal_replan_armed = True
+        if dist_to_goal < self._stop_dist and self._goal_replan_armed:
+            self._request_replan("goal_reached")
+            self._goal_replan_armed = False
             self._goal_idle_steps = 0
-            # após replanejar, nada a fazer nesse frame
-            self.robot.action.set_value(np.array([0.0, 0.0], dtype=np.float32))
-            self.robot.write_action(step_size)
+            # mantém movimento leve para evitar entrar em estado "parado"
+            self._publish_crawl_action(step_size, steer_sign=0.0)
             return True
 
         # orientação atual e rumo até alvo
@@ -417,7 +496,7 @@ class RandomPathFollowingScenarioRearSteer(Scenario):
         n = float(np.linalg.norm(v_targ))
         if n < 1e-6:
             # alvo degenerado; avance pouco e mantenha delta atual
-            v_cmd = 0.2 * self._v_nom
+            v_cmd = max(self._min_v_cmd, 0.35 * self._v_nom)
             delta_cmd = self._delta
         else:
             v_targ_unit = v_targ / n
@@ -434,7 +513,7 @@ class RandomPathFollowingScenarioRearSteer(Scenario):
             delta_cmd = self._delta
 
             # velocidade adaptativa: reduz quando há grande heading error / grande esterço
-            heading_factor = max(0.0, math.cos(abs(float(d_theta))))
+            heading_factor = max(self._heading_speed_floor, math.cos(abs(float(d_theta))))
             steer_ratio = min(1.0, abs(delta_cmd) / (self._delta_cmd_lim + 1e-6))
             curve_factor = self._max_curve_speed_factor - (
                 (self._max_curve_speed_factor - self._min_curve_speed_factor) * steer_ratio
@@ -443,7 +522,7 @@ class RandomPathFollowingScenarioRearSteer(Scenario):
             if v_cmd > 0.0:
                 v_cmd = max(self._min_v_cmd, v_cmd)
             if abs(d_theta) > self._fwd_ang_th:
-                v_cmd = 0.0
+                v_cmd = max(self._crawl_speed, 0.10)
 
             # safety gate: se segmento à frente não está livre, reduz/paralisa e replaneja se persistir
             ahead_dist = max(self._safety_margin, abs(self._last_v_cmd) * 0.8 + self._safety_margin)
@@ -451,14 +530,25 @@ class RandomPathFollowingScenarioRearSteer(Scenario):
             safe_corridor = self._is_segment_free(pt_robot, pt_target) and self._is_segment_free(pt_robot, ahead_target)
             if not safe_corridor:
                 self._blocked_steps += 1
-                v_cmd *= 0.35
-                if v_cmd < 0.08:
-                    v_cmd = 0.0
-                if self._blocked_steps > 20:
-                    self._set_random_target_path()
+                # keep moving slowly and steer away while trying to recover
+                v_cmd = max(self._min_v_cmd * 0.55, 0.10)
+                if abs(float(d_theta)) < 0.08:
+                    delta_cmd = float(
+                        np.clip(
+                            self._avoidance_turn_sign * (0.65 * self._delta_cmd_lim),
+                            -self._delta_cmd_lim,
+                            +self._delta_cmd_lim,
+                        )
+                    )
+                if self._blocked_steps % 15 == 0:
+                    self._avoidance_turn_sign *= -1.0
+                if self._blocked_steps >= self._blocked_replan_steps:
+                    self._request_replan("blocked_corridor")
                     self._blocked_steps = 0
             else:
                 self._blocked_steps = 0
+
+        v_cmd = self._apply_linear_speed_slew(v_cmd, step_size)
 
         # publica ação e aplica
         commanded_motion = abs(float(v_cmd)) > max(0.12, 0.4 * self._min_v_cmd)
@@ -467,6 +557,11 @@ class RandomPathFollowingScenarioRearSteer(Scenario):
             self._goal_idle_steps += 1
         else:
             self._goal_idle_steps = 0
+        if dist_to_goal + 0.02 < self._best_goal_dist:
+            self._best_goal_dist = dist_to_goal
+            self._time_without_progress_s = 0.0
+        else:
+            self._time_without_progress_s += float(step_size)
         if self._last_progress_s is not None and commanded_motion:
             progress_delta = float(s_near) - float(self._last_progress_s)
             if progress_delta < self._stall_progress_epsilon:
@@ -478,27 +573,30 @@ class RandomPathFollowingScenarioRearSteer(Scenario):
         self._last_progress_s = float(s_near)
 
         if self._goal_idle_steps >= self._goal_idle_replan_steps:
-            self._set_random_target_path()
+            self._request_replan("goal_idle")
             self._delta = 0.0
-            self._last_v_cmd = 0.0
+            self._last_v_cmd = max(self._crawl_speed, 0.08)
             self._blocked_steps = 0
             self._stall_steps = 0
             self._goal_idle_steps = 0
             self._last_progress_s = None
-            self.robot.action.set_value(np.array([0.0, 0.0], dtype=np.float32))
-            self.robot.write_action(step_size)
+            self._publish_crawl_action(step_size, steer_sign=0.0)
             return True
 
+        if self._time_without_progress_s >= self._progress_replan_seconds and self._blocked_steps > 3:
+            self._request_replan("progress_timeout")
+            self._time_without_progress_s = 0.0
+            self._best_goal_dist = float("inf")
+
         if self._stall_steps >= self._stall_replan_steps:
-            self._set_random_target_path()
+            self._request_replan("stall_detected")
             self._delta = 0.0
-            self._last_v_cmd = 0.0
+            self._last_v_cmd = max(self._crawl_speed, 0.08)
             self._blocked_steps = 0
             self._stall_steps = 0
             self._goal_idle_steps = 0
             self._last_progress_s = None
-            self.robot.action.set_value(np.array([0.0, 0.0], dtype=np.float32))
-            self.robot.write_action(step_size)
+            self._publish_crawl_action(step_size, steer_sign=self._avoidance_turn_sign)
             return True
 
         self.robot.action.set_value(np.array([v_cmd, delta_cmd], dtype=np.float32))
