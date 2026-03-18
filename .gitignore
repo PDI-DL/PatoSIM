@@ -169,3 +169,11 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Modelos do HuggingFace
+
+modelos_os/*
+
+# etc
+
+hf_upload_env

@@ -1,0 +1,15 @@
+Usando o venv hf_upload_env
+    Pacotes:
+        huggingface_hub
+    Ativação: source hf_upload_env/bin/activate
+
+O token para fazer upload ao HuggingFace ficar armazenada na prória máquina,
+caso ainda não exista um, executar no terminal: 
+    hf auth login
+        Caso ainda não possua o pacote "hf":
+            curl -LsSf https://hf.co/cli/install.sh | bash
+
+
+Ideias para o futuro:
+    Automatizar em uploadAll.py
+        local_folder_path
