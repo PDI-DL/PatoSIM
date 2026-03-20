@@ -10,7 +10,7 @@ api = HfApi()
 local_folder_path = f"{os.getcwd()}/modelos_os"
 hf_repo_id = "PDI-DL/PDI_3DUW"
 
-print(f"Starting upload for {hf_repo_id}...")
+print(f"### Starting upload for {hf_repo_id}...")
 
 api.upload_large_folder(
     folder_path=local_folder_path,
@@ -18,4 +18,4 @@ api.upload_large_folder(
     repo_type="dataset",  
 )
 
-print("Upload complete!")
+print("### Upload complete!")
