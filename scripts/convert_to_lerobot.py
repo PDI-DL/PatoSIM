@@ -236,7 +236,7 @@ def write_frames(
         frame["task"] = task
         dataset.add_frame(frame)
 
-# Convert a collection of MobilityGen datasets into a single LeRobot dataset.
+# Convert a collection of PatoSim datasets into a single LeRobot dataset.
 def convert_to_lerobot_dataset(
     dataset_paths: list[str],
     output_path  : str,
@@ -274,7 +274,7 @@ def convert_to_lerobot_dataset(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", type=str, default=None, help="Path to the source MobilityGen dataset(s)")
+    parser.add_argument("--input", type=str, default=None, help="Path to the source PatoSim dataset(s)")
     parser.add_argument("--output", type=str, default=None, help="Output path for the converted LeRobot dataset")
     parser.add_argument('--batch', action=argparse.BooleanOptionalAction, help="Whether the input directory contains more than one dataset")
     parser.add_argument("--fps", type=int, default=30, help="Frames per second for the source dataset")

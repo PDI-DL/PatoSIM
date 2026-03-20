@@ -15,7 +15,15 @@ def main():
 
     json_data = {"asset_path": os.path.abspath(asset_path)}
     oceansim_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-    json_path = os.path.join(oceansim_root, 'isaacsim', 'oceansim', 'utils', 'asset_path.json')
+    json_path = os.path.join(
+        oceansim_root,
+        'omni',
+        'ext',
+        'patosim',
+        'oceansim',
+        'utils',
+        'asset_path.json',
+    )
 
     with open(json_path, 'w') as f:
         json.dump(json_data, f, indent=2)

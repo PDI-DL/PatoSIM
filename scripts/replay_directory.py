@@ -26,10 +26,10 @@ import sys
 from typing import Any
 
 
-if "MOBILITY_GEN_DATA" in os.environ:
-    DATA_DIR = os.environ["MOBILITY_GEN_DATA"]
+if "PATOSIM_DATA" in os.environ:
+    DATA_DIR = os.environ["PATOSIM_DATA"]
 else:
-    DATA_DIR = os.path.expanduser("~/MobilityGenData")
+    DATA_DIR = os.path.expanduser("~/PatoSimData")
 
 
 def parse_bool(value: Any) -> bool:

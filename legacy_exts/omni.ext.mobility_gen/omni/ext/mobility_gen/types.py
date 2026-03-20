@@ -1,5 +1,3 @@
-#!/usr/bin/env bash
-#
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -14,7 +12,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-set -euo pipefail
 
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-exec "${SCRIPT_DIR}/launch_patosim.sh" "$@"
+
+import numpy as np
+from dataclasses import dataclass
+
+@dataclass
+class Point2d:
+    x: float
+    y: float
+    
+
+@dataclass
+class Pose2d(Point2d):
+    theta: float
+
+
+@dataclass
+class Pose3d:
+    position: np.ndarray
+    orientation: np.ndarray
+

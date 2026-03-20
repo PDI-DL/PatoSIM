@@ -34,10 +34,10 @@ import tqdm
 
 STOP_REQUESTED = False
 
-if "MOBILITY_GEN_DATA" in os.environ:
-    DATA_DIR = os.environ["MOBILITY_GEN_DATA"]
+if "PATOSIM_DATA" in os.environ:
+    DATA_DIR = os.environ["PATOSIM_DATA"]
 else:
-    DATA_DIR = os.path.expanduser("~/MobilityGenData")
+    DATA_DIR = os.path.expanduser("~/PatoSimData")
 
 
 def parse_bool(value: Any) -> bool:
@@ -104,7 +104,7 @@ def install_signal_handlers() -> None:
 
 def bootstrap_repo_paths() -> Path:
     repo_root = Path(__file__).resolve().parents[1]
-    ext_pkg_root = repo_root / "exts" / "omni.ext.mobility_gen"
+    ext_pkg_root = repo_root / "exts" / "omni.ext.patosim"
     ext_omni_ext_root = ext_pkg_root / "omni" / "ext"
 
     ext_pkg_root_str = str(ext_pkg_root)
@@ -134,11 +134,11 @@ def init_simulation_app(headless: bool = True) -> Tuple[Any, Any]:
 
 
 def load_runtime_modules():
-    from omni.ext.mobility_gen.reader import Reader
-    from omni.ext.mobility_gen.writer import Writer
+    from omni.ext.patosim.reader import Reader
+    from omni.ext.patosim.writer import Writer
 
-    from omni.ext.mobility_gen.build import load_scenario
-    from omni.ext.mobility_gen.utils.global_utils import get_world
+    from omni.ext.patosim.build import load_scenario
+    from omni.ext.patosim.utils.global_utils import get_world
 
     return Reader, Writer, load_scenario, get_world
 
@@ -606,7 +606,7 @@ def run_replay(
                     writer.write_pointcloud_metadata(metadata, step)
 
         if args.annotations_enabled:
-            from omni.ext.mobility_gen.utils.global_utils import get_stage
+            from omni.ext.patosim.utils.global_utils import get_stage
 
             annotations = gather_annotations(get_stage())
             semantic_state = extract_semantic_state_from_state_dict(state_dict_common)

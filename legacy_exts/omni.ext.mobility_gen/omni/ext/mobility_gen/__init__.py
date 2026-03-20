@@ -1,5 +1,3 @@
-#!/usr/bin/env bash
-#
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -14,7 +12,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-set -euo pipefail
 
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-exec "${SCRIPT_DIR}/launch_patosim.sh" "$@"
+
+try:
+    from .extension import *
+except ModuleNotFoundError as exc:
+    missing = exc.name or ""
+    # Allow utility imports (reader/writer/config/etc.) outside Kit UI context.
+    if not (
+        missing.startswith("omni")
+        or missing.startswith("isaacsim")
+        or missing.startswith("pxr")
+        or missing.startswith("carb")
+    ):
+        raise

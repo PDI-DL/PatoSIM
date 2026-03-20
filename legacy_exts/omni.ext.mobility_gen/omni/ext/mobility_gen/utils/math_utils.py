@@ -1,5 +1,3 @@
-#!/usr/bin/env bash
-#
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -14,7 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-set -euo pipefail
 
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-exec "${SCRIPT_DIR}/launch_patosim.sh" "$@"
+
+import numpy as np
+
+
+def vector_angle(w: np.ndarray, v: np.ndarray):
+    delta_angle = np.arctan2(
+        w[1] * v[0] - w[0] * v[1], 
+        w[0] * v[0] + w[1] * v[1]
+    )
+    return delta_angle

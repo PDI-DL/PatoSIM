@@ -5,11 +5,11 @@ order = 0
 [package]
 version = "1.0.0"
 category = "Simulation"
-title = "PatoSIM OceanSim"
-description = "OceanSim modules organized inside the MOD_patosim workspace."
+title = "PatoSim"
+description = "Unified PatoSim extension built on the MobilityGen structure with integrated OceanSim modules."
 authors = ["FRoG--University of Michigan", "MOD_patosim integration"]
 repository = ""
-keywords = ["Underwater", "OceanSim", "PatoSIM", "Sensor"]
+keywords = ["PatoSim", "OceanSim", "Mobility", "Underwater", "Sensor"]
 changelog = "docs/CHANGELOG.md"
 readme = "docs/README.md"
 preview_image = "assets/preview.png"
@@ -21,10 +21,7 @@ icon = "assets/icon.png"
 "omni.isaac.core" = {}
 
 [[python.module]]
-name = "isaacsim.oceansim.modules.SensorExample_python"
-
-[[python.module]]
-name = "isaacsim.oceansim.modules.colorpicker_python"
+name = "omni.ext.patosim"
 
 [[test]]
 dependencies = []
