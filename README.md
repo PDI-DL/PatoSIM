@@ -54,6 +54,7 @@ To get started with PatoSim follow the setup and usage instructions below!
 
 - [🛠️ Setup](#setup)
 - [👍 Basic Usage](#usage)
+- [🚧 TODO / Roadmap](#todo)
 - [💡 How To Guides](#guides)
     - [How to record procedural data](#how-to-procedural-data)
     - [How to implement a custom robot](#how-to-custom-robot)
@@ -267,6 +268,26 @@ That's it!  Once you've gotten the hang of how to record data, you might try
 If you find PatoSim helpful for your use case, run in to issues, or have any questions please [let us know!](https://github.com/NVlabs/PatoSim/issues).
 
 <a id="contributing"></a>
+<a id="todo"></a>
+## 🚧 TODO / Roadmap
+
+Below is the current implementation checklist for turning PatoSim into a complete underwater simulation and dataset-generation tool.
+
+- `Worlds / scene usage`: define which underwater worlds are officially supported, separate test/demo worlds from production worlds, and document how scenes should be loaded from local assets vs external OceanSim assets.
+- `Default assets folder`: standardize one default asset root for OceanSim-style assets, improve fallback behavior when assets are missing, and reduce the need for manual path registration.
+- `Robot modeling with underwater sensors`: consolidate the underwater robot model so the base vehicle, mounts and sensor frames are defined in a reusable way instead of being scattered across UI setup code.
+- `Sensor data recording`: extend the recording pipeline to persist underwater-camera outputs, sonar products, DVL, barometer and any metadata needed for replay and dataset generation.
+- `UI adjustments`: redesign the main PatoSim UI so world loading, robot selection, sensor toggles, water profiles and recording controls are exposed from a single coherent interface.
+- `scenarios.py adjustments`: add scenario classes specific to underwater operation, object scanning and asset-aware missions, while preserving the existing scenario registry pattern.
+- `Waypoint navigation and keyboard teleop`: adapt control logic for underwater vehicles so waypoint following and keyboard teleoperation work with submerged robot dynamics rather than ground-robot assumptions.
+- `Sensor implementation review`: validate sensor update rate, rendering triggers, output format and synchronization between simulation step and logging step.
+- `Sensor pose calibration`: review and fix the physical placement, rotation and mounting offsets of sonar, cameras, DVL and barometer on each robot model.
+- `Robot class registry`: register underwater robot types following the same structure as the former MobilityGen robot registry, but backed by OceanSim assets and PatoSim-specific parameters.
+- `Dynamic object tool`: create a tool to swap scanned objects and scene props quickly, enabling variation of environments and interaction targets without editing the stage manually.
+- `Object scanning scenario`: implement a dedicated scanning scenario for orbiting or circling objects, generating multi-view underwater datasets for reconstruction, detection or inspection pipelines.
+- `Dataset profiles`: define dataset presets that bundle robot type, sensor configuration, water profile, world, scenario and output format into reusable experiment recipes.
+- `OceanSim integration cleanup`: move the remaining compatibility glue into a clearly named integration layer so the runtime path is easier to understand and maintain.
+
 
 <a id="usage"></a>
 ## 💡 How To Guides
