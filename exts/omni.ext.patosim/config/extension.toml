@@ -1,0 +1,27 @@
+[core]
+reloadable = true
+order = 0
+
+[package]
+version = "1.0.0"
+category = "Simulation"
+title = "PatoSim"
+description = "Unified PatoSim extension built on the MobilityGen structure with integrated OceanSim modules."
+authors = ["FRoG--University of Michigan", "MOD_patosim integration"]
+repository = ""
+keywords = ["PatoSim", "OceanSim", "Mobility", "Underwater", "Sensor"]
+changelog = "docs/CHANGELOG.md"
+readme = "docs/README.md"
+preview_image = "assets/preview.png"
+icon = "assets/icon.png"
+
+[dependencies]
+"omni.kit.uiapp" = {}
+"omni.isaac.ui" = {}
+"omni.isaac.core" = {}
+
+[[python.module]]
+name = "omni.ext.patosim"
+
+[[test]]
+dependencies = []
