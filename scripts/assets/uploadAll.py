@@ -7,7 +7,15 @@ from huggingface_hub import HfApi
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 api = HfApi()
 
-local_folder_path = f"{os.getcwd()}/modelos_os"
+current = __file__
+
+for i in range(3):
+    # print(current)
+    local_folder_path = os.path.dirname(current)
+    current = local_folder_path
+else:
+    local_folder_path += "/assets/models/"
+
 hf_repo_id = "PDI-DL/PDI_3DUW"
 
 print(f"### Starting upload for {hf_repo_id}...")

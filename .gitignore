@@ -100,5 +100,5 @@ docs/_build/
 .ropeproject
 
 # Local project data
-modelos_os/*
+assets/models
 hf_upload_env

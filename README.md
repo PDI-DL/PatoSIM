@@ -5,8 +5,8 @@ A toolset built on <a href="https://developer.nvidia.com/isaac/sim">NVIDIA Isaac
 allows you to easily collect data for mobile robots.
 <br></br>
 <div>
-<img src="assets/robots.png" width="640px"/>
-<img src="assets/gmg_screencast_scale.GIF" width="640px"/>
+<img src="assets/readme/robots.png" width="640px"/>
+<img src="assets/readme/gmg_screencast_scale.GIF" width="640px"/>
 </div>
 
 Read below to learn more.
@@ -141,7 +141,7 @@ Next, we'll call ``link_app.sh`` to link the Isaac Sim installation directory to
 
 That's it!  If everything worked, you should see Isaac Sim open with a window titled ``PatoSim`` appear.
 
-<img src="./assets/extension_gui.png" height="640px">
+<img src="./assets/readme/extension_gui.png" height="640px">
 
 Read [Usage](#usage) below to learn how to generate data with PatoSim.
 
@@ -252,7 +252,7 @@ call the following
 
 If everything worked, you should be able to view the data in the browser.
 
-<img src="assets/gradio_gui.png" height=320 />
+<img src="assets/readme/gradio_gui.png" height=320 />
 
 ### Next steps
 

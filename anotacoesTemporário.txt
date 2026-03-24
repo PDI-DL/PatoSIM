@@ -1,7 +1,8 @@
-Usando o venv hf_upload_env
+Usando o venv 
+    Criação: python3 -m venv hf_upload_env
+    Ativação: source hf_upload_env/bin/activate
     Pacotes:
         huggingface_hub
-    Ativação: source hf_upload_env/bin/activate
 
 O token para fazer upload ao HuggingFace ficar armazenada na prória máquina,
 caso ainda não exista um, executar no terminal: 
