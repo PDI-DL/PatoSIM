@@ -14,19 +14,23 @@
 # limitations under the License.
 
 import os
+import numpy as np
 
 import isaacsim.core.utils.prims as prim_utils
 from isaacsim.core.utils.stage import open_stage
 import isaacsim.core.api.objects as objects
+from isaacsim.core.prims import SingleGeometryPrim
 from isaacsim.core.utils.stage import add_reference_to_stage
+from pxr import Usd, UsdGeom
 
 
 from omni.ext.patosim.occupancy_map import OccupancyMap
 from omni.ext.patosim.config import Config
-from omni.ext.patosim.utils.global_utils import new_stage, new_world, set_viewport_camera
+from omni.ext.patosim.utils.global_utils import new_stage, new_world, set_viewport_camera, get_stage
 from omni.ext.patosim.scenarios import Scenario, SCENARIOS
 from omni.ext.patosim.robots import ROBOTS
 from omni.ext.patosim.reader import Reader
+from omni.ext.patosim.utils.stage_utils import stage_get_prim
 
 
 def _validate_scene_usd_path(scene_path: str) -> str:
@@ -55,6 +59,101 @@ def _validate_scene_usd_path(scene_path: str) -> str:
     return scene_path
 
 
+def _is_underwater_robot_type(robot_type) -> bool:
+    return getattr(robot_type, "__name__", "") == "OceanSimROVRobot"
+
+
+def _make_underwater_placeholder_occupancy_map() -> OccupancyMap:
+    size = 256
+    resolution = 0.25
+    freespace = np.ones((size, size), dtype=bool)
+    occupied = np.zeros((size, size), dtype=bool)
+    origin = (-(size * resolution) / 2.0, -(size * resolution) / 2.0, 0.0)
+    return OccupancyMap.from_masks(
+        freespace_mask=freespace,
+        occupied_mask=occupied,
+        resolution=resolution,
+        origin=origin,
+    )
+
+
+def _enable_scene_collisions(scene_root_path: str) -> int:
+    stage = get_stage()
+    root_prim = stage_get_prim(stage, scene_root_path)
+    if root_prim is None or not root_prim.IsValid():
+        return 0
+
+    enabled = 0
+
+    for prim in Usd.PrimRange(root_prim):
+        if not prim.IsValid():
+            continue
+        if not prim.IsA(UsdGeom.Gprim):
+            continue
+        # Nunca habilite colisao no prim raiz do mundo referenciado:
+        # isso pode gerar um collider englobando toda a cena e prender o ROV
+        # "dentro" do mundo logo no spawn.
+        prim_path = prim.GetPath().pathString
+        if prim_path == scene_root_path:
+            continue
+        try:
+            geom = SingleGeometryPrim(prim_path=prim_path, collision=True)
+            try:
+                geom.set_collision_approximation("convexDecomposition")
+            except Exception:
+                pass
+            enabled += 1
+        except Exception:
+            continue
+    return enabled
+
+
+def _compute_world_bbox(scene_root_path: str):
+    stage = get_stage()
+    root_prim = stage_get_prim(stage, scene_root_path)
+    if root_prim is None or not root_prim.IsValid():
+        return None
+    try:
+        bbox_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["default"])
+        bbox = bbox_cache.ComputeWorldBound(root_prim).ComputeAlignedBox()
+        if bbox.IsEmpty():
+            return None
+        return bbox
+    except Exception:
+        return None
+
+
+def _compute_safe_underwater_spawn(scene_root_path: str, desired_position: np.ndarray) -> np.ndarray:
+    desired_position = np.asarray(desired_position, dtype=np.float32).reshape(3)
+    bbox = _compute_world_bbox(scene_root_path)
+    if bbox is None:
+        return desired_position
+
+    min_v = np.asarray(bbox.GetMin(), dtype=np.float32)
+    max_v = np.asarray(bbox.GetMax(), dtype=np.float32)
+    safe_position = desired_position.copy()
+    inside = bool(np.all(desired_position >= min_v) and np.all(desired_position <= max_v))
+    below_world = bool(desired_position[2] <= (min_v[2] + 0.25))
+
+    if not inside and not below_world:
+        return desired_position
+
+    # If the requested spawn is below the world or intersects the scene bounds,
+    # lift the robot above the scene to avoid starting inside geometry/colliders.
+    safe_position[2] = float(max_v[2] + 1.0)
+
+    if inside:
+        xy_inside = bool(
+            (min_v[0] <= desired_position[0] <= max_v[0])
+            and (min_v[1] <= desired_position[1] <= max_v[1])
+        )
+        if xy_inside:
+            safe_position[0] = float((min_v[0] + max_v[0]) * 0.5)
+            safe_position[1] = float((min_v[1] + max_v[1]) * 0.5)
+
+    return safe_position
+
+
 def load_scenario(path: str) -> Scenario:
     reader = Reader(path)
     config = reader.read_config()
@@ -66,6 +165,10 @@ def load_scenario(path: str) -> Scenario:
     occupancy_map = reader.read_occupancy_map()
     robot = robot_type.build("/World/robot")
     chase_camera_path = robot.build_chase_camera()
+    try:
+        robot.chase_camera_path = chase_camera_path
+    except Exception:
+        pass
     set_viewport_camera(chase_camera_path)
     robot_type = ROBOTS.get(config.robot_type)
     occupancy_map = OccupancyMap.from_ros_yaml(
@@ -80,26 +183,64 @@ async def build_scenario_from_config(config: Config):
 
     robot_type = ROBOTS.get(config.robot_type)
     scenario_type = SCENARIOS.get(config.scenario_type)
+    is_underwater_robot = _is_underwater_robot_type(robot_type)
+    if is_underwater_robot:
+        robot_type.water_profile_path = str(getattr(config, "water_profile_path", "") or "").strip() or None
+        robot_type.enable_dvl_debug_lines = bool(getattr(config, "enable_dvl_debug_lines", False))
+        robot_type.teleop_linear_speed_gain = float(getattr(config, "rov_linear_speed", 0.75))
+        robot_type.teleop_angular_speed_gain = float(getattr(config, "rov_angular_speed", 0.9))
+        robot_type.enable_front_camera = bool(getattr(config, "enable_rov_front_camera", True))
+        robot_type.enable_stereo_camera = bool(getattr(config, "enable_rov_stereo_camera", False))
+        robot_type.enable_sonar = bool(getattr(config, "enable_rov_sonar", True))
+        robot_type.enable_dvl = bool(getattr(config, "enable_rov_dvl", True))
+        robot_type.enable_barometer = bool(getattr(config, "enable_rov_barometer", True))
     scene_usd = _validate_scene_usd_path(getattr(config, "scene_usd", ""))
     new_stage()
     world = new_world(physics_dt=robot_type.physics_dt)
     await world.initialize_simulation_context_async()
     add_reference_to_stage(scene_usd, "/World/scene")
-    objects.GroundPlane("/World/ground_plane", visible=False)
+    _enable_scene_collisions("/World/scene")
+    if not is_underwater_robot:
+        objects.GroundPlane("/World/ground_plane", visible=False)
     robot = robot_type.build("/World/robot")
-    occupancy_map = await occupancy_map_generate_from_prim_async(
-        "/World/scene",
-        cell_size=robot.occupancy_map_cell_size,
-        z_min=robot.occupancy_map_z_min,
-        z_max=robot.occupancy_map_z_max
-    )
-    if getattr(occupancy_map, "data", None) is None or occupancy_map.data.size == 0:
-        raise RuntimeError(
-            "build_scenario_from_config: occupancy map generation returned an empty map. "
-            f"Scene asset='{scene_usd}'. Check whether the USD loaded successfully and "
-            "whether the referenced stage contains visible geometry under /World/scene."
+    if is_underwater_robot:
+        safe_spawn = _compute_safe_underwater_spawn(
+            "/World/scene",
+            np.asarray(getattr(robot_type, "initial_translation", (-2.0, 0.0, -0.8)), dtype=np.float32),
         )
+        try:
+            robot.spawn_translation = safe_spawn.astype(np.float32)
+            robot.initial_translation = tuple(float(v) for v in safe_spawn)
+            robot.set_pose_3d(safe_spawn, robot_type._initial_orientation())
+        except Exception:
+            pass
+        occupancy_map = _make_underwater_placeholder_occupancy_map()
+    else:
+        occupancy_map = await occupancy_map_generate_from_prim_async(
+            "/World/scene",
+            cell_size=robot.occupancy_map_cell_size,
+            z_min=robot.occupancy_map_z_min,
+            z_max=robot.occupancy_map_z_max
+        )
+        if getattr(occupancy_map, "data", None) is None or occupancy_map.data.size == 0:
+            raise RuntimeError(
+                "build_scenario_from_config: occupancy map generation returned an empty map. "
+                f"Scene asset='{scene_usd}'. Check whether the USD loaded successfully and "
+                "whether the referenced stage contains visible geometry under /World/scene."
+            )
     chase_camera_path = robot.build_chase_camera()
+    try:
+        robot.chase_camera_path = chase_camera_path
+    except Exception:
+        pass
     set_viewport_camera(chase_camera_path)
     scenario = scenario_type.from_robot_occupancy_map(robot, occupancy_map)
+    if is_underwater_robot:
+        waypoint_path = str(getattr(config, "waypoint_path", "") or "").strip()
+        if waypoint_path and hasattr(scenario, "_waypoint_path"):
+            try:
+                from pathlib import Path
+                scenario._waypoint_path = Path(waypoint_path)
+            except Exception:
+                pass
     return scenario

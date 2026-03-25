@@ -101,4 +101,6 @@ docs/_build/
 
 # Local project data
 assets/models
+modelos_os/*
 hf_upload_env
+PDI_3DUW

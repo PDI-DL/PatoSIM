@@ -9,6 +9,7 @@ import numpy as np
 import warp as wp
 import yaml
 import carb
+from pxr import UsdGeom
 
 # Custom import
 from isaacsim.oceansim.utils.UWrenderer_utils import UW_render
@@ -58,6 +59,14 @@ class UW_Camera(Camera):
         self._writing = False
 
         super().__init__(prim_path, name, frequency, dt, resolution, position, orientation, translation, render_product_path)
+        try:
+            if resolution is not None:
+                cam_geom = UsdGeom.Camera(self.prim)
+                horizontal_aperture = float(cam_geom.GetHorizontalApertureAttr().Get())
+                vertical_aperture = horizontal_aperture * (float(resolution[1]) / max(float(resolution[0]), 1.0))
+                cam_geom.GetVerticalApertureAttr().Set(vertical_aperture)
+        except Exception:
+            pass
 
     def initialize(self, 
                    UW_param: np.ndarray = np.array([0.0, 0.31, 0.24, 0.05, 0.05, 0.2, 0.05, 0.05, 0.05 ]),

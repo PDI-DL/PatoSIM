@@ -4,6 +4,7 @@ import omni.ui as ui
 import numpy as np
 from omni.replicator.core.scripts.functional import write_np
 import warp as wp
+from pxr import UsdGeom
 from isaacsim.oceansim.utils.ImagingSonar_kernels import *
 
 
@@ -123,6 +124,11 @@ class ImagingSonarSensor(Camera):
                          orientation=orientation, 
                          translation=translation, 
                          render_product_path=render_product_path)
+        try:
+            cam_geom = UsdGeom.Camera(self.prim)
+            cam_geom.CreateProjectionAttr().Set(UsdGeom.Tokens.perspective)
+        except Exception:
+            pass
 
         self.set_clipping_range(
             near_distance=self.min_range,
@@ -139,7 +145,17 @@ class ImagingSonarSensor(Camera):
         # https://forums.developer.nvidia.com/t/how-to-modify-the-cameras-field-of-view/278427/5
         self.focal_length = self.get_focal_length()
         horizontal_aper = 2 * self.focal_length * np.tan(np.deg2rad(self.hori_fov) / 2)
-        self.set_horizontal_aperture(horizontal_aper)
+        vertical_aper = horizontal_aper * (float(self.vert_res) / max(float(self.hori_res), 1.0))
+        try:
+            cam_geom = UsdGeom.Camera(self.prim)
+            cam_geom.GetHorizontalApertureAttr().Set(float(horizontal_aper))
+            cam_geom.GetVerticalApertureAttr().Set(float(vertical_aper))
+        except Exception:
+            self.set_horizontal_aperture(horizontal_aper)
+            try:
+                self.set_vertical_aperture(vertical_aper)
+            except Exception:
+                pass
         # Notice if you would like to observe sonar view from linked viewport.
         # Only horizontal fov is displayed correctly while the vertical fov is
         # followed by your viewport aspect ratio settings.
