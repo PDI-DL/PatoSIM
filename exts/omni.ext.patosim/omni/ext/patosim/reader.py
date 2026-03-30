@@ -31,6 +31,11 @@ from omni.ext.patosim.config import Config
 
 
 class Reader:
+    """Read recordings stored in the writer's split-folder replay layout.
+
+    ``common`` drives the canonical timeline. Other modalities may be dense or
+    sparse, but are looked up using the same step numbers when available.
+    """
 
     def __init__(self, recording_path: str):
         self.recording_path = recording_path
@@ -39,9 +44,12 @@ class Reader:
             self.recording_path, "state", "common", "*.npy"
         ))
 
+        # ``state/common`` defines the step index used by the rest of the API.
         steps = [int(os.path.basename(path).split('.')[0]) for path in state_dict_paths]
         self.steps = sorted(steps)
 
+        # Each sensor gets its own subfolder inside each modality. The reader
+        # discovers them dynamically instead of relying on a hard-coded schema.
         self.rgb_folders = glob.glob(os.path.join(self.recording_path, "state", "rgb", "*"))
         self.segmentation_folders = glob.glob(os.path.join(self.recording_path, "state", "segmentation", "*"))
         self.instance_id_segmentation_folders = glob.glob(
@@ -71,6 +79,8 @@ class Reader:
             + self.semantic_paths
             + self.annotation_paths
         )
+        # Split annotation folders are the preferred layout, but ``annotations``
+        # is still scanned for backward compatibility with older recordings.
         self.annotation_steps = sorted(
             {
                 int(os.path.basename(path).split(".")[0])
@@ -141,6 +151,7 @@ class Reader:
     def read_depth(self, name: str, index: int, eps=1e-6):
         step = self.steps[index]
         image = PIL.Image.open(os.path.join(self.recording_path, "state", "depth", name, f"{step:08d}.png")).convert("I;16")
+        # Inverse the compact encoding used by ``Writer.write_state_dict_depth``.
         depth = 65535 / (np.asarray(image).astype(np.float32) + eps) - 1.0
         return depth
     
@@ -166,23 +177,24 @@ class Reader:
         if os.path.exists(npy_path):
             return np.load(npy_path, allow_pickle=True)
         if os.path.exists(ply_path) or os.path.exists(pcd_path):
-            # Prefer open3d if available for robust PLY/PCD reading
+            # Prefer Open3D for robust binary PLY/PCD support when available.
             if o3d is not None:
                 try:
                     read_path = ply_path if os.path.exists(ply_path) else pcd_path
                     pcd = o3d.io.read_point_cloud(read_path)
                     pts = np.asarray(pcd.points)
-                    # attempt to read colors
+                    # Colors are expanded back into extra columns so downstream
+                    # viewers can treat them similarly to numpy-exported clouds.
                     if pcd.has_colors():
                         cols = np.asarray(pcd.colors)
-                        # colors 0..1 -> convert to 0..255 for compatibility with writer's assumptions
+                        # Normalize back to the writer's common convention.
                         if cols.max() <= 1.0:
                             cols = (cols * 255.0).astype(np.float32)
                         pts = np.hstack([pts, cols])
                     return pts
                 except Exception:
                     pass
-            # Fallback minimal ASCII PLY reader (assumes x y z [intensity])
+            # Dependency-free fallback for simple ASCII PLY files.
             try:
                 with open(ply_path, 'r') as f:
                     # skip header
@@ -228,6 +240,8 @@ class Reader:
         classes = self._read_json_state_entry("classes", step, default=[])
         semantic = self._read_json_state_entry("semantic", step, default={})
 
+        # Prefer the split layout introduced for staged replay. If at least one
+        # component exists, synthesize a unified annotation dict on the fly.
         if any(
             (
                 bboxes2d not in (None, []),
@@ -307,6 +321,8 @@ class Reader:
         return None
 
     def read_state_dict_flat(self, index: int):
+        # Legacy helper that flattens everything into one dict. Handy for older
+        # viewers, but note that keys from different modalities may coexist.
         state_dict = self.read_state_dict_common(index)
         rgb_dict = self.read_state_dict_rgb(index)
         segmentation_dict = self.read_state_dict_segmentation(index)
@@ -326,6 +342,8 @@ class Reader:
         return full_dict
 
     def read_state_dict(self, index: int):
+        # Structured form used by newer tools: modalities stay separated, and
+        # pointcloud metadata travels alongside the numeric arrays.
         pointcloud_metadata = OrderedDict()
         for name in self.pointcloud_names:
             pointcloud_metadata[name] = self.read_pointcloud_metadata(name, index)

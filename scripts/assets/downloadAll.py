@@ -19,7 +19,7 @@ print(f"### Starting download for {hf_repo_id}...")
 
 download_path = snapshot_download(
     repo_id=hf_repo_id,
-    repo_type="dataset",
+    repo_type="datasets",
     local_dir=local_download_path,
 )
 

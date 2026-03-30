@@ -64,6 +64,9 @@ def _resolve_asset_path(*candidates: str) -> str:
 
 
 def _structured_pointcloud_to_array(array: np.ndarray) -> Optional[np.ndarray]:
+    # Some Isaac/Replicator backends return structured arrays with named fields
+    # instead of a plain Nx3/Nx4 matrix. Normalize them here so downstream code
+    # only needs to reason about contiguous XYZ[+intensity] arrays.
     if array is None:
         return None
     try:
@@ -90,6 +93,8 @@ def _extract_pointcloud_array(payload) -> Optional[np.ndarray]:
         return None
 
     if isinstance(payload, dict):
+        # Different annotators/backends wrap the actual pointcloud payload under
+        # different keys. Search the common variants first before giving up.
         for key in (
             "point_cloud_data",
             "point_cloud",
@@ -102,10 +107,6 @@ def _extract_pointcloud_array(payload) -> Optional[np.ndarray]:
                 extracted = _extract_pointcloud_array(payload[key])
                 if extracted is not None:
                     return extracted
-        for value in payload.values():
-            extracted = _extract_pointcloud_array(value)
-            if extracted is not None:
-                return extracted
         return None
 
     try:
@@ -132,6 +133,8 @@ def _extract_pointcloud_array(payload) -> Optional[np.ndarray]:
 
 
 def _sanitize_pointcloud_array(array: Optional[np.ndarray]) -> Optional[np.ndarray]:
+    # Keep only finite XYZ rows and force a contiguous float32 layout. This makes
+    # writer/replay/viewer code much simpler and avoids backend-specific dtypes.
     if array is None:
         return None
     try:
@@ -264,7 +267,6 @@ class Sensor(Module):
     def attach(self, prim_path: str):
         raise NotImplementedError
 
-# tenho que editar os sensores de camera usando esse modulo como base 
 class Camera(Sensor):
 
     def __init__(self,
@@ -282,6 +284,8 @@ class Camera(Sensor):
         self._depth_annotator = None
         self._xform_prim = XFormPrim(self._prim_path)
 
+        # Buffers are tagged so Module.state_dict_* can selectively collect only
+        # the relevant sensor products for recording/replay.
         self.rgb_image = Buffer(tags=["rgb"])
         self.segmentation_image = Buffer(tags=["segmentation"])
         self.segmentation_info = Buffer()
@@ -352,6 +356,8 @@ class Camera(Sensor):
             self.enable_rendering()
         if self._depth_annotator is not None:
             return
+        # Isaac returns metric distance-to-camera as a dense 2D image. If we ever
+        # want RGB-D pointclouds, they should be reconstructed from this buffer.
         self._depth_annotator = rep.AnnotatorRegistry.get_annotator(
             "distance_to_camera"
         )
@@ -503,7 +509,8 @@ class Lidar(Sensor):
         # Ensure visual representation exists (same style as camera wrappers).
         self.ensure_visual_model()
 
-        # Try RTX Lidar first
+        # Prefer the native RTX sensor path when available because it is the most
+        # faithful 3D source and can expose pointcloud directly from the sensor.
         try:
             from isaacsim.sensors.rtx import LidarRtx
 
@@ -529,7 +536,8 @@ class Lidar(Sensor):
             self._rtx = None
             self.status.set_value(f"rtx_init_error:{type(exc).__name__}")
 
-        # Fallback: replicator annotator
+        # Fallback to Replicator pointcloud if the dedicated RTX sensor API is
+        # not available in the current Isaac build/environment.
         try:
             self._annotator = rep.AnnotatorRegistry.get_annotator("point_cloud")
             try:
@@ -583,6 +591,8 @@ class Lidar(Sensor):
             self.status.set_value("pointcloud_enabled")
 
     def _extract_rtx_pointcloud(self):
+        # Isaac versions differ in where RTX pointcloud data becomes visible.
+        # Try the public frame first, then a couple of internal fallbacks.
         pts = None
         source = "rtx_no_pointcloud"
 
@@ -991,6 +1001,9 @@ class OceanSimUWCamera(Sensor):
         self._initialized = False
 
     def _render_underwater_rgb(self, raw_rgba, depth) -> Optional[np.ndarray]:
+        # The underwater camera is simulated as a post-process over optical RGB
+        # plus depth, not as a separate 3D sensor. This keeps it lightweight and
+        # makes the output compatible with the same RGB/depth recording pipeline.
         try:
             import warp as wp
             from isaacsim.oceansim.utils.UWrenderer_utils import UW_render
@@ -1118,6 +1131,9 @@ class OceanSimImagingSonar(Sensor):
         self._rgb_enabled = False
         self._pointcloud_enabled = False
 
+        # rgb_image stores the processed acoustic image produced by the sonar
+        # model. pointcloud stores the raw scan pointcloud used internally by the
+        # sonar backend before polar binning/noise are applied.
         self.rgb_image = Buffer(tags=["rgb"])
         self.pointcloud = Buffer(tags=["pointcloud"])
         self.position = Buffer()
@@ -1159,6 +1175,8 @@ class OceanSimImagingSonar(Sensor):
     def _ensure_initialized(self):
         if self._initialized:
             return
+        # include_unlabelled=True lets the sonar "see" meshes even when they do
+        # not carry semantic labels. Semantic reflectivity still improves realism.
         self._sensor.sonar_initialize(
             viewport=False,
             include_unlabelled=True,
@@ -1180,6 +1198,8 @@ class OceanSimImagingSonar(Sensor):
     def update_state(self):
         if self._initialized:
             try:
+                # make_sonar_data() computes the acoustic response map from raw
+                # pointcloud, normals and semantic reflectivity.
                 self._sensor.make_sonar_data()
                 self.status.set_value("sonar_frame")
             except Exception as exc:
@@ -1187,6 +1207,8 @@ class OceanSimImagingSonar(Sensor):
 
             if self._rgb_enabled:
                 try:
+                    # The backend returns a rendered sonar image (polar acoustic
+                    # intensity map), which we expose as an RGB-like preview.
                     sonar_np = _to_numpy_array(self._sensor.make_sonar_image())
                     if sonar_np is not None:
                         self.rgb_image.set_value(np.asarray(sonar_np[..., :3], dtype=np.uint8))
@@ -1198,6 +1220,8 @@ class OceanSimImagingSonar(Sensor):
                     pcl = self._sensor.scan_data.get("pcl")
                 except Exception:
                     pcl = None
+                # This is the raw scan pointcloud captured by the sonar camera
+                # annotator, not the final binned sonar image/map.
                 pcl_np = _sanitize_pointcloud_array(_to_numpy_array(pcl))
                 self.pointcloud.set_value(pcl_np)
 
@@ -1219,9 +1243,13 @@ class OceanSimDVL(Sensor):
         self._prim_path = prim_path
         self._sensor = sensor
 
+        # All DVL outputs remain untagged on purpose so they are captured in
+        # ``state/common`` together with the robot pose/state instead of going
+        # through the heavier image/pointcloud writers.
         self.linear_velocity = Buffer()
         self.beam_depth = Buffer()
         self.beam_hit = Buffer()
+        self.dropout = Buffer(False)
         self.position = Buffer()
         self.orientation = Buffer()
         self.status = Buffer("idle")
@@ -1266,7 +1294,9 @@ class OceanSimDVL(Sensor):
         # O DVL do OceanSim faz log de dropout dentro de get_linear_vel()/get_depth().
         # Se chamarmos ambos a cada frame, o warning aparece varias vezes. Primeiro
         # checamos os hits e, se estiver em dropout, publicamos buffers vazios/seguros.
-        if beam_hit is not None and np.count_nonzero(~beam_hit) >= 2:
+        in_dropout = bool(beam_hit is not None and np.count_nonzero(~beam_hit) >= 2)
+        self.dropout.set_value(in_dropout)
+        if in_dropout:
             self.linear_velocity.set_value(np.zeros(3, dtype=np.float32))
             self.beam_depth.set_value(np.full(4, np.nan, dtype=np.float32))
             self.status.set_value("dropout")
@@ -1307,10 +1337,19 @@ class OceanSimBarometer(Sensor):
     def __init__(self, prim_path: str, sensor):
         self._prim_path = prim_path
         self._sensor = sensor
+        self._water_surface_z = None
+        try:
+            self._water_surface_z = float(getattr(sensor, "_water_surface_z"))
+        except Exception:
+            self._water_surface_z = None
 
+        # Barometer outputs are kept in ``state/common`` because they are
+        # scalar navigation measurements rather than rendered products.
         self.pressure = Buffer()
+        self.depth = Buffer()
         self.position = Buffer()
         self.orientation = Buffer()
+        self.status = Buffer("idle")
 
     @classmethod
     def build(
@@ -1344,5 +1383,18 @@ class OceanSimBarometer(Sensor):
         except Exception:
             self.position.set_value(None)
             self.orientation.set_value(None)
+
+        position = self.position.get_value()
+        if position is not None and self._water_surface_z is not None:
+            try:
+                depth = max(0.0, float(self._water_surface_z) - float(np.asarray(position, dtype=np.float32)[2]))
+                self.depth.set_value(depth)
+                self.status.set_value("submerged" if depth > 0.0 else "surface_or_air")
+            except Exception:
+                self.depth.set_value(None)
+                self.status.set_value("unknown")
+        else:
+            self.depth.set_value(None)
+            self.status.set_value("unknown")
 
         super().update_state()

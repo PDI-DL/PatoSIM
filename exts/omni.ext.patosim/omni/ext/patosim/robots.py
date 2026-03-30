@@ -480,8 +480,8 @@ class OceanSimROVRobot(Robot):
     teleop_angular_speed_gain: float = 1.4
     teleop_velocity_assist_gain: float = 1.0
 
-    usd_relative_path: str = "Bluerov/BROV_low.usd"
-    fallback_assets_root: str = "/mnt/external/isaac/OceanSim_assets"
+    usd_relative_path: str = "bluerov/BROV_low.usd"
+    fallback_assets_root: str = "/mnt/external/isaac/MOD_patosim/assets/models"
 
     initial_translation: Tuple[float, float, float] = (-2.0, 0.0, -0.8)
     initial_orientation_euler_deg: Tuple[float, float, float] = (0.0, 0.0, 0.0)
@@ -501,6 +501,8 @@ class OceanSimROVRobot(Robot):
     stereo_left_translation: Tuple[float, float, float] = (0.3, -0.05, 0.1)
     stereo_right_translation: Tuple[float, float, float] = (0.3, 0.05, 0.1)
     dvl_translation: Tuple[float, float, float] = (0.0, 0.0, -0.1)
+    lidar_translation: Tuple[float, float, float] = (0.32, 0.0, 0.18)
+    lidar_orientation_euler_deg: Tuple[float, float, float] = (0.0, 0.0, 0.0)
     uw_camera_focal_length: float = 2.1
     uw_camera_clipping_range: Tuple[float, float] = (0.1, 100.0)
     water_surface_z: float = 1.43389
@@ -510,6 +512,7 @@ class OceanSimROVRobot(Robot):
     enable_dvl_debug_lines: bool = False
     enable_front_camera: bool = True
     enable_stereo_camera: bool = False
+    enable_lidar: bool = False
     enable_sonar: bool = True
     enable_dvl: bool = True
     enable_barometer: bool = True
@@ -545,6 +548,7 @@ class OceanSimROVRobot(Robot):
 
         self.front_camera = front_camera
         self.front_stereo: Optional[OceanSimStereoUWCamera] = None
+        self.lidar: Optional[Lidar] = None
         self.sonar: Optional[OceanSimImagingSonar] = None
         self.dvl: Optional[OceanSimDVL] = None
         self.barometer: Optional[OceanSimBarometer] = None
@@ -573,18 +577,39 @@ class OceanSimROVRobot(Robot):
             pass
         candidate_roots.append(cls.fallback_assets_root)
 
+        usd_candidates: List[str] = []
+        for candidate in (
+            cls.usd_relative_path,
+            "bluerov/BROV_low.usd",
+            "Bluerov/BROV_low.usd",
+            "buerov/BROV_low.usd",
+        ):
+            candidate_str = str(candidate or "").strip()
+            if candidate_str and candidate_str not in usd_candidates:
+                usd_candidates.append(candidate_str)
+
+        for candidate in usd_candidates:
+            if os.path.isabs(candidate) and os.path.exists(candidate):
+                return os.path.normpath(candidate)
+
         for root in candidate_roots:
             root_str = str(root or "").strip()
             if not root_str:
                 continue
-            usd_path = os.path.join(root_str, cls.usd_relative_path)
-            if os.path.exists(usd_path):
-                return usd_path
+            normalized_root = os.path.normpath(root_str)
+            for candidate in usd_candidates:
+                if os.path.isabs(candidate):
+                    continue
+                usd_path = os.path.normpath(os.path.join(normalized_root, candidate))
+                if os.path.exists(usd_path):
+                    return usd_path
 
         attempted = [
-            os.path.join(root, cls.usd_relative_path)
+            os.path.normpath(os.path.join(str(root).strip(), candidate))
             for root in candidate_roots
             if str(root or "").strip()
+            for candidate in usd_candidates
+            if not os.path.isabs(candidate)
         ]
         raise FileNotFoundError(
             "Nao foi possivel localizar o asset do ROV do OceanSim. "
@@ -698,6 +723,16 @@ class OceanSimROVRobot(Robot):
                 clipping_range=cls.uw_camera_clipping_range,
                 water_profile_path=cls.water_profile_path,
             )
+        if cls.enable_lidar:
+            lidar_path = os.path.join(prim_path, "sensors/lidar")
+            instance.lidar = Lidar.build(lidar_path)
+            _xform_translate(lidar_path, tuple(float(v) for v in cls.lidar_translation))
+            qw, qx, qy, qz = _quat_from_euler_xyz(*cls.lidar_orientation_euler_deg)
+            _xform_orient_quat(lidar_path, (qw, qx, qy, qz))
+            try:
+                instance.lidar.enable_lidar()
+            except Exception:
+                pass
         if cls.enable_sonar:
             instance.sonar = OceanSimImagingSonar.build(
                 os.path.join(prim_path, "sensors/sonar"),

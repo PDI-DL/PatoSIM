@@ -30,11 +30,19 @@ from omni.ext.patosim.occupancy_map import OccupancyMap
 
 
 class Writer:
+    """Persist sensor outputs and scene metadata using the replay layout.
+
+    The writer keeps each modality in its own folder under ``state/`` so
+    lightweight online recording and heavier offline replay passes can reuse
+    the same directory structure.
+    """
 
     def __init__(self, path: str):
         self.path = path
 
     def write_state_dict_common(self, state_dict: dict, step: int):
+        # ``common`` is the lightweight per-step snapshot: poses, controls and
+        # scalar state that can be recorded frequently without render cost.
         dict_folder = os.path.join(self.path, "state", "common")
         if not os.path.exists(dict_folder):
             os.makedirs(dict_folder)
@@ -78,7 +86,8 @@ class Writer:
                 if not os.path.exists(output_folder):
                     os.makedirs(output_folder)
 
-                # Inverse depth 16bit
+                # Depth is stored as inverse-depth in 16-bit PNG to keep files
+                # compact while remaining easy to visualize and decode later.
                 inverse_depth = 1.0 / (1.0 + value)
                 inverse_depth = (65535 * inverse_depth).astype(np.uint16)
                 image = PIL.Image.fromarray(inverse_depth, "I;16")
@@ -104,12 +113,14 @@ class Writer:
         """
         if points is None:
             return
-        # Ensure Nx3 or Nx4
+        # The project normalizes pointcloud buffers to Nx3/Nx4/Nx6/Nx7, where
+        # extra columns may encode intensity and/or RGB.
         pts = np.asarray(points)
         if pts.ndim != 2 or pts.shape[1] < 3:
             raise ValueError("points must be Nx3 or Nx4")
 
-        # If open3d is available, prefer to write a binary PLY/PCD for efficiency
+        # Prefer Open3D when available: it handles binary pointcloud formats
+        # efficiently and preserves RGB visualization nicely.
         if o3d is not None:
             try:
                 # build point cloud
@@ -139,7 +150,8 @@ class Writer:
                 # fallback to ASCII writer below
                 pass
 
-        # Fallback ASCII PLY writer
+        # Fallback path keeps replay export working even on machines without
+        # Open3D. This path is slower and simpler, but dependency-free.
         with open(path, "w") as f:
             header = [
                 "ply",
@@ -191,6 +203,8 @@ class Writer:
         self._write_json_state_entry("semantic", payload.get("semantic", {}), step)
 
     def _write_json_state_entry(self, folder_name: str, data, step: int):
+        # Keeping each annotation family in its own folder makes staged replay
+        # simpler: passes can regenerate only what is missing.
         folder = os.path.join(self.path, "state", folder_name)
         if not os.path.exists(folder):
             os.makedirs(folder)
@@ -231,6 +245,8 @@ class Writer:
                 if not os.path.exists(output_folder):
                     os.makedirs(output_folder)
                 if save_format == "npy":
+                    # ``.npy`` is the most faithful format for replay because it
+                    # preserves arbitrary extra columns without reinterpretation.
                     output_path = os.path.join(output_folder, f"{step:08d}.npy")
                     np.save(output_path, value)
                 elif save_format == "ply":
@@ -247,7 +263,9 @@ class Writer:
                         if o3d is not None:
                             pc = o3d.geometry.PointCloud()
                             pc.points = o3d.utility.Vector3dVector(np.asarray(value)[:, :3].astype(np.float64))
-                            # color/intensity handling similar to PLY
+                            # Keep PCD export aligned with the same conventions
+                            # used for PLY: RGB if present, otherwise grayscale
+                            # from intensity for quick inspection.
                             if np.asarray(value).shape[1] >= 6:
                                 rgb = np.asarray(value)[:, 3:6]
                                 if rgb.max() > 1.0:
@@ -266,7 +284,8 @@ class Writer:
                     except Exception:
                         np.save(os.path.join(output_folder, f"{step:08d}.npy"), value)
                 else:
-                    # unknown format: default to npy
+                    # Unknown formats fall back to ``.npy`` so recording never
+                    # silently drops a pointcloud.
                     output_path = os.path.join(output_folder, f"{step:08d}.npy")
                     np.save(output_path, value)
 
@@ -318,8 +337,8 @@ class Writer:
             except Exception:
                 pass
 
-        # Copy stage and config if they exist in the source recording. Be robust
-        # when files or folders are missing or destination already exists.
+        # These artifacts define the replay context independently from the
+        # per-step sensor data, so they can be copied once and reused.
         try:
             src_stage = os.path.join(other_path, "stage.usd")
             dst_stage = os.path.join(self.path, "stage.usd")
@@ -343,7 +362,8 @@ class Writer:
             if verbose:
                 print(f"[Writer] Failed to copy config.json from {other_path}")
 
-        # occupancy_map may be large and the destination could already exist
+        # ``occupancy_map`` is directory-shaped and may already exist in a
+        # staged replay output, so copying is intentionally merge-friendly.
         try:
             src_occ = os.path.join(other_path, "occupancy_map")
             dst_occ = os.path.join(self.path, "occupancy_map")

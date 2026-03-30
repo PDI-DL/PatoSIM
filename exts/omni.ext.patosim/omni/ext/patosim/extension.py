@@ -36,9 +36,9 @@ from omni.ext.patosim.utils.path_utils import PathHelper
 from pxr import UsdGeom, Usd, Gf
 from omni.ext.patosim.robots import ROBOTS
 from omni.ext.patosim.config import Config
-from omni.ext.patosim.build import build_scenario_from_config
+from omni.ext.patosim.build import build_scenario_from_config, list_dataset_object_assets
 
-dev_scene_path = "/mnt/external/isaac/MOD_patosim/PDI_3DUW/worlds/prototipo1/prototipo1.usd"
+dev_scene_path = "/mnt/external/isaac/MOD_patosim/assets/models/worlds/prototipo1/prototipo1.usd"
 
 if "PATOSIM_DATA" in os.environ:
     DATA_DIR = os.environ['PATOSIM_DATA']
@@ -82,6 +82,10 @@ class PatoSimExtension(omni.ext.IExt):
         self.step: int = 0
         self.is_recording: bool = False
         self.recording_enabled: bool = False
+        self.deferred_sensor_processing_enabled: bool = True
+        self.disable_pointcloud_during_recording: bool = True
+        self.disable_previews_during_recording: bool = True
+        self.record_common_interval: int = 2
         self.recording_time: float = 0.
 
         # Image provider for occupancy map preview
@@ -201,7 +205,10 @@ class PatoSimExtension(omni.ext.IExt):
         self._lidar_preview_flip_x_model = ui.SimpleBoolModel(self._lidar_preview_flip_x)
         self._lidar_preview_flip_y_model = ui.SimpleBoolModel(self._lidar_preview_flip_y)
         self._lidar_preview_swap_xy_model = ui.SimpleBoolModel(self._lidar_preview_swap_xy)
+        self._deferred_sensor_processing_model = ui.SimpleBoolModel(self.deferred_sensor_processing_enabled)
+        self._disable_previews_during_recording_model = ui.SimpleBoolModel(self.disable_previews_during_recording)
         self._record_pointcloud_toggle_model = ui.SimpleBoolModel(self._record_pointcloud_enabled)
+        self._record_common_interval_model = ui.SimpleIntModel(self.record_common_interval)
         self._record_pointcloud_interval_model = ui.SimpleIntModel(self._record_pointcloud_interval)
         self._record_pointcloud_metadata_model = ui.SimpleBoolModel(self._record_pointcloud_metadata)
         self._path_planning_models = {
@@ -224,14 +231,34 @@ class PatoSimExtension(omni.ext.IExt):
         self._apply_lidar_preview_mode_settings()
         self._oceansim_water_profile_model = ui.SimpleStringModel("")
         self._oceansim_waypoint_path_model = ui.SimpleStringModel("")
+        self._oceansim_apply_sonar_reflectivity_model = ui.SimpleBoolModel(True)
         self._oceansim_linear_speed_model = ui.SimpleFloatModel(0.75)
         self._oceansim_angular_speed_model = ui.SimpleFloatModel(0.90)
         self._oceansim_dvl_debug_model = ui.SimpleBoolModel(False)
         self._oceansim_front_camera_model = ui.SimpleBoolModel(True)
         self._oceansim_stereo_camera_model = ui.SimpleBoolModel(False)
+        self._oceansim_lidar_model = ui.SimpleBoolModel(False)
         self._oceansim_sonar_model = ui.SimpleBoolModel(True)
         self._oceansim_dvl_model = ui.SimpleBoolModel(True)
         self._oceansim_barometer_model = ui.SimpleBoolModel(True)
+        self._dataset_object_enabled_model = ui.SimpleBoolModel(False)
+        self._dataset_object_reflectivity_model = ui.SimpleFloatModel(1.5)
+        self._dataset_object_assets = []
+        self._dataset_object_selected_index = 0
+        self._dataset_object_status_text = "Dataset object disabled."
+        try:
+            self._dataset_object_assets = self._scan_dataset_object_assets()
+        except Exception:
+            self._dataset_object_assets = []
+
+        self._dataset_object_window = omni.ui.Window("PatoSim - Dataset Object", width=440, height=260)
+        try:
+            self._dataset_object_window.visible = False
+        except Exception:
+            pass
+        with self._dataset_object_window.frame:
+            self._dataset_object_frame = ui.Frame()
+            self._dataset_object_frame.set_build_fn(self._build_dataset_object_frame)
 
         # discover available USD worlds in the working directory and DATA_DIR
         try:
@@ -292,6 +319,10 @@ class PatoSimExtension(omni.ext.IExt):
                             "Path Planning Settings",
                             clicked_fn=self._open_path_planning_window,
                         )
+                        ui.Button(
+                            "Dataset Object Menu",
+                            clicked_fn=self._open_dataset_object_window,
+                        )
 
                     with ui.Frame():
                         ui.Label("OceanSim Params")
@@ -313,15 +344,21 @@ class PatoSimExtension(omni.ext.IExt):
                                 ui.CheckBox(model=self._oceansim_dvl_debug_model, width=22)
                                 ui.Spacer(width=12)
                                 ui.Button("Use MHL Scene", clicked_fn=lambda: self.scene_usd_field_string_model.set_value(dev_scene_path))
+                            with ui.HStack():
+                                ui.Label("Sonar Refl.", width=92)
+                                ui.CheckBox(model=self._oceansim_apply_sonar_reflectivity_model, width=22)
+                                ui.Label("Apply reflectivity to world meshes on Build")
                             ui.Label("Sensors")
                             with ui.HStack():
                                 ui.CheckBox(model=self._oceansim_front_camera_model, width=22)
                                 ui.Label("Front Camera", width=104)
                                 ui.CheckBox(model=self._oceansim_stereo_camera_model, width=22)
                                 ui.Label("Stereo", width=72)
-                                ui.CheckBox(model=self._oceansim_sonar_model, width=22)
-                                ui.Label("Sonar")
+                                ui.CheckBox(model=self._oceansim_lidar_model, width=22)
+                                ui.Label("LiDAR")
                             with ui.HStack():
+                                ui.CheckBox(model=self._oceansim_sonar_model, width=22)
+                                ui.Label("Sonar", width=104)
                                 ui.CheckBox(model=self._oceansim_dvl_model, width=22)
                                 ui.Label("DVL", width=104)
                                 ui.CheckBox(model=self._oceansim_barometer_model, width=22)
@@ -340,6 +377,24 @@ class PatoSimExtension(omni.ext.IExt):
                     with ui.Frame():
                         ui.Label("Quick Params")
                         with ui.VStack(spacing=6):
+                            with ui.HStack():
+                                ui.Label("Deferred Sensor Processing", width=170)
+                                ui.CheckBox(model=self._deferred_sensor_processing_model, width=22)
+                                try:
+                                    self._deferred_sensor_processing_model.add_value_changed_fn(
+                                        self._on_deferred_sensor_processing_changed
+                                    )
+                                except Exception:
+                                    pass
+                            with ui.HStack():
+                                ui.Label("Pause Previews While Recording", width=170)
+                                ui.CheckBox(model=self._disable_previews_during_recording_model, width=22)
+                                try:
+                                    self._disable_previews_during_recording_model.add_value_changed_fn(
+                                        self._on_disable_previews_during_recording_changed
+                                    )
+                                except Exception:
+                                    pass
                             with ui.HStack():
                                 ui.Label("Record PointClouds", width=170)
                                 ui.CheckBox(model=self._record_pointcloud_toggle_model, width=22)
@@ -366,6 +421,16 @@ class PatoSimExtension(omni.ext.IExt):
                                         pass
                                 except Exception:
                                     ui.Label(self._pc_format_items[self._pc_format_index] if hasattr(self, '_pc_format_items') else "npy")
+                            with ui.HStack():
+                                ui.Label("Common Interval", width=170)
+                                ui.IntField(model=self._record_common_interval_model, height=20, width=72)
+                                try:
+                                    self._record_common_interval_model.add_value_changed_fn(
+                                        self._on_record_common_interval_changed
+                                    )
+                                except Exception:
+                                    pass
+                                ui.Label("frames")
                             with ui.HStack():
                                 ui.Label("PointCloud Interval", width=170)
                                 ui.IntField(model=self._record_pointcloud_interval_model, height=20, width=72)
@@ -696,6 +761,10 @@ class PatoSimExtension(omni.ext.IExt):
         except Exception:
             pass
         try:
+            self._oceansim_lidar_model.set_value(bool(getattr(source, "enable_lidar", False)))
+        except Exception:
+            pass
+        try:
             self._oceansim_sonar_model.set_value(bool(getattr(source, "enable_sonar", True)))
         except Exception:
             pass
@@ -1008,13 +1077,48 @@ class PatoSimExtension(omni.ext.IExt):
         interval = int(max(1, getattr(self, "_record_pointcloud_interval", 1)))
         return (int(step) % interval) == 0
 
+    def _should_capture_pointcloud(self, step: int | None = None) -> bool:
+        lidar_preview_enabled = bool(getattr(self, "_lidar_preview_enabled", False))
+        deferred_sensor_processing_enabled = bool(
+            getattr(self, "deferred_sensor_processing_enabled", False)
+        )
+        is_writing = self.writer is not None
+        if is_writing and bool(getattr(self, "disable_pointcloud_during_recording", True)):
+            return False
+        return lidar_preview_enabled or (
+            is_writing
+            and bool(getattr(self, "_record_pointcloud_enabled", False))
+            and not deferred_sensor_processing_enabled
+            and self._pointcloud_record_due(step)
+        )
+
+    def _should_record_full_sensor_payload(self) -> bool:
+        return not bool(getattr(self, "deferred_sensor_processing_enabled", False))
+
+    def _should_pause_previews_while_recording(self) -> bool:
+        return bool(self.writer is not None) and bool(
+            getattr(self, "disable_previews_during_recording", True)
+        )
+
+    def _force_disable_pointcloud_for_recording(self):
+        self._record_pointcloud_enabled = False
+        try:
+            self._record_pointcloud_toggle_model.set_value(False)
+        except Exception:
+            pass
+        try:
+            scenario = getattr(self, "scenario", None)
+            if scenario is not None:
+                scenario.set_pointcloud_enabled(self._should_capture_pointcloud())
+        except Exception:
+            pass
+
     def _set_scenario_pointcloud_requirement(self, step: int | None = None):
         scenario = getattr(self, "scenario", None)
         if scenario is None:
             return
-        require_pointcloud = bool(getattr(self, "_lidar_preview_enabled", False)) or self._pointcloud_record_due(step)
         try:
-            scenario.set_pointcloud_enabled(require_pointcloud)
+            scenario.set_pointcloud_enabled(self._should_capture_pointcloud(step))
         except Exception:
             pass
 
@@ -1048,6 +1152,35 @@ class PatoSimExtension(omni.ext.IExt):
                 enabled = False
         self._record_pointcloud_enabled = enabled
         self._set_scenario_pointcloud_requirement()
+
+    def _on_deferred_sensor_processing_changed(self, model):
+        try:
+            enabled = bool(model.as_bool)
+        except Exception:
+            try:
+                enabled = bool(model.get_value_as_bool())
+            except Exception:
+                enabled = True
+        self.deferred_sensor_processing_enabled = enabled
+        if enabled and self.writer is not None:
+            self._force_disable_pointcloud_for_recording()
+        self._set_scenario_pointcloud_requirement()
+
+    def _on_disable_previews_during_recording_changed(self, model):
+        try:
+            enabled = bool(model.as_bool)
+        except Exception:
+            try:
+                enabled = bool(model.get_value_as_bool())
+            except Exception:
+                enabled = True
+        self.disable_previews_during_recording = enabled
+
+    def _on_record_common_interval_changed(self, *_args):
+        try:
+            self.record_common_interval = max(1, int(self._record_common_interval_model.as_int))
+        except Exception:
+            pass
 
     def _on_record_pointcloud_params_changed(self, *_args):
         try:
@@ -1838,20 +1971,24 @@ class PatoSimExtension(omni.ext.IExt):
 
         scene_path = self.scene_usd_field_string_model.as_string
         scene_path = dev_scene_path if  scene_path == "" else scene_path
-        
+        dataset_object_path = self._get_selected_dataset_object_path()
 
-        
         config = Config(
             scenario_type=scenario_type,
             robot_type=robot_type,
             scene_usd=scene_path,
+            dataset_object_enabled=bool(self._dataset_object_enabled_model.as_bool) and bool(dataset_object_path),
+            dataset_object_usd=dataset_object_path,
+            dataset_object_reflectivity=float(self._dataset_object_reflectivity_model.as_float),
             water_profile_path=self._oceansim_water_profile_model.as_string,
             waypoint_path=self._oceansim_waypoint_path_model.as_string,
+            apply_sonar_reflectivity_to_world=bool(self._oceansim_apply_sonar_reflectivity_model.as_bool),
             rov_linear_speed=float(self._oceansim_linear_speed_model.as_float),
             rov_angular_speed=float(self._oceansim_angular_speed_model.as_float),
             enable_dvl_debug_lines=bool(self._oceansim_dvl_debug_model.as_bool),
             enable_rov_front_camera=bool(self._oceansim_front_camera_model.as_bool),
             enable_rov_stereo_camera=bool(self._oceansim_stereo_camera_model.as_bool),
+            enable_rov_lidar=bool(self._oceansim_lidar_model.as_bool),
             enable_rov_sonar=bool(self._oceansim_sonar_model.as_bool),
             enable_rov_dvl=bool(self._oceansim_dvl_model.as_bool),
             enable_rov_barometer=bool(self._oceansim_barometer_model.as_bool),
@@ -1892,6 +2029,8 @@ class PatoSimExtension(omni.ext.IExt):
 
     def start_new_recording(self):
         self._enable_recording_modalities()
+        if bool(getattr(self, "deferred_sensor_processing_enabled", False)):
+            self._force_disable_pointcloud_for_recording()
         recording_name = datetime.datetime.now().isoformat()
         recording_path = os.path.join(RECORDINGS_DIR, recording_name)
         writer = Writer(recording_path)
@@ -2012,6 +2151,8 @@ class PatoSimExtension(omni.ext.IExt):
     def _enable_recording_modalities(self):
         if self.scenario is None:
             return
+        if not self._should_record_full_sensor_payload():
+            return
         try:
             self.scenario.enable_rgb_rendering()
         except Exception:
@@ -2036,7 +2177,6 @@ class PatoSimExtension(omni.ext.IExt):
     def enable_recording(self):
         if not self.recording_enabled:
             if self.scenario is not None:
-                self._enable_recording_modalities()
                 self.start_new_recording()
             self.recording_enabled = True
 
@@ -2061,8 +2201,14 @@ class PatoSimExtension(omni.ext.IExt):
         if scenario is not None:
             sensor_preview_enabled = bool(getattr(self, "_sensor_preview_enabled", True))
             lidar_preview_enabled = bool(getattr(self, "_lidar_preview_enabled", False))
-            record_pointcloud_due = self._pointcloud_record_due(self.step)
-            self._set_scenario_pointcloud_requirement(self.step)
+            if self._should_pause_previews_while_recording():
+                sensor_preview_enabled = False
+                lidar_preview_enabled = False
+            need_pointcloud_state = self._should_capture_pointcloud(self.step)
+            try:
+                scenario.set_pointcloud_enabled(need_pointcloud_state)
+            except Exception:
+                pass
 
             is_alive = scenario.step(step_size)
 
@@ -2072,10 +2218,13 @@ class PatoSimExtension(omni.ext.IExt):
             self._preview_frame_counter += 1
             preview_interval = max(1, int(getattr(self, "_preview_update_interval_frames", 2)))
             should_update_preview = (self._preview_frame_counter % preview_interval) == 0
+            full_sensor_recording_enabled = bool(
+                (self.writer is not None) and self._should_record_full_sensor_payload()
+            )
 
             rgb_state_for_preview = {}
             pointcloud_state_for_preview = None
-            need_rgb_state = ((should_update_preview and sensor_preview_enabled) or (self.writer is not None))
+            need_rgb_state = ((should_update_preview and sensor_preview_enabled) or full_sensor_recording_enabled)
             if need_rgb_state:
                 try:
                     rgb_state_for_preview = scenario.state_dict_rgb()
@@ -2133,34 +2282,35 @@ class PatoSimExtension(omni.ext.IExt):
             
             if self.writer is not None:
                 state_dict_common = scenario.state_dict_common()
-                self.writer.write_state_dict_common(state_dict_common, step=self.step)
+                common_interval = max(1, int(getattr(self, "record_common_interval", 1)))
+                if (self.step % common_interval) == 0:
+                    self.writer.write_state_dict_common(state_dict_common, step=self.step)
 
-                # Always persist rendered camera modalities while recording.
-                try:
-                    self.writer.write_state_dict_rgb(rgb_state_for_preview, step=self.step)
-                except Exception:
-                    pass
-                try:
-                    self.writer.write_state_dict_segmentation(scenario.state_dict_segmentation(), step=self.step)
-                except Exception:
-                    pass
-                try:
-                    self.writer.write_state_dict_instance_id_segmentation(
-                        scenario.state_dict_instance_id_segmentation(), step=self.step
-                    )
-                except Exception:
-                    pass
-                try:
-                    self.writer.write_state_dict_depth(scenario.state_dict_depth(), step=self.step)
-                except Exception:
-                    pass
-                try:
-                    self.writer.write_state_dict_normals(scenario.state_dict_normals(), step=self.step)
-                except Exception:
-                    pass
+                if full_sensor_recording_enabled:
+                    try:
+                        self.writer.write_state_dict_rgb(rgb_state_for_preview, step=self.step)
+                    except Exception:
+                        pass
+                    try:
+                        self.writer.write_state_dict_segmentation(scenario.state_dict_segmentation(), step=self.step)
+                    except Exception:
+                        pass
+                    try:
+                        self.writer.write_state_dict_instance_id_segmentation(
+                            scenario.state_dict_instance_id_segmentation(), step=self.step
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        self.writer.write_state_dict_depth(scenario.state_dict_depth(), step=self.step)
+                    except Exception:
+                        pass
+                    try:
+                        self.writer.write_state_dict_normals(scenario.state_dict_normals(), step=self.step)
+                    except Exception:
+                        pass
 
-                # Persist pointclouds only when the UI enables recording for them.
-                if record_pointcloud_due:
+                if full_sensor_recording_enabled and self._pointcloud_record_due(self.step):
                     if isinstance(pointcloud_state_for_preview, dict):
                         state_pc = pointcloud_state_for_preview
                     else:
@@ -2243,22 +2393,23 @@ class PatoSimExtension(omni.ext.IExt):
                         pass
 
                 # Always write bounding-box annotations and semantic payload.
-                try:
-                    annotations = self._gather_annotations(self.step)
-                    payload = dict(annotations)
-                    payload["step"] = int(self.step)
-                    payload["semantic"] = self._extract_semantic_state_from_common(state_dict_common)
-                    if not isinstance(payload.get("bboxes2d"), list):
-                        payload["bboxes2d"] = []
-                    if not isinstance(payload.get("bboxes3d"), list):
-                        payload["bboxes3d"] = []
-                    if not isinstance(payload.get("classes"), list):
-                        payload["classes"] = []
-                    if not isinstance(payload.get("semantic"), dict):
-                        payload["semantic"] = {}
-                    self.writer.write_annotations(payload, step=self.step)
-                except Exception:
-                    pass
+                if full_sensor_recording_enabled:
+                    try:
+                        annotations = self._gather_annotations(self.step)
+                        payload = dict(annotations)
+                        payload["step"] = int(self.step)
+                        payload["semantic"] = self._extract_semantic_state_from_common(state_dict_common)
+                        if not isinstance(payload.get("bboxes2d"), list):
+                            payload["bboxes2d"] = []
+                        if not isinstance(payload.get("bboxes3d"), list):
+                            payload["bboxes3d"] = []
+                        if not isinstance(payload.get("classes"), list):
+                            payload["classes"] = []
+                        if not isinstance(payload.get("semantic"), dict):
+                            payload["semantic"] = {}
+                        self.writer.write_annotations(payload, step=self.step)
+                    except Exception:
+                        pass
                 self.step += 1
                 self.recording_time += step_size
                 if self.step % 15 == 0:
@@ -2305,8 +2456,17 @@ class PatoSimExtension(omni.ext.IExt):
                 semantic_type = type_attr.Get()
             if semantic_type is None:
                 semantic_type = self._semantic_type_from_attr_prefix(prefix)
-            semantic_labels[str(semantic_type)] = str(raw_value)
+                semantic_labels[str(semantic_type)] = str(raw_value)
         return semantic_labels
+
+    def _has_dataset_object_root_ancestor(self, prim) -> bool:
+        parent = prim.GetParent()
+        while parent is not None and parent.IsValid() and not parent.IsPseudoRoot():
+            labels = self._extract_semantic_labels_from_prim(parent)
+            if str(labels.get("dataset_object_root", "")).strip().lower() in {"true", "1", "yes"}:
+                return True
+            parent = parent.GetParent()
+        return False
 
     def _gather_annotations(self, step: int) -> dict:
         """Collect 3D and 2D bounding boxes for prims in the stage.
@@ -2353,6 +2513,8 @@ class PatoSimExtension(omni.ext.IExt):
 
         for prim in stage.Traverse():
             if prim.IsPseudoRoot() or not prim.IsActive() or prim.GetTypeName() == "Camera":
+                continue
+            if self._has_dataset_object_root_ancestor(prim):
                 continue
             try:
                 bound = bbox_cache.ComputeWorldBound(prim)
@@ -2609,6 +2771,112 @@ class PatoSimExtension(omni.ext.IExt):
             print("PatoSim extension help:\n - Build Scenario: build the chosen scene and robot.\n - Plan & Start Auto: plan a path and start autonomous following using the scenario if available.\n - Record PointClouds: use the Quick Params checkbox to enable pointcloud capture during recording.\n")
         except Exception:
             pass
+
+    def _scan_dataset_object_assets(self):
+        try:
+            return list_dataset_object_assets()
+        except Exception:
+            return []
+
+    def _dataset_object_labels(self):
+        if len(getattr(self, "_dataset_object_assets", [])) == 0:
+            return ["(none found)"]
+        return [entry.get("label", entry.get("path", "")) for entry in self._dataset_object_assets]
+
+    def _get_selected_dataset_object_path(self) -> str:
+        assets = getattr(self, "_dataset_object_assets", [])
+        if len(assets) == 0:
+            return ""
+        idx = int(max(0, min(getattr(self, "_dataset_object_selected_index", 0), len(assets) - 1)))
+        try:
+            return str(assets[idx].get("path", ""))
+        except Exception:
+            return ""
+
+    def _update_dataset_object_status(self):
+        selected = self._get_selected_dataset_object_path()
+        if not bool(self._dataset_object_enabled_model.as_bool):
+            text = "Dataset object disabled."
+        elif not selected:
+            text = "No dataset object asset found in platforms/statues_temples/scenario."
+        else:
+            text = f"Selected: {selected}"
+        self._dataset_object_status_text = text
+
+    def _refresh_dataset_object_assets(self):
+        current = self._get_selected_dataset_object_path()
+        self._dataset_object_assets = self._scan_dataset_object_assets()
+        self._dataset_object_selected_index = 0
+        for idx, entry in enumerate(self._dataset_object_assets):
+            if os.path.normpath(str(entry.get("path", ""))) == os.path.normpath(str(current or "")):
+                self._dataset_object_selected_index = idx
+                break
+        self._update_dataset_object_status()
+        try:
+            self._dataset_object_frame.rebuild()
+        except Exception:
+            pass
+
+    def _on_dataset_object_selection_changed(self, *_args):
+        try:
+            if hasattr(self, "_dataset_object_combo"):
+                self._dataset_object_selected_index = int(
+                    self._dataset_object_combo.model.get_item_value_model().get_value_as_int()
+                )
+        except Exception:
+            self._dataset_object_selected_index = 0
+        self._update_dataset_object_status()
+        try:
+            self._dataset_object_frame.rebuild()
+        except Exception:
+            pass
+
+    def _on_dataset_object_toggle_changed(self, *_args):
+        self._update_dataset_object_status()
+        try:
+            self._dataset_object_frame.rebuild()
+        except Exception:
+            pass
+
+    def _open_dataset_object_window(self):
+        try:
+            self._dataset_object_window.visible = not bool(self._dataset_object_window.visible)
+        except Exception:
+            pass
+        self._refresh_dataset_object_assets()
+
+    def _build_dataset_object_frame(self):
+        self._update_dataset_object_status()
+        with ui.VStack(spacing=8):
+            with ui.HStack(height=24):
+                ui.Label("Enable On Build", width=120)
+                ui.CheckBox(model=self._dataset_object_enabled_model, width=22)
+                try:
+                    self._dataset_object_enabled_model.add_value_changed_fn(
+                        self._on_dataset_object_toggle_changed
+                    )
+                except Exception:
+                    pass
+                ui.Spacer(width=10)
+                ui.Button("Refresh", clicked_fn=self._refresh_dataset_object_assets)
+            with ui.HStack(height=26):
+                ui.Label("Object Asset", width=120)
+                self._dataset_object_combo = ui.ComboBox(
+                    int(getattr(self, "_dataset_object_selected_index", 0)),
+                    *self._dataset_object_labels(),
+                    width=260,
+                )
+                try:
+                    self._dataset_object_combo.model.get_item_value_model().add_value_changed_fn(
+                        self._on_dataset_object_selection_changed
+                    )
+                except Exception:
+                    pass
+            with ui.HStack(height=26):
+                ui.Label("Reflectivity", width=120)
+                ui.FloatDrag(model=self._dataset_object_reflectivity_model, min=0.05, max=10.0)
+            ui.Label("Only assets inside plataforms/platforms, statues_temples and scenario are listed when those folders exist.")
+            ui.Label(self._dataset_object_status_text)
 
     def _scan_worlds(self):
         """Search common locations for USD/world files to populate the Worlds combo.
