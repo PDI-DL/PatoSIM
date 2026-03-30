@@ -2,7 +2,7 @@
 
 set -e
 
-DEFAULT_ISAAC_SIM_PATH="${ISAAC_SIM_PATH:-/mnt/external/isaac/isaac-sim-5.1}"
+DEFAULT_ISAAC_SIM_PATH="${ISAAC_SIM_PATH:-/home/bevlog-2/isaac-sim-standalone-5.1}"
 SCRIPT_DIR=$(dirname ${BASH_SOURCE})
 cd "$SCRIPT_DIR"
 

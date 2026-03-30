@@ -188,6 +188,11 @@ class PatoSimExtension(omni.ext.IExt):
         self._lidar_preview_flip_x_model = ui.SimpleBoolModel(self._lidar_preview_flip_x)
         self._lidar_preview_flip_y_model = ui.SimpleBoolModel(self._lidar_preview_flip_y)
         self._lidar_preview_swap_xy_model = ui.SimpleBoolModel(self._lidar_preview_swap_xy)
+        
+        # Data recording configuration models
+        self._record_pointclouds_model = ui.SimpleBoolModel(True)
+        self._record_bboxes_model = ui.SimpleBoolModel(True)
+        
         self._path_planning_models = {
             "path_following_speed": ui.SimpleFloatModel(2.0),
             "path_following_angular_gain": ui.SimpleFloatModel(1.4),
@@ -213,107 +218,125 @@ class PatoSimExtension(omni.ext.IExt):
         except Exception:
             self._available_worlds = []
 
-        self._teleop_window = omni.ui.Window("PatoSim", width=300, height=300)
+        self._teleop_window = omni.ui.Window("PatoSim", width=450, height=700)
 
         with self._teleop_window.frame:
-            with ui.VStack():
-                with ui.VStack():
-                    with ui.HStack():
-                        ui.Label("USD Path / URL")
-                        self.scene_usd_field_string_model = ui.SimpleStringModel()
-                        self.scene_usd_field = ui.StringField(model=self.scene_usd_field_string_model, height=25)
+            with ui.ScrollingFrame():
+                with ui.VStack(spacing=0):
+                    # ==================== CONFIGURATION SECTION ====================
+                    ui.Label("=== CONFIGURATION ===", height=20)
+                    with ui.VStack(spacing=3):
+                        with ui.HStack(height=24):
+                            ui.Label("USD Path / URL", width=120)
+                            self.scene_usd_field_string_model = ui.SimpleStringModel()
+                            self.scene_usd_field = ui.StringField(model=self.scene_usd_field_string_model, height=24)
 
-                    with ui.HStack():
-                        ui.Label("Scenario Type")
-                        self.scenario_combo_box = ui.ComboBox(0, *SCENARIOS.names())
-                        try:
-                            self.scenario_combo_box.model.get_item_value_model().add_value_changed_fn(
-                                self._on_scenario_selection_changed
+                        with ui.HStack(height=24):
+                            ui.Label("Scenario Type", width=120)
+                            self.scenario_combo_box = ui.ComboBox(0, *SCENARIOS.names())
+                            try:
+                                self.scenario_combo_box.model.get_item_value_model().add_value_changed_fn(
+                                    self._on_scenario_selection_changed
+                                )
+                            except Exception:
+                                pass
+
+                        with ui.HStack(height=24):
+                            ui.Label("Robot Type", width=120)
+                            self.robot_combo_box = ui.ComboBox(0, *ROBOTS.names())
+                            try:
+                                self.robot_combo_box.model.get_item_value_model().add_value_changed_fn(
+                                    self._on_robot_selection_changed
+                                )
+                            except Exception:
+                                pass
+
+                    ui.Spacer(height=4)
+                    ui.Separator(height=2)
+                    ui.Spacer(height=8)
+                    # ==================== SENSORS SECTION ====================
+                    ui.Label("=== SENSORS ===", height=20)
+                    with ui.VStack(spacing=3):
+                        with ui.HStack(height=24):
+                            ui.CheckBox(model=self._sensor_preview_toggle_model, width=22)
+                            ui.Label("Camera Preview", width=110)
+                            try:
+                                self._sensor_preview_toggle_model.add_value_changed_fn(
+                                    self._on_sensor_preview_toggle_changed
+                                )
+                            except Exception:
+                                pass
+                            ui.Spacer(width=8)
+                            ui.CheckBox(model=self._lidar_preview_toggle_model, width=22)
+                            ui.Label("LiDAR Preview", width=110)
+                            try:
+                                self._lidar_preview_toggle_model.add_value_changed_fn(
+                                    self._on_lidar_preview_toggle_changed
+                                )
+                            except Exception:
+                                pass
+                        
+                        with ui.HStack(height=24):
+                            self._path_planning_button = ui.Button(
+                                "Path Planning Settings",
+                                clicked_fn=self._open_path_planning_window,
+                                height=22
                             )
-                        except Exception:
-                            pass
 
-                    with ui.HStack():
-                        ui.Label("Robot Type")
-                        self.robot_combo_box = ui.ComboBox(0, *ROBOTS.names())
-                        try:
-                            self.robot_combo_box.model.get_item_value_model().add_value_changed_fn(
-                                self._on_robot_selection_changed
-                            )
-                        except Exception:
-                            pass
+                    ui.Spacer(height=4)
+                    ui.Separator(height=2)
+                    ui.Spacer(height=8)
+                    # ==================== DATA RECORDING SECTION ====================
+                    ui.Label("=== DATA RECORDING ===", height=20)
+                    with ui.VStack(spacing=3):
+                        with ui.HStack(height=24):
+                            ui.Label("Format", width=110)
+                            self._pc_format_items = ["npy", "ply", "pcd"]
+                            self._pc_format_index = 0
+                            try:
+                                self._pc_format_combo = ui.ComboBox(self._pc_format_index, *self._pc_format_items)
+                                try:
+                                    self._pc_format_combo.model.add_value_changed_fn(lambda: setattr(self, '_pc_format_index', self._pc_format_combo.model.get_item_value_model().get_value_as_int()))
+                                except Exception:
+                                    pass
+                            except Exception:
+                                ui.Label("npy")
 
-                    with ui.HStack(height=24):
-                        ui.Label("Camera Preview")
-                        ui.CheckBox(model=self._sensor_preview_toggle_model, width=22)
-                        try:
-                            self._sensor_preview_toggle_model.add_value_changed_fn(
-                                self._on_sensor_preview_toggle_changed
-                            )
-                        except Exception:
-                            pass
-                        ui.Spacer(width=12)
-                        ui.Label("LiDAR Preview")
-                        ui.CheckBox(model=self._lidar_preview_toggle_model, width=22)
-                        try:
-                            self._lidar_preview_toggle_model.add_value_changed_fn(
-                                self._on_lidar_preview_toggle_changed
-                            )
-                        except Exception:
-                            pass
-                    with ui.HStack(height=26):
-                        self._path_planning_button = ui.Button(
-                            "Path Planning Settings",
-                            clicked_fn=self._open_path_planning_window,
-                        )
-                
-                    # -- Build button --
-                    ui.Button("Build", clicked_fn=self.build_scenario)
+                        with ui.HStack(height=24):
+                            ui.CheckBox(model=self._record_pointclouds_model, width=22)
+                            ui.Label("PointClouds", width=110)
+                            ui.Spacer(width=8)
+                            ui.CheckBox(model=self._record_bboxes_model, width=22)
+                            ui.Label("BoundingBoxes", width=110)
+                        
+                        with ui.HStack(height=20):
+                            ui.Label("Interval: 1 (every frame)")
+                        ui.Label(f"Output: {RECORDINGS_DIR}", height=18)
 
-                    # -- Quick parameter models --
-                    # fallback internal format/index for environments where the
-                    # pointcloud format ComboBox is not present in the UI
-                    self._pc_format_items = ["npy", "ply", "pcd"]
-                    self._pc_format_index = 0
+                    ui.Spacer(height=4)
+                    ui.Separator(height=2)
+                    ui.Spacer(height=8)
+                    # ==================== CONTROL SECTION ====================
+                    ui.Label("=== ACTIONS ===", height=20)
+                    with ui.VStack(spacing=3):
+                        ui.Button("Build Scenario", clicked_fn=self.build_scenario, height=26)
+                        
+                        with ui.HStack(spacing=2):
+                            ui.Button("Start Recording", clicked_fn=self.enable_recording, height=26)
+                            ui.Button("Stop Recording", clicked_fn=self.disable_recording, height=26)
+                        
+                        ui.Button("Reset", clicked_fn=self.reset, height=26)
 
-                    # -- Quick Params frame: organized controls after Build --
-                    with ui.Frame():
-                        ui.Label("Quick Params")
-                        with ui.HStack(height=40):
-                            # Left column: fixed capture policy (always on)
-                            with ui.VStack(width=220, spacing=4):
-                                ui.Label("Record PointClouds: Always On")
-                                ui.Label("Annotate BoundingBoxes: Always On")
-
-                            # Right column: format and interval selectors
-                            with ui.VStack(width=220, spacing=4):
-                                with ui.HStack():
-                                    ui.Label("Format")
-                                    try:
-                                        items = self._pc_format_items
-                                        self._pc_format_combo = ui.ComboBox(self._pc_format_index, *items)
-                                        try:
-                                            self._pc_format_combo.model.add_value_changed_fn(lambda: setattr(self, '_pc_format_index', self._pc_format_combo.model.get_item_value_model().get_value_as_int()))
-                                        except Exception:
-                                            pass
-                                    except Exception:
-                                        # fallback label if combo fails
-                                        ui.Label(self._pc_format_items[self._pc_format_index] if hasattr(self, '_pc_format_items') else "npy")
-
-                                with ui.HStack():
-                                    ui.Label("Interval (frames)")
-                                    ui.Label("1 (always)")
-
-                with ui.VStack():
-                    self.recording_count_label = ui.Label("")
-                    self.recording_dir_label = ui.Label(f"Output directory: {RECORDINGS_DIR}")
-                    self.recording_name_label = ui.Label("")
-                    self.recording_step_label = ui.Label("")
-
-                    ui.Button("Reset", clicked_fn=self.reset)
-                    with ui.HStack():
-                        ui.Button("Start Recording", clicked_fn=self.enable_recording)
-                        ui.Button("Stop Recording", clicked_fn=self.disable_recording)
+                    ui.Spacer(height=4)
+                    ui.Separator(height=2)
+                    ui.Spacer(height=8)
+                    # ==================== STATUS SECTION ====================
+                    ui.Label("=== STATUS ===", height=20)
+                    with ui.VStack(spacing=2):
+                        self.recording_count_label = ui.Label("")
+                        self.recording_name_label = ui.Label("")
+                        self.recording_step_label = ui.Label("")
+                        self.recording_dir_label = ui.Label(f"Output: {RECORDINGS_DIR}")
 
         self._sync_path_planning_button_state()
         self._load_path_planning_models_from_robot()
