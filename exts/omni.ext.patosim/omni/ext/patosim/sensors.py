@@ -64,6 +64,9 @@ def _resolve_asset_path(*candidates: str) -> str:
 
 
 def _structured_pointcloud_to_array(array: np.ndarray) -> Optional[np.ndarray]:
+    # Some Isaac/Replicator backends return structured arrays with named fields
+    # instead of a plain Nx3/Nx4 matrix. Normalize them here so downstream code
+    # only needs to reason about contiguous XYZ[+intensity] arrays.
     if array is None:
         return None
     try:
@@ -90,6 +93,8 @@ def _extract_pointcloud_array(payload) -> Optional[np.ndarray]:
         return None
 
     if isinstance(payload, dict):
+        # Different annotators/backends wrap the actual pointcloud payload under
+        # different keys. Search the common variants first before giving up.
         for key in (
             "point_cloud_data",
             "point_cloud",
@@ -102,10 +107,6 @@ def _extract_pointcloud_array(payload) -> Optional[np.ndarray]:
                 extracted = _extract_pointcloud_array(payload[key])
                 if extracted is not None:
                     return extracted
-        for value in payload.values():
-            extracted = _extract_pointcloud_array(value)
-            if extracted is not None:
-                return extracted
         return None
 
     try:
@@ -132,6 +133,8 @@ def _extract_pointcloud_array(payload) -> Optional[np.ndarray]:
 
 
 def _sanitize_pointcloud_array(array: Optional[np.ndarray]) -> Optional[np.ndarray]:
+    # Keep only finite XYZ rows and force a contiguous float32 layout. This makes
+    # writer/replay/viewer code much simpler and avoids backend-specific dtypes.
     if array is None:
         return None
     try:
@@ -154,6 +157,20 @@ def _normalize_asset_path(asset_path: str) -> str:
     if "://" in text:
         return text
     return os.path.normpath(text)
+
+
+def _to_numpy_array(data) -> Optional[np.ndarray]:
+    if data is None:
+        return None
+    if hasattr(data, "numpy"):
+        try:
+            return np.asarray(data.numpy())
+        except Exception:
+            pass
+    try:
+        return np.asarray(data)
+    except Exception:
+        return None
 
 
 def _list_authored_reference_assets(
@@ -250,7 +267,6 @@ class Sensor(Module):
     def attach(self, prim_path: str):
         raise NotImplementedError
 
-# tenho que editar os sensores de camera usando esse modulo como base 
 class Camera(Sensor):
 
     def __init__(self,
@@ -268,6 +284,8 @@ class Camera(Sensor):
         self._depth_annotator = None
         self._xform_prim = XFormPrim(self._prim_path)
 
+        # Buffers are tagged so Module.state_dict_* can selectively collect only
+        # the relevant sensor products for recording/replay.
         self.rgb_image = Buffer(tags=["rgb"])
         self.segmentation_image = Buffer(tags=["segmentation"])
         self.segmentation_info = Buffer()
@@ -338,6 +356,8 @@ class Camera(Sensor):
             self.enable_rendering()
         if self._depth_annotator is not None:
             return
+        # Isaac returns metric distance-to-camera as a dense 2D image. If we ever
+        # want RGB-D pointclouds, they should be reconstructed from this buffer.
         self._depth_annotator = rep.AnnotatorRegistry.get_annotator(
             "distance_to_camera"
         )
@@ -489,7 +509,8 @@ class Lidar(Sensor):
         # Ensure visual representation exists (same style as camera wrappers).
         self.ensure_visual_model()
 
-        # Try RTX Lidar first
+        # Prefer the native RTX sensor path when available because it is the most
+        # faithful 3D source and can expose pointcloud directly from the sensor.
         try:
             from isaacsim.sensors.rtx import LidarRtx
 
@@ -515,7 +536,8 @@ class Lidar(Sensor):
             self._rtx = None
             self.status.set_value(f"rtx_init_error:{type(exc).__name__}")
 
-        # Fallback: replicator annotator
+        # Fallback to Replicator pointcloud if the dedicated RTX sensor API is
+        # not available in the current Isaac build/environment.
         try:
             self._annotator = rep.AnnotatorRegistry.get_annotator("point_cloud")
             try:
@@ -569,6 +591,8 @@ class Lidar(Sensor):
             self.status.set_value("pointcloud_enabled")
 
     def _extract_rtx_pointcloud(self):
+        # Isaac versions differ in where RTX pointcloud data becomes visible.
+        # Try the public frame first, then a couple of internal fallbacks.
         pts = None
         source = "rtx_no_pointcloud"
 
@@ -870,112 +894,507 @@ def _quat_from_euler_xyz(rx_deg: float, ry_deg: float, rz_deg: float):
     return (qw, qx, qy, qz)
 
 
-# =========================================================
-# CÂMERAS BEV (padrão HawkCamera; sem atalhos próprios)
-# =========================================================
 
-class BevTopDownCamera(Sensor):
-    """
-    Câmera ortográfica (vista superior métrica) – ideal para GT BEV.
-    build(): cria/configura o prim ortográfico (apertures em mm) e posiciona em +Z.
-    attach(): envolve o prim em uma Camera (sua classe).
-    """
-    resolution: Tuple[int, int] = (1024, 1024)
 
-    def __init__(self, cam: Camera):
-        self.cam = cam
+class OceanSimUWCamera(Sensor):
+    """Wrapper do OceanSim UW_Camera no formato Module/Buffer do PatoSim."""
+
+    resolution: Tuple[int, int] = (1920, 1080)
+
+    def __init__(
+        self,
+        prim_path: str,
+        sensor,
+        *,
+        water_profile_path: Optional[str] = None,
+    ):
+        self._prim_path = prim_path
+        self._xform_prim = XFormPrim(self._prim_path)
+        self._sensor = sensor
+        self._water_profile_path = water_profile_path
+        self._initialized = False
+        self._rgb_enabled = False
+        self._depth_enabled = False
+
+        self.raw_rgb_image = Buffer(tags=["rgb"])
+        self.rgb_image = Buffer(tags=["rgb"])
+        self.depth_image = Buffer(tags=["depth"])
+        self.position = Buffer()
+        self.orientation = Buffer()
 
     @classmethod
     def build(
         cls,
         prim_path: str,
         *,
-        height_m: float = 5.0,
-        view_width_m: float = 14.0,
-        view_height_m: float = 14.0,
-        resolution: Tuple[int, int] = (1024, 1024),
-        near: float = 0.05,
-        far: float = 2000.0,
-    ) -> "BevTopDownCamera":
-        """
-        - horizontal/verticalAperture em **milímetros** (USD).
-        - Para cobrir exatamente `view_width_m` x `view_height_m` em mundo, use mm = metros * 1000.
-        - Em ortográfica, a câmera olha por padrão para -Z; subir em +Z basta.
-        """
-        cam_prim = _define_camera_prim(prim_path)
-        cam_prim.CreateProjectionAttr(UsdGeom.Tokens.orthographic)
+        name: str = "UW_Camera",
+        resolution: Tuple[int, int] | None = None,
+        translation=None,
+        orientation=None,
+        focal_length: Optional[float] = None,
+        clipping_range: Tuple[float, float] | None = None,
+        water_profile_path: Optional[str] = None,
+    ) -> "OceanSimUWCamera":
+        from isaacsim.oceansim.sensors.UW_Camera import UW_Camera as _UWCamera
 
-        # ✅ Conversão correta: metros -> milímetros
-        cam_prim.CreateHorizontalApertureAttr(view_width_m * 1000.0)
-        cam_prim.CreateVerticalApertureAttr(view_height_m * 1000.0)
-        cam_prim.CreateClippingRangeAttr(Gf.Vec2f(float(near), float(far)))
+        res = tuple(resolution or cls.resolution)
+        sensor = _UWCamera(
+            prim_path=prim_path,
+            name=name,
+            resolution=list(res),
+            translation=translation,
+            orientation=orientation,
+        )
+        try:
+            cam_geom = UsdGeom.Camera(get_stage().GetPrimAtPath(prim_path))
+            horizontal_aperture = float(cam_geom.GetHorizontalApertureAttr().Get())
+            vertical_aperture = horizontal_aperture * (float(res[1]) / max(float(res[0]), 1.0))
+            cam_geom.GetVerticalApertureAttr().Set(vertical_aperture)
+        except Exception:
+            pass
+        if focal_length is not None:
+            try:
+                sensor.set_focal_length(float(focal_length))
+            except Exception:
+                pass
+            try:
+                horizontal_aperture = float(sensor.get_horizontal_aperture())
+                vertical_aperture = horizontal_aperture * (float(res[1]) / max(float(res[0]), 1.0))
+                sensor.set_vertical_aperture(float(vertical_aperture))
+            except Exception:
+                pass
+        if clipping_range is not None:
+            try:
+                sensor.set_clipping_range(float(clipping_range[0]), float(clipping_range[1]))
+            except Exception:
+                pass
+        return cls(
+            prim_path=prim_path,
+            sensor=sensor,
+            water_profile_path=water_profile_path,
+        )
 
-        # Posição: acima do plano (olhando -Z por padrão)
-        _xform_translate(prim_path, (0.0, 0.0, float(height_m)))
+    def _ensure_initialized(self):
+        if self._initialized:
+            return
+        self._sensor.initialize(
+            viewport=False,
+            UW_yaml_path=self._water_profile_path,
+        )
+        self._initialized = True
 
-        return cls.attach(prim_path, resolution)
+    def enable_rgb_rendering(self):
+        self._rgb_enabled = True
+        self._ensure_initialized()
 
-    @classmethod
-    def attach(cls, prim_path: str, resolution: Tuple[int, int] = None) -> "BevTopDownCamera":
-        res = resolution if resolution is not None else cls.resolution
-        return BevTopDownCamera(Camera(prim_path, res))
+    def enable_depth_rendering(self):
+        self._depth_enabled = True
+        self._ensure_initialized()
+
+    def disable_rendering(self):
+        if not self._initialized:
+            return
+        try:
+            self._sensor.close()
+        except Exception:
+            pass
+        self._initialized = False
+
+    def _render_underwater_rgb(self, raw_rgba, depth) -> Optional[np.ndarray]:
+        # The underwater camera is simulated as a post-process over optical RGB
+        # plus depth, not as a separate 3D sensor. This keeps it lightweight and
+        # makes the output compatible with the same RGB/depth recording pipeline.
+        try:
+            import warp as wp
+            from isaacsim.oceansim.utils.UWrenderer_utils import UW_render
+        except Exception:
+            raw_np = _to_numpy_array(raw_rgba)
+            if raw_np is None:
+                return None
+            return np.asarray(raw_np[..., :3], dtype=np.uint8)
+
+        if raw_rgba is None or depth is None:
+            return None
+
+        try:
+            uw_image = wp.zeros_like(raw_rgba)
+            wp.launch(
+                dim=np.flip(self._sensor.get_resolution()),
+                kernel=UW_render,
+                inputs=[
+                    raw_rgba,
+                    depth,
+                    self._sensor._backscatter_value,
+                    self._sensor._atten_coeff,
+                    self._sensor._backscatter_coeff,
+                ],
+                outputs=[uw_image],
+            )
+            uw_np = _to_numpy_array(uw_image)
+            if uw_np is None:
+                return None
+            return np.asarray(uw_np[..., :3], dtype=np.uint8)
+        except Exception:
+            raw_np = _to_numpy_array(raw_rgba)
+            if raw_np is None:
+                return None
+            return np.asarray(raw_np[..., :3], dtype=np.uint8)
+
+    def update_state(self):
+        if self._initialized:
+            raw_rgba = None
+            depth = None
+            try:
+                raw_rgba = self._sensor._rgba_annot.get_data()
+            except Exception:
+                pass
+            try:
+                depth = self._sensor._depth_annot.get_data()
+            except Exception:
+                pass
+
+            if self._rgb_enabled and raw_rgba is not None:
+                raw_np = _to_numpy_array(raw_rgba)
+                if raw_np is not None:
+                    self.raw_rgb_image.set_value(np.asarray(raw_np[..., :3], dtype=np.uint8))
+                rgb = self._render_underwater_rgb(raw_rgba, depth)
+                if rgb is not None:
+                    self.rgb_image.set_value(rgb)
+
+            if self._depth_enabled and depth is not None:
+                depth_np = _to_numpy_array(depth)
+                if depth_np is not None:
+                    self.depth_image.set_value(np.asarray(depth_np))
+
+        try:
+            position, orientation = self._xform_prim.get_world_pose()
+            self.position.set_value(position)
+            self.orientation.set_value(orientation)
+        except Exception:
+            self.position.set_value(None)
+            self.orientation.set_value(None)
+
+        super().update_state()
 
 
-class BevFrontDownCamera(Sensor):
-    """
-    Câmera perspectiva à frente e inclinada para baixo.
-    - FOV horizontal definido por hfov_deg.
-    - verticalAperture calculada pelo aspect ratio da resolução (robusto para não-16:9).
-    """
-    resolution: Tuple[int, int] = (1280, 720)
+class OceanSimStereoUWCamera(Sensor):
+    """Par estéreo de câmeras subaquáticas, no mesmo padrão das câmeras estéreo do projeto."""
 
-    def __init__(self, cam: Camera):
-        self.cam = cam
+    def __init__(self, left: OceanSimUWCamera, right: OceanSimUWCamera):
+        self.left = left
+        self.right = right
 
     @classmethod
     def build(
         cls,
         prim_path: str,
         *,
-        forward_m: float = 0.8,
-        height_m: float = 1.8,
-        pitch_down_deg: float = 55.0,
-        hfov_deg: float = 70.0,
-        resolution: Tuple[int, int] = (1280, 720),
-        near: float = 0.05,
-        far: float = 1000.0,
-        filmback_mm: float = 36.0,  # horizontalAperture "clássica" de 36mm
-    ) -> "BevFrontDownCamera":
-        """
-        Constrói uma câmera perspectiva com HFOV alvo:
-        - focal = 0.5 * horiz_ap_mm / tan(HFOV/2)
-        - verticalAperture = horiz_ap_mm / aspect (para respeitar a resolução escolhida)
-        """
-        cam_prim = _define_camera_prim(prim_path)
-        cam_prim.CreateProjectionAttr(UsdGeom.Tokens.perspective)
-        cam_prim.CreateClippingRangeAttr(Gf.Vec2f(float(near), float(far)))
+        resolution: Tuple[int, int] | None = None,
+        left_translation=None,
+        right_translation=None,
+        orientation=None,
+        focal_length: Optional[float] = None,
+        clipping_range: Tuple[float, float] | None = None,
+        water_profile_path: Optional[str] = None,
+    ) -> "OceanSimStereoUWCamera":
+        left = OceanSimUWCamera.build(
+            os.path.join(prim_path, "left_camera"),
+            name="UW_Camera_Left",
+            resolution=resolution,
+            translation=left_translation,
+            orientation=orientation,
+            focal_length=focal_length,
+            clipping_range=clipping_range,
+            water_profile_path=water_profile_path,
+        )
+        right = OceanSimUWCamera.build(
+            os.path.join(prim_path, "right_camera"),
+            name="UW_Camera_Right",
+            resolution=resolution,
+            translation=right_translation,
+            orientation=orientation,
+            focal_length=focal_length,
+            clipping_range=clipping_range,
+            water_profile_path=water_profile_path,
+        )
+        return cls(left, right)
 
-        # Óptica a partir do HFOV
-        horiz_ap_mm = float(filmback_mm)
-        focal_mm = 0.5 * horiz_ap_mm / math.tan(math.radians(hfov_deg) * 0.5)
 
-        # Usa o aspect da resolução (robusto para qualquer res)
-        res_x, res_y = resolution
-        aspect = (res_x / res_y) if (res_x and res_y) else (16.0 / 9.0)
-        vert_ap_mm = horiz_ap_mm / aspect
+class OceanSimImagingSonar(Sensor):
+    """Wrapper do ImagingSonarSensor com buffers compatíveis com preview e gravação."""
 
-        cam_prim.CreateHorizontalApertureAttr(horiz_ap_mm)
-        cam_prim.CreateVerticalApertureAttr(vert_ap_mm)
-        cam_prim.CreateFocalLengthAttr(focal_mm)
+    def __init__(self, prim_path: str, sensor):
+        self._prim_path = prim_path
+        self._xform_prim = XFormPrim(self._prim_path)
+        self._sensor = sensor
+        self._initialized = False
+        self._rgb_enabled = False
+        self._pointcloud_enabled = False
 
-        # Pose: desloca à frente e inclina "olhando para baixo"
-        _xform_translate(prim_path, (float(forward_m), 0.0, float(height_m)))
-        qw, qx, qy, qz = _quat_from_euler_xyz(0.0, -float(pitch_down_deg), 0.0)
-        _xform_orient_quat(prim_path, (qw, qx, qy, qz))
-
-        return cls.attach(prim_path, resolution)
+        # rgb_image stores the processed acoustic image produced by the sonar
+        # model. pointcloud stores the raw scan pointcloud used internally by the
+        # sonar backend before polar binning/noise are applied.
+        self.rgb_image = Buffer(tags=["rgb"])
+        self.pointcloud = Buffer(tags=["pointcloud"])
+        self.position = Buffer()
+        self.orientation = Buffer()
+        self.status = Buffer("idle")
 
     @classmethod
-    def attach(cls, prim_path: str, resolution: Tuple[int, int] = None) -> "BevFrontDownCamera":
-        res = resolution if resolution is not None else cls.resolution
-        return BevFrontDownCamera(Camera(prim_path, res))
+    def build(
+        cls,
+        prim_path: str,
+        *,
+        translation=None,
+        orientation=None,
+        min_range: float = 0.2,
+        max_range: float = 3.0,
+        range_res: float = 0.005,
+        angular_res: float = 0.25,
+        hori_res: int = 4000,
+    ) -> "OceanSimImagingSonar":
+        from isaacsim.oceansim.sensors.ImagingSonarSensor import ImagingSonarSensor as _ImagingSonarSensor
+
+        sensor = _ImagingSonarSensor(
+            prim_path=prim_path,
+            translation=translation,
+            orientation=orientation,
+            min_range=min_range,
+            max_range=max_range,
+            range_res=range_res,
+            angular_res=angular_res,
+            hori_res=hori_res,
+        )
+        try:
+            cam_geom = UsdGeom.Camera(get_stage().GetPrimAtPath(prim_path))
+            cam_geom.CreateProjectionAttr().Set(UsdGeom.Tokens.perspective)
+        except Exception:
+            pass
+        return cls(prim_path=prim_path, sensor=sensor)
+
+    def _ensure_initialized(self):
+        if self._initialized:
+            return
+        # include_unlabelled=True lets the sonar "see" meshes even when they do
+        # not carry semantic labels. Semantic reflectivity still improves realism.
+        self._sensor.sonar_initialize(
+            viewport=False,
+            include_unlabelled=True,
+        )
+        self._initialized = True
+        self.status.set_value("sonar_ready")
+
+    def enable_rgb_rendering(self):
+        self._rgb_enabled = True
+        self._ensure_initialized()
+
+    def set_pointcloud_enabled(self, enabled: bool):
+        self._pointcloud_enabled = bool(enabled)
+        if self._pointcloud_enabled:
+            self._ensure_initialized()
+        else:
+            self.pointcloud.set_value(None)
+
+    def update_state(self):
+        if self._initialized:
+            try:
+                # make_sonar_data() computes the acoustic response map from raw
+                # pointcloud, normals and semantic reflectivity.
+                self._sensor.make_sonar_data()
+                self.status.set_value("sonar_frame")
+            except Exception as exc:
+                self.status.set_value(f"sonar_error:{type(exc).__name__}")
+
+            if self._rgb_enabled:
+                try:
+                    # The backend returns a rendered sonar image (polar acoustic
+                    # intensity map), which we expose as an RGB-like preview.
+                    sonar_np = _to_numpy_array(self._sensor.make_sonar_image())
+                    if sonar_np is not None:
+                        self.rgb_image.set_value(np.asarray(sonar_np[..., :3], dtype=np.uint8))
+                except Exception:
+                    pass
+
+            if self._pointcloud_enabled:
+                try:
+                    pcl = self._sensor.scan_data.get("pcl")
+                except Exception:
+                    pcl = None
+                # This is the raw scan pointcloud captured by the sonar camera
+                # annotator, not the final binned sonar image/map.
+                pcl_np = _sanitize_pointcloud_array(_to_numpy_array(pcl))
+                self.pointcloud.set_value(pcl_np)
+
+        try:
+            position, orientation = self._xform_prim.get_world_pose()
+            self.position.set_value(position)
+            self.orientation.set_value(orientation)
+        except Exception:
+            self.position.set_value(None)
+            self.orientation.set_value(None)
+
+        super().update_state()
+
+
+class OceanSimDVL(Sensor):
+    """Wrapper do DVL do OceanSim com leituras em buffers comuns."""
+
+    def __init__(self, prim_path: str, sensor):
+        self._prim_path = prim_path
+        self._sensor = sensor
+
+        # All DVL outputs remain untagged on purpose so they are captured in
+        # ``state/common`` together with the robot pose/state instead of going
+        # through the heavier image/pointcloud writers.
+        self.linear_velocity = Buffer()
+        self.beam_depth = Buffer()
+        self.beam_hit = Buffer()
+        self.dropout = Buffer(False)
+        self.position = Buffer()
+        self.orientation = Buffer()
+        self.status = Buffer("idle")
+
+    @classmethod
+    def build(
+        cls,
+        rigid_body_path: str,
+        *,
+        name: str = "DVL",
+        translation=None,
+        orientation=None,
+        max_range: float = 10.0,
+        add_debug_lines: bool = False,
+    ) -> "OceanSimDVL":
+        from isaacsim.oceansim.sensors.DVLsensor import DVLsensor as _DVLsensor
+
+        sensor = _DVLsensor(name=name, max_range=max_range)
+        sensor.attachDVL(
+            rigid_body_path=rigid_body_path,
+            translation=translation,
+            orientation=orientation,
+        )
+        if add_debug_lines:
+            try:
+                sensor.add_debug_lines()
+            except Exception:
+                pass
+        return cls(
+            prim_path=os.path.join(rigid_body_path, name),
+            sensor=sensor,
+        )
+
+    def update_state(self):
+        beam_hit = None
+        try:
+            beam_hit = np.asarray(self._sensor.get_beam_hit(), dtype=bool)
+            self.beam_hit.set_value(beam_hit)
+        except Exception:
+            self.beam_hit.set_value(None)
+
+        # O DVL do OceanSim faz log de dropout dentro de get_linear_vel()/get_depth().
+        # Se chamarmos ambos a cada frame, o warning aparece varias vezes. Primeiro
+        # checamos os hits e, se estiver em dropout, publicamos buffers vazios/seguros.
+        in_dropout = bool(beam_hit is not None and np.count_nonzero(~beam_hit) >= 2)
+        self.dropout.set_value(in_dropout)
+        if in_dropout:
+            self.linear_velocity.set_value(np.zeros(3, dtype=np.float32))
+            self.beam_depth.set_value(np.full(4, np.nan, dtype=np.float32))
+            self.status.set_value("dropout")
+        else:
+            try:
+                self.linear_velocity.set_value(np.asarray(self._sensor.get_linear_vel(), dtype=np.float32))
+            except Exception:
+                self.linear_velocity.set_value(None)
+
+            try:
+                self.beam_depth.set_value(np.asarray(self._sensor.get_depth(), dtype=np.float32))
+            except Exception:
+                self.beam_depth.set_value(None)
+
+            if beam_hit is None:
+                self.status.set_value("unknown")
+            else:
+                self.status.set_value("tracking")
+
+        if beam_hit is None:
+            self.linear_velocity.set_value(self.linear_velocity.get_value())
+            self.beam_depth.set_value(self.beam_depth.get_value())
+
+        try:
+            position, orientation = self._sensor.get_baseSensor().get_world_pose()
+            self.position.set_value(position)
+            self.orientation.set_value(orientation)
+        except Exception:
+            self.position.set_value(None)
+            self.orientation.set_value(None)
+
+        super().update_state()
+
+
+class OceanSimBarometer(Sensor):
+    """Wrapper do barômetro/pressure sensor do OceanSim."""
+
+    def __init__(self, prim_path: str, sensor):
+        self._prim_path = prim_path
+        self._sensor = sensor
+        self._water_surface_z = None
+        try:
+            self._water_surface_z = float(getattr(sensor, "_water_surface_z"))
+        except Exception:
+            self._water_surface_z = None
+
+        # Barometer outputs are kept in ``state/common`` because they are
+        # scalar navigation measurements rather than rendered products.
+        self.pressure = Buffer()
+        self.depth = Buffer()
+        self.position = Buffer()
+        self.orientation = Buffer()
+        self.status = Buffer("idle")
+
+    @classmethod
+    def build(
+        cls,
+        prim_path: str,
+        *,
+        translation=None,
+        orientation=None,
+        water_surface_z: float = 0.0,
+    ) -> "OceanSimBarometer":
+        from isaacsim.oceansim.sensors.BarometerSensor import BarometerSensor as _BarometerSensor
+
+        sensor = _BarometerSensor(
+            prim_path=prim_path,
+            translation=translation,
+            orientation=orientation,
+            water_surface_z=water_surface_z,
+        )
+        return cls(prim_path=prim_path, sensor=sensor)
+
+    def update_state(self):
+        try:
+            self.pressure.set_value(float(self._sensor.get_pressure()))
+        except Exception:
+            self.pressure.set_value(None)
+
+        try:
+            position, orientation = self._sensor.get_world_pose()
+            self.position.set_value(position)
+            self.orientation.set_value(orientation)
+        except Exception:
+            self.position.set_value(None)
+            self.orientation.set_value(None)
+
+        position = self.position.get_value()
+        if position is not None and self._water_surface_z is not None:
+            try:
+                depth = max(0.0, float(self._water_surface_z) - float(np.asarray(position, dtype=np.float32)[2]))
+                self.depth.set_value(depth)
+                self.status.set_value("submerged" if depth > 0.0 else "surface_or_air")
+            except Exception:
+                self.depth.set_value(None)
+                self.status.set_value("unknown")
+        else:
+            self.depth.set_value(None)
+            self.status.set_value("unknown")
+
+        super().update_state()

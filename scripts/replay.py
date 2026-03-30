@@ -47,6 +47,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", type=str, default=os.path.join(DATA_DIR, "recordings"))
     parser.add_argument("--output", type=str, default=os.path.join(DATA_DIR, "replays"))
+    parser.add_argument("--pipeline_mode", type=str, default="staged", choices=["staged", "legacy"])
+    parser.add_argument("--camera_serial_enabled", type=parse_bool, default=True)
+    parser.add_argument("--camera_names", type=str, default="")
     parser.add_argument("--rgb_enabled", type=parse_bool, default=True)
     parser.add_argument("--segmentation_enabled", type=parse_bool, default=True)
     parser.add_argument("--depth_enabled", type=parse_bool, default=True)
@@ -58,6 +61,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pc_format", type=str, default="npy", choices=["npy", "ply", "pcd"])
     parser.add_argument("--annotations_enabled", type=parse_bool, default=True)
     parser.add_argument("--pc_interval", type=int, default=1)
+    parser.add_argument("--pc_min_points", type=int, default=32)
+    parser.add_argument("--pc_min_extent", type=float, default=0.05)
+    parser.add_argument("--pc_require_spread", type=parse_bool, default=True)
+    parser.add_argument("--pc_fallback_to_recording", type=parse_bool, default=True)
     parser.add_argument("--overwrite", type=parse_bool, default=False)
     parser.add_argument("--verbose", type=parse_bool, default=False)
     args = parser.parse_args()
@@ -128,6 +135,18 @@ def warn_if_inotify_pressure(prefix: str) -> None:
     )
 
 
+def resolve_output_path(recording_path: str, output_path: str) -> str:
+    input_name = os.path.basename(os.path.normpath(recording_path))
+    normalized_output = os.path.normpath(output_path)
+    if os.path.basename(normalized_output) == input_name:
+        return output_path
+    if output_path.endswith("/replays") or output_path.endswith(os.path.sep + "replays") or (
+        os.path.isdir(output_path) and os.path.isdir(os.path.join(output_path, "state")) is False
+    ):
+        return os.path.join(output_path, input_name)
+    return output_path
+
+
 def main() -> int:
     args = parse_args()
 
@@ -145,10 +164,7 @@ def main() -> int:
         recording_path = candidates[-1]
 
     name = os.path.basename(recording_path)
-    if output_path.endswith("/replays") or output_path.endswith(os.path.sep + "replays") or (
-        os.path.isdir(output_path) and os.path.isdir(os.path.join(output_path, "state")) is False
-    ):
-        output_path = os.path.join(output_path, name)
+    output_path = resolve_output_path(recording_path, output_path)
 
     if not os.path.isdir(recording_path):
         print(f"[replay] Input recording path not found: {recording_path}")
@@ -180,6 +196,12 @@ def main() -> int:
         recording_path,
         "--output_path",
         output_path,
+        "--pipeline_mode",
+        str(args.pipeline_mode),
+        "--camera_serial_enabled",
+        str(args.camera_serial_enabled),
+        "--camera_names",
+        str(args.camera_names),
         "--render_interval",
         str(args.render_interval),
         "--render_rt_subframes",
@@ -202,6 +224,14 @@ def main() -> int:
         str(args.annotations_enabled),
         "--pc_interval",
         str(args.pc_interval),
+        "--pc_min_points",
+        str(args.pc_min_points),
+        "--pc_min_extent",
+        str(args.pc_min_extent),
+        "--pc_require_spread",
+        str(args.pc_require_spread),
+        "--pc_fallback_to_recording",
+        str(args.pc_fallback_to_recording),
         "--overwrite",
         str(args.overwrite),
         "--verbose",

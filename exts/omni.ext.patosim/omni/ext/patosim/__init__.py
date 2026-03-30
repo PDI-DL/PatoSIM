@@ -13,16 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 
-try:
-    from .extension import *
-except ModuleNotFoundError as exc:
-    missing = exc.name or ""
-    # Allow utility imports (reader/writer/config/etc.) outside Kit UI context.
-    if not (
-        missing.startswith("omni")
-        or missing.startswith("isaacsim")
-        or missing.startswith("pxr")
-        or missing.startswith("carb")
-    ):
-        raise
+
+if os.environ.get("PATOSIM_IMPORT_MODE", "").strip().lower() != "lite":
+    try:
+        from .extension import *
+    except ModuleNotFoundError as exc:
+        missing = exc.name or ""
+        # Allow utility imports (reader/writer/config/etc.) outside Kit UI context.
+        if not (
+            missing.startswith("omni")
+            or missing.startswith("isaacsim")
+            or missing.startswith("pxr")
+            or missing.startswith("carb")
+        ):
+            raise

@@ -20,13 +20,15 @@ This script replays a recording with SimulationApp and re-renders outputs.
 """
 
 import argparse
+import asyncio
 import glob
 import json
 import os
 from pathlib import Path
 import signal
 import sys
-from typing import Any, Dict, Optional, Tuple
+from collections import OrderedDict
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 import numpy as np
 import tqdm
@@ -55,6 +57,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_path", type=str, default=os.path.join(DATA_DIR, "recordings"))
     parser.add_argument("--output_path", type=str, default=os.path.join(DATA_DIR, "replays"))
+    parser.add_argument("--pipeline_mode", type=str, default="staged", choices=["staged", "legacy"])
+    parser.add_argument("--camera_serial_enabled", type=parse_bool, default=True)
+    parser.add_argument("--camera_names", type=str, default="")
     parser.add_argument("--rgb_enabled", type=parse_bool, default=True)
     parser.add_argument("--segmentation_enabled", type=parse_bool, default=True)
     parser.add_argument("--depth_enabled", type=parse_bool, default=True)
@@ -66,36 +71,47 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pc_format", type=str, default="npy", choices=["npy", "ply", "pcd"])
     parser.add_argument("--annotations_enabled", type=parse_bool, default=True)
     parser.add_argument("--pc_interval", type=int, default=1)
+    parser.add_argument("--pc_min_points", type=int, default=32)
+    parser.add_argument("--pc_min_extent", type=float, default=0.05)
+    parser.add_argument("--pc_require_spread", type=parse_bool, default=True)
+    parser.add_argument("--pc_fallback_to_recording", type=parse_bool, default=True)
     parser.add_argument("--overwrite", type=parse_bool, default=False)
     parser.add_argument("--verbose", type=parse_bool, default=False)
     args, unknown = parser.parse_known_args()
     if unknown:
-        print(f"[replay] Ignoring unknown args: {' '.join(unknown)}")
+        print(f"[replay] Ignoring unknown args: {' '.join(unknown)}", flush=True)
     return args
 
 
-def enforce_full_capture(args: argparse.Namespace) -> None:
-    required_true = [
-        "rgb_enabled",
-        "segmentation_enabled",
-        "depth_enabled",
-        "instance_id_segmentation_enabled",
-        "normals_enabled",
-        "pc_enabled",
-        "annotations_enabled",
-    ]
-    for key in required_true:
-        if not getattr(args, key, False):
-            print(f"[replay] Overriding --{key}=False to True to keep full dataset capture.")
-        setattr(args, key, True)
-    if int(getattr(args, "pc_interval", 1)) != 1:
-        print("[replay] Overriding --pc_interval to 1 to keep full per-frame pointcloud capture.")
-    args.pc_interval = 1
+def normalize_args(args: argparse.Namespace) -> None:
+    args.render_interval = max(1, int(getattr(args, "render_interval", 1)))
+    args.pc_interval = max(1, int(getattr(args, "pc_interval", 1)))
+    args.pc_min_points = max(1, int(getattr(args, "pc_min_points", 1)))
+    args.pc_min_extent = max(0.0, float(getattr(args, "pc_min_extent", 0.0)))
+    args.camera_names = str(getattr(args, "camera_names", "") or "").strip()
+
+
+def log(message: str) -> None:
+    print(message, flush=True)
+
+
+def resolve_output_path(input_path: str, output_path: str) -> str:
+    input_name = os.path.basename(os.path.normpath(input_path))
+    normalized_output = os.path.normpath(output_path)
+    if os.path.basename(normalized_output) == input_name:
+        return output_path
+    if (
+        output_path.endswith("/replays")
+        or output_path.endswith(os.path.sep + "replays")
+        or (os.path.isdir(output_path) and not os.path.isdir(os.path.join(output_path, "state")))
+    ):
+        return os.path.join(output_path, input_name)
+    return output_path
 
 def install_signal_handlers() -> None:
     def _signal_handler(sig: int, _frame: Any) -> None:
         global STOP_REQUESTED
-        print(f"\n[replay] Received signal {sig}; finishing current iteration before stopping.")
+        log(f"\n[replay] Received signal {sig}; finishing current iteration before stopping.")
         STOP_REQUESTED = True
 
     signal.signal(signal.SIGINT, _signal_handler)
@@ -127,13 +143,18 @@ def bootstrap_repo_paths() -> Path:
 def init_simulation_app(headless: bool = True) -> Tuple[Any, Any]:
     from isaacsim import SimulationApp
 
+    log("[replay] Initializing SimulationApp...")
     simulation_app = SimulationApp(launch_config={"headless": headless})
+    log("[replay] SimulationApp initialized.")
+    log("[replay] Importing omni.replicator.core...")
     import omni.replicator.core as rep
+    log("[replay] omni.replicator.core imported.")
 
     return simulation_app, rep
 
 
 def load_runtime_modules():
+    os.environ["PATOSIM_IMPORT_MODE"] = "lite"
     from omni.ext.patosim.reader import Reader
     from omni.ext.patosim.writer import Writer
 
@@ -149,6 +170,361 @@ def has_any_data(state_dict: Dict[str, Any]) -> bool:
 
 def count_non_none(state_dict: Dict[str, Any]) -> int:
     return sum(1 for value in state_dict.values() if value is not None)
+
+
+def count_written_pointcloud_files(output_path: str) -> int:
+    patterns = ("*.npy", "*.ply", "*.pcd")
+    total = 0
+    for pattern in patterns:
+        total += len(glob.glob(os.path.join(output_path, "state", "pointcloud", "*", pattern)))
+    return total
+
+
+def count_written_annotation_files(output_path: str) -> int:
+    total = 0
+    total += len(glob.glob(os.path.join(output_path, "state", "bboxes2d", "*.json")))
+    total += len(glob.glob(os.path.join(output_path, "state", "bboxes3d", "*.json")))
+    total += len(glob.glob(os.path.join(output_path, "state", "classes", "*.json")))
+    total += len(glob.glob(os.path.join(output_path, "state", "semantic", "*.json")))
+    return total
+
+
+def _parse_requested_names(camera_names: str) -> list[str]:
+    if not camera_names:
+        return []
+    return [chunk.strip() for chunk in str(camera_names).split(",") if chunk.strip()]
+
+
+def _is_camera_module(module: Any) -> bool:
+    if module is None:
+        return False
+
+    # Treat leaf optical cameras as replayable camera modules, including the
+    # OceanSim underwater camera wrapper used by the ROV. Parent stereo wrappers
+    # are intentionally excluded so the replay pass records left/right views
+    # independently.
+    try:
+        if hasattr(module, "children") and len(module.children()) > 0:
+            return False
+    except Exception:
+        pass
+
+    class_name = module.__class__.__name__
+    if class_name in {"Camera", "OceanSimUWCamera"} and hasattr(module, "disable_rendering"):
+        return True
+
+    camera_like_buffers = any(
+        hasattr(module, attr_name)
+        for attr_name in (
+            "raw_rgb_image",
+            "depth_image",
+            "segmentation_image",
+            "instance_id_segmentation_image",
+            "normals_image",
+        )
+    )
+    camera_like_controls = any(
+        hasattr(module, attr_name)
+        for attr_name in (
+            "enable_rgb_rendering",
+            "enable_depth_rendering",
+            "enable_segmentation_rendering",
+            "enable_instance_id_segmentation_rendering",
+            "enable_normals_rendering",
+            "disable_rendering",
+        )
+    )
+    return bool(camera_like_buffers and camera_like_controls)
+
+
+def discover_camera_modules(scenario: Any, requested_names: str = "") -> "OrderedDict[str, Any]":
+    modules = OrderedDict()
+    for name, module in scenario.named_modules().items():
+        if not name:
+            continue
+        if _is_camera_module(module):
+            modules[name] = module
+
+    requested = _parse_requested_names(requested_names)
+    if not requested:
+        return modules
+
+    filtered = OrderedDict()
+    missing = []
+    for wanted in requested:
+        if wanted in modules:
+            filtered[wanted] = modules[wanted]
+            continue
+        suffix_matches = [(name, module) for name, module in modules.items() if name.endswith(wanted)]
+        if len(suffix_matches) == 1:
+            filtered[suffix_matches[0][0]] = suffix_matches[0][1]
+        else:
+            missing.append(wanted)
+    if missing:
+        log(f"[replay] Requested camera names not found or ambiguous: {', '.join(missing)}")
+    return filtered
+
+
+def disable_all_camera_rendering(scenario: Any) -> None:
+    for _name, module in discover_camera_modules(scenario).items():
+        try:
+            module.disable_rendering()
+        except Exception:
+            pass
+
+
+def enable_camera_modalities(camera_module: Any, args: argparse.Namespace) -> None:
+    if args.rgb_enabled:
+        camera_module.enable_rgb_rendering()
+    if args.segmentation_enabled:
+        camera_module.enable_segmentation_rendering()
+    if args.instance_id_segmentation_enabled:
+        camera_module.enable_instance_id_segmentation_rendering()
+    if args.depth_enabled:
+        camera_module.enable_depth_rendering()
+    if args.normals_enabled:
+        camera_module.enable_normals_rendering()
+
+
+def filter_state_dict_for_module_prefix(state_dict: Dict[str, Any], module_prefix: str) -> Dict[str, Any]:
+    prefix = str(module_prefix or "").strip()
+    if not prefix:
+        return OrderedDict(state_dict.items())
+    needle = prefix + "."
+    return OrderedDict((name, value) for name, value in state_dict.items() if name.startswith(needle))
+
+
+def analyze_pointcloud_array(
+    value: Any,
+    min_points: int = 32,
+    min_extent: float = 0.05,
+    require_spread: bool = True,
+) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "valid": False,
+        "num_points": 0,
+        "extent": 0.0,
+        "reason": "empty",
+    }
+    if value is None:
+        result["reason"] = "none"
+        return result
+
+    try:
+        array = np.asarray(value, dtype=np.float32)
+    except Exception:
+        result["reason"] = "coerce_failed"
+        return result
+
+    if array.ndim != 2 or array.shape[1] < 3:
+        result["reason"] = "bad_shape"
+        return result
+
+    xyz = array[:, :3]
+    finite_mask = np.all(np.isfinite(xyz), axis=1)
+    if not np.any(finite_mask):
+        result["reason"] = "no_finite_points"
+        return result
+
+    xyz = xyz[finite_mask]
+    result["num_points"] = int(xyz.shape[0])
+    if xyz.shape[0] < int(min_points):
+        result["reason"] = "too_few_points"
+        return result
+
+    mins = np.min(xyz, axis=0)
+    maxs = np.max(xyz, axis=0)
+    extent_vec = maxs - mins
+    extent = float(np.linalg.norm(extent_vec))
+    result["extent"] = extent
+    if require_spread and extent < float(min_extent):
+        result["reason"] = "too_compact"
+        return result
+
+    result["valid"] = True
+    result["reason"] = "ok"
+    return result
+
+
+def select_relevant_pointclouds(
+    state_pc: Dict[str, Any],
+    min_points: int,
+    min_extent: float,
+    require_spread: bool,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    valid = OrderedDict()
+    report = OrderedDict()
+    for name, value in (state_pc or {}).items():
+        info = analyze_pointcloud_array(
+            value=value,
+            min_points=min_points,
+            min_extent=min_extent,
+            require_spread=require_spread,
+        )
+        report[name] = info
+        if info.get("valid"):
+            valid[name] = value
+    return valid, report
+
+
+def select_available_pointclouds(state_pc: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    available = OrderedDict()
+    report = OrderedDict()
+    for name, value in (state_pc or {}).items():
+        info = analyze_pointcloud_array(
+            value=value,
+            min_points=1,
+            min_extent=0.0,
+            require_spread=False,
+        )
+        report[name] = info
+        if info.get("num_points", 0) > 0:
+            available[name] = value
+    return available, report
+
+
+def pointcloud_report_total_points(report: Dict[str, Any]) -> int:
+    total = 0
+    for info in (report or {}).values():
+        try:
+            total += int(info.get("num_points", 0))
+        except Exception:
+            pass
+    return total
+
+
+def lidar_status_snapshot(scenario: Any) -> Dict[str, Any]:
+    snapshot: Dict[str, Any] = OrderedDict()
+    try:
+        modules = scenario.named_modules()
+    except Exception:
+        return snapshot
+    for name, module in modules.items():
+        if not hasattr(module, "pointcloud"):
+            continue
+        status_value = None
+        try:
+            status_value = module.status.get_value() if hasattr(module, "status") else None
+        except Exception:
+            status_value = None
+        snapshot[name] = {
+            "status": status_value,
+            "prim_path": getattr(module, "_prim_path", None),
+            "sensor_prim_path": getattr(module, "_sensor_prim_path", None),
+        }
+    return snapshot
+
+
+def capture_pointcloud_for_step(
+    scenario: Any,
+    simulation_app: Any,
+    rep: Any,
+    render_rt_subframes: int,
+    min_points: int,
+    min_extent: float,
+    require_spread: bool,
+    extra_attempts: int = 3,
+) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    pointcloud_delta_time = 1.0 / 60.0
+    best_available_pc: Dict[str, Any] = OrderedDict()
+    best_available_report: Dict[str, Any] = OrderedDict()
+    best_available_points = 0
+
+    for attempt in range(max(1, int(extra_attempts) + 1)):
+        progressed = drive_rtx_lidar_render_products(
+            scenario=scenario,
+            simulation_app=simulation_app,
+            rep=rep,
+            frames=2 if attempt == 0 else 3,
+        )
+        if not progressed:
+            simulation_app.update()
+            rep.orchestrator.step(
+                rt_subframes=render_rt_subframes,
+                delta_time=pointcloud_delta_time,
+                pause_timeline=False,
+            )
+            scenario.update_state()
+
+        state_pc = scenario.state_dict_pointcloud()
+        valid_pc, report = select_relevant_pointclouds(
+            state_pc,
+            min_points=min_points,
+            min_extent=min_extent,
+            require_spread=require_spread,
+        )
+        if valid_pc:
+            return valid_pc, report, OrderedDict(), OrderedDict()
+
+        available_pc, available_report = select_available_pointclouds(state_pc)
+        available_points = pointcloud_report_total_points(available_report)
+        if available_points > best_available_points:
+            best_available_points = available_points
+            best_available_pc = available_pc
+            best_available_report = available_report
+
+    return OrderedDict(), report if 'report' in locals() else OrderedDict(), best_available_pc, best_available_report
+
+
+def drive_rtx_lidar_render_products(
+    scenario: Any,
+    simulation_app: Any,
+    rep: Any,
+    frames: int = 2,
+) -> bool:
+    try:
+        import omni.timeline
+    except Exception:
+        return False
+
+    lidar_modules = []
+    try:
+        for module in scenario.named_modules().values():
+            rtx = getattr(module, "_rtx", None)
+            if rtx is None or not hasattr(rtx, "get_render_product_path"):
+                continue
+            lidar_modules.append(module)
+    except Exception:
+        return False
+
+    if not lidar_modules:
+        return False
+
+    try:
+        omni.timeline.get_timeline_interface().play()
+    except Exception:
+        pass
+
+    progressed = False
+    for module in lidar_modules:
+        try:
+            rtx = getattr(module, "_rtx", None)
+            if rtx is not None and hasattr(rtx, "resume"):
+                rtx.resume()
+        except Exception:
+            pass
+
+    for _ in range(max(1, int(frames))):
+        try:
+            simulation_app.update()
+        except Exception:
+            return progressed
+        try:
+            rep.orchestrator.step(
+                rt_subframes=1,
+                delta_time=1.0 / 60.0,
+                pause_timeline=False,
+            )
+        except Exception:
+            pass
+        try:
+            scenario.update_state()
+            state_pc = scenario.state_dict_pointcloud()
+            if any(value is not None for value in (state_pc or {}).values()):
+                progressed = True
+        except Exception:
+            pass
+    return progressed
 
 
 def pointcloud_fields(value: Any) -> Optional[list]:
@@ -211,6 +587,16 @@ def extract_semantic_labels_from_prim(prim: Any) -> Dict[str, str]:
 
         semantic_labels[str(semantic_type)] = str(raw_value)
     return semantic_labels
+
+
+def has_dataset_object_root_ancestor(prim: Any) -> bool:
+    parent = prim.GetParent()
+    while parent is not None and parent.IsValid() and not parent.IsPseudoRoot():
+        labels = extract_semantic_labels_from_prim(parent)
+        if str(labels.get("dataset_object_root", "")).strip().lower() in {"true", "1", "yes"}:
+            return True
+        parent = parent.GetParent()
+    return False
 
 
 def extract_semantic_state_from_state_dict(state_dict: Dict[str, Any]) -> Dict[str, Any]:
@@ -301,6 +687,8 @@ def gather_annotations(stage: Any) -> Dict[str, Any]:
 
     for prim in stage.Traverse():
         if prim.IsPseudoRoot() or not prim.IsActive() or prim.GetTypeName() == "Camera":
+            continue
+        if has_dataset_object_root_ancestor(prim):
             continue
 
         bound = bbox_cache.ComputeWorldBound(prim)
@@ -424,11 +812,14 @@ def write_summary(
     input_path: str,
     pc_written_count: int,
     annotations_written_count: int,
+    pointcloud_validation_summary: Optional[Dict[str, Any]],
     verbose: bool,
 ) -> None:
-    print("\n=== Replay summary ===")
-    print(f"Pointcloud entries written: {pc_written_count}")
-    print(f"Annotation files written: {annotations_written_count}")
+    actual_pc_written = count_written_pointcloud_files(output_path)
+    actual_annotation_written = count_written_annotation_files(output_path)
+    log("\n=== Replay summary ===")
+    log(f"Pointcloud entries written: {actual_pc_written}")
+    log(f"Annotation files written: {actual_annotation_written}")
 
     os.makedirs(output_path, exist_ok=True)
     summary_path = os.path.join(output_path, "replay_summary.txt")
@@ -436,8 +827,24 @@ def write_summary(
         f.write("Replay summary\n")
         f.write(f"Input: {input_path}\n")
         f.write(f"Output: {output_path}\n")
-        f.write(f"Pointcloud entries written: {pc_written_count}\n")
-        f.write(f"Annotation files written: {annotations_written_count}\n")
+        f.write(f"Pointcloud entries written: {actual_pc_written}\n")
+        f.write(f"Annotation files written: {actual_annotation_written}\n")
+        f.write(f"Pointcloud entries written (run counter): {pc_written_count}\n")
+        f.write(f"Annotation files written (run counter): {annotations_written_count}\n")
+        if isinstance(pointcloud_validation_summary, dict):
+            f.write("Pointcloud validation summary:\n")
+            for key in (
+                "valid_steps",
+                "invalid_steps",
+                "fallback_steps",
+                "missing_steps",
+                "sparse_steps",
+            ):
+                f.write(f"  {key}: {int(pointcloud_validation_summary.get(key, 0))}\n")
+            invalid_reasons = pointcloud_validation_summary.get("invalid_reasons", {})
+            if isinstance(invalid_reasons, dict):
+                for reason, count in sorted(invalid_reasons.items()):
+                    f.write(f"  invalid_reason[{reason}]: {int(count)}\n")
 
         common_files = glob.glob(os.path.join(output_path, "state", "common", "*.npy"))
         rgb_files = glob.glob(os.path.join(output_path, "state", "rgb", "*", "*.jpg"))
@@ -507,10 +914,48 @@ def write_summary(
                     )
                     f.write(f"  {sensor}: {file_count} files\n")
     if verbose:
-        print(f"Wrote replay summary to: {summary_path}")
+        log(f"Wrote replay summary to: {summary_path}")
 
 
-def run_replay(
+def _advance_replay_step(
+    step: int,
+    reader: Any,
+    scenario: Any,
+    simulation_app: Any,
+    rep: Any,
+    render_rt_subframes: int,
+    run_render_step: bool = True,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    replay_state = reader.read_state_dict_flat(index=step)
+    try:
+        scenario.load_state_dict(replay_state)
+    except Exception as exc:
+        raise RuntimeError(f"step {step}: scenario.load_state_dict failed: {exc}") from exc
+    try:
+        scenario.write_replay_data()
+    except Exception as exc:
+        raise RuntimeError(f"step {step}: scenario.write_replay_data failed: {exc}") from exc
+    try:
+        simulation_app.update()
+    except Exception as exc:
+        raise RuntimeError(f"step {step}: simulation_app.update failed: {exc}") from exc
+    if run_render_step:
+        try:
+            rep.orchestrator.step(
+                rt_subframes=render_rt_subframes,
+                delta_time=0.0,
+                pause_timeline=False,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"step {step}: rep.orchestrator.step failed: {exc}") from exc
+    try:
+        scenario.update_state()
+    except Exception as exc:
+        raise RuntimeError(f"step {step}: scenario.update_state failed: {exc}") from exc
+    return replay_state, scenario.state_dict_common()
+
+
+def run_legacy_replay(
     args: argparse.Namespace,
     reader: Any,
     writer: Any,
@@ -518,7 +963,7 @@ def run_replay(
     rep: Any,
     load_scenario: Any,
     get_world: Any,
-) -> Tuple[int, int]:
+) -> Tuple[int, int, Dict[str, Any]]:
     scenario = load_scenario(args.input_path)
     if scenario is None:
         raise RuntimeError(f"Failed to load scenario from recording: {args.input_path}")
@@ -528,7 +973,7 @@ def run_replay(
         raise RuntimeError("World instance is not available after loading scenario.")
     world.reset()
 
-    print(scenario)
+    log(str(scenario))
     if args.rgb_enabled:
         scenario.enable_rgb_rendering()
     if args.segmentation_enabled:
@@ -549,27 +994,31 @@ def run_replay(
 
     pc_written_count = 0
     annotations_written_count = 0
+    validation_summary = {
+        "valid_steps": 0,
+        "invalid_steps": 0,
+        "fallback_steps": 0,
+        "missing_steps": 0,
+        "sparse_steps": 0,
+        "invalid_reasons": OrderedDict(),
+    }
     num_steps = len(reader)
     pc_interval = max(1, int(args.pc_interval))
 
     for step in tqdm.tqdm(range(0, num_steps, args.render_interval)):
         if STOP_REQUESTED:
-            print("[replay] Stop requested; leaving replay loop.")
+            log("[replay] Stop requested; leaving replay loop.")
             break
 
-        replay_state = reader.read_state_dict_flat(index=step)
-        scenario.load_state_dict(replay_state)
-        scenario.write_replay_data()
-
-        simulation_app.update()
-        rep.orchestrator.step(
-            rt_subframes=args.render_rt_subframes,
-            delta_time=0.0,
-            pause_timeline=False,
+        _replay_state, state_dict_common = _advance_replay_step(
+            step=step,
+            reader=reader,
+            scenario=scenario,
+            simulation_app=simulation_app,
+            rep=rep,
+            render_rt_subframes=args.render_rt_subframes,
+            run_render_step=True,
         )
-        scenario.update_state()
-
-        state_dict_common = scenario.state_dict_common()
         writer.write_state_dict_common(state_dict_common, step)
 
         if args.rgb_enabled:
@@ -588,17 +1037,44 @@ def run_replay(
         if args.pc_enabled and (step % pc_interval) == 0:
             state_pc = scenario.state_dict_pointcloud()
             used_pc = None
-            if has_any_data(state_pc):
-                writer.write_state_dict_pointcloud(state_pc, step, save_format=args.pc_format)
-                pc_written_count += count_non_none(state_pc)
-                used_pc = state_pc
-            elif getattr(reader, "pointcloud_names", []):
+            valid_pc, report = select_relevant_pointclouds(
+                state_pc,
+                min_points=args.pc_min_points,
+                min_extent=args.pc_min_extent,
+                require_spread=args.pc_require_spread,
+            )
+            if valid_pc:
+                writer.write_state_dict_pointcloud(valid_pc, step, save_format=args.pc_format)
+                pc_written_count += count_non_none(valid_pc)
+                used_pc = valid_pc
+                validation_summary["valid_steps"] += 1
+            elif args.pc_fallback_to_recording and getattr(reader, "pointcloud_names", []):
                 fallback_pc = reader.read_state_dict_pointcloud(index=step)
-                if has_any_data(fallback_pc):
-                    print(f"[replay] No scenario pointcloud for step {step}; copying from recording.")
-                    writer.write_state_dict_pointcloud(fallback_pc, step, save_format=args.pc_format)
-                    pc_written_count += count_non_none(fallback_pc)
-                    used_pc = fallback_pc
+                valid_fallback, fallback_report = select_relevant_pointclouds(
+                    fallback_pc,
+                    min_points=args.pc_min_points,
+                    min_extent=args.pc_min_extent,
+                    require_spread=args.pc_require_spread,
+                )
+                if valid_fallback:
+                    log(f"[replay] No scenario pointcloud for step {step}; copying from recording.")
+                    writer.write_state_dict_pointcloud(valid_fallback, step, save_format=args.pc_format)
+                    pc_written_count += count_non_none(valid_fallback)
+                    used_pc = valid_fallback
+                    validation_summary["fallback_steps"] += 1
+                    report = fallback_report
+                else:
+                    validation_summary["missing_steps"] += 1
+            else:
+                validation_summary["missing_steps"] += 1
+
+            if used_pc is None:
+                validation_summary["invalid_steps"] += 1
+                for info in report.values():
+                    reason = str(info.get("reason", "invalid"))
+                    validation_summary["invalid_reasons"][reason] = (
+                        int(validation_summary["invalid_reasons"].get(reason, 0)) + 1
+                    )
 
             if used_pc is not None:
                 metadata = build_pointcloud_metadata(scenario, used_pc)
@@ -618,12 +1094,324 @@ def run_replay(
             writer.write_annotations(payload, step)
             annotations_written_count += 1
 
-    return pc_written_count, annotations_written_count
+    return pc_written_count, annotations_written_count, validation_summary
+
+
+def run_staged_replay(
+    args: argparse.Namespace,
+    reader: Any,
+    writer: Any,
+    simulation_app: Any,
+    rep: Any,
+    load_scenario: Any,
+    get_world: Any,
+) -> Tuple[int, int, Dict[str, Any]]:
+    scenario = load_scenario(args.input_path)
+    if scenario is None:
+        raise RuntimeError(f"Failed to load scenario from recording: {args.input_path}")
+
+    world = get_world()
+    if world is None:
+        raise RuntimeError("World instance is not available after loading scenario.")
+    world.reset()
+
+    log(str(scenario))
+    camera_modules = discover_camera_modules(scenario, requested_names=args.camera_names)
+    if args.camera_names and not camera_modules:
+        raise RuntimeError("No requested cameras were found for staged replay.")
+
+    disable_all_camera_rendering(scenario)
+    try:
+        scenario.set_pointcloud_enabled(False)
+    except Exception:
+        pass
+
+    simulation_app.update()
+    rep.orchestrator.step(
+        rt_subframes=args.render_rt_subframes,
+        delta_time=0.0,
+        pause_timeline=False,
+    )
+
+    num_steps = len(reader)
+    replay_steps = list(range(0, num_steps, args.render_interval))
+    written_common_steps: set[int] = set()
+    pc_written_count = 0
+    annotations_written_count = 0
+    validation_summary = {
+        "valid_steps": 0,
+        "invalid_steps": 0,
+        "fallback_steps": 0,
+        "missing_steps": 0,
+        "sparse_steps": 0,
+        "invalid_reasons": OrderedDict(),
+    }
+
+    camera_modalities_enabled = any(
+        [
+            args.rgb_enabled,
+            args.segmentation_enabled,
+            args.instance_id_segmentation_enabled,
+            args.depth_enabled,
+            args.normals_enabled,
+        ]
+    )
+
+    if camera_modalities_enabled:
+        if args.camera_serial_enabled:
+            if not camera_modules:
+                log("[replay] No camera modules discovered; skipping staged camera pass.")
+            for module_name, module in camera_modules.items():
+                log(f"[replay] Camera pass: {module_name}")
+                disable_all_camera_rendering(scenario)
+                enable_camera_modalities(module, args)
+                for step in tqdm.tqdm(replay_steps, desc=f"camera:{module_name}", leave=False):
+                    if STOP_REQUESTED:
+                        log("[replay] Stop requested; leaving staged camera pass.")
+                        break
+                    _replay_state, state_dict_common = _advance_replay_step(
+                        step=step,
+                        reader=reader,
+                        scenario=scenario,
+                        simulation_app=simulation_app,
+                        rep=rep,
+                        render_rt_subframes=args.render_rt_subframes,
+                        run_render_step=True,
+                    )
+                    if step not in written_common_steps:
+                        writer.write_state_dict_common(state_dict_common, step)
+                        written_common_steps.add(step)
+                    if args.rgb_enabled:
+                        writer.write_state_dict_rgb(
+                            filter_state_dict_for_module_prefix(scenario.state_dict_rgb(), module_name),
+                            step,
+                        )
+                    if args.segmentation_enabled:
+                        writer.write_state_dict_segmentation(
+                            filter_state_dict_for_module_prefix(scenario.state_dict_segmentation(), module_name),
+                            step,
+                        )
+                    if args.instance_id_segmentation_enabled:
+                        writer.write_state_dict_instance_id_segmentation(
+                            filter_state_dict_for_module_prefix(
+                                scenario.state_dict_instance_id_segmentation(), module_name
+                            ),
+                            step,
+                        )
+                    if args.depth_enabled:
+                        writer.write_state_dict_depth(
+                            filter_state_dict_for_module_prefix(scenario.state_dict_depth(), module_name),
+                            step,
+                        )
+                    if args.normals_enabled:
+                        writer.write_state_dict_normals(
+                            filter_state_dict_for_module_prefix(scenario.state_dict_normals(), module_name),
+                            step,
+                        )
+                if STOP_REQUESTED:
+                    break
+        else:
+            log("[replay] Camera pass: all cameras together")
+            for module in camera_modules.values():
+                enable_camera_modalities(module, args)
+            for step in tqdm.tqdm(replay_steps, desc="camera:all", leave=False):
+                if STOP_REQUESTED:
+                    log("[replay] Stop requested; leaving staged camera pass.")
+                    break
+                _replay_state, state_dict_common = _advance_replay_step(
+                    step=step,
+                    reader=reader,
+                    scenario=scenario,
+                    simulation_app=simulation_app,
+                    rep=rep,
+                    render_rt_subframes=args.render_rt_subframes,
+                    run_render_step=True,
+                )
+                if step not in written_common_steps:
+                    writer.write_state_dict_common(state_dict_common, step)
+                    written_common_steps.add(step)
+                if args.rgb_enabled:
+                    writer.write_state_dict_rgb(scenario.state_dict_rgb(), step)
+                if args.segmentation_enabled:
+                    writer.write_state_dict_segmentation(scenario.state_dict_segmentation(), step)
+                if args.instance_id_segmentation_enabled:
+                    writer.write_state_dict_instance_id_segmentation(
+                        scenario.state_dict_instance_id_segmentation(), step
+                    )
+                if args.depth_enabled:
+                    writer.write_state_dict_depth(scenario.state_dict_depth(), step)
+                if args.normals_enabled:
+                    writer.write_state_dict_normals(scenario.state_dict_normals(), step)
+
+    if args.pc_enabled and not STOP_REQUESTED:
+        log("[replay] Pointcloud pass")
+        disable_all_camera_rendering(scenario)
+        try:
+            scenario.set_pointcloud_enabled(True)
+        except Exception:
+            pass
+        try:
+            progressed = drive_rtx_lidar_render_products(
+                scenario=scenario,
+                simulation_app=simulation_app,
+                rep=rep,
+                frames=3,
+            )
+            if not progressed:
+                simulation_app.update()
+                rep.orchestrator.step(
+                    rt_subframes=max(1, int(args.render_rt_subframes)),
+                    delta_time=1.0 / 60.0,
+                    pause_timeline=False,
+                )
+                scenario.update_state()
+        except Exception:
+            pass
+        pc_steps = [step for step in replay_steps if (step % args.pc_interval) == 0]
+        for step in tqdm.tqdm(pc_steps, desc="pointcloud", leave=False):
+            if STOP_REQUESTED:
+                log("[replay] Stop requested; leaving pointcloud pass.")
+                break
+            _replay_state, state_dict_common = _advance_replay_step(
+                step=step,
+                reader=reader,
+                scenario=scenario,
+                simulation_app=simulation_app,
+                rep=rep,
+                render_rt_subframes=args.render_rt_subframes,
+                run_render_step=True,
+            )
+            if step not in written_common_steps:
+                writer.write_state_dict_common(state_dict_common, step)
+                written_common_steps.add(step)
+
+            valid_pc, report, sparse_pc, sparse_report = capture_pointcloud_for_step(
+                scenario=scenario,
+                simulation_app=simulation_app,
+                rep=rep,
+                render_rt_subframes=args.render_rt_subframes,
+                min_points=args.pc_min_points,
+                min_extent=args.pc_min_extent,
+                require_spread=args.pc_require_spread,
+            )
+            used_pc = None
+            if valid_pc:
+                writer.write_state_dict_pointcloud(valid_pc, step, save_format=args.pc_format)
+                pc_written_count += count_non_none(valid_pc)
+                used_pc = valid_pc
+                validation_summary["valid_steps"] += 1
+            elif sparse_pc:
+                log(
+                    f"[replay] Sparse pointcloud kept for step {step}; "
+                    f"LiDAR likely still warming up. Status={to_jsonable(lidar_status_snapshot(scenario))}"
+                )
+                writer.write_state_dict_pointcloud(sparse_pc, step, save_format=args.pc_format)
+                pc_written_count += count_non_none(sparse_pc)
+                used_pc = sparse_pc
+                report = sparse_report
+                validation_summary["sparse_steps"] += 1
+            elif args.pc_fallback_to_recording and getattr(reader, "pointcloud_names", []):
+                fallback_pc = reader.read_state_dict_pointcloud(index=step)
+                valid_fallback, fallback_report = select_relevant_pointclouds(
+                    fallback_pc,
+                    min_points=args.pc_min_points,
+                    min_extent=args.pc_min_extent,
+                    require_spread=args.pc_require_spread,
+                )
+                if valid_fallback:
+                    log(f"[replay] No relevant scenario pointcloud for step {step}; copying from recording.")
+                    writer.write_state_dict_pointcloud(valid_fallback, step, save_format=args.pc_format)
+                    pc_written_count += count_non_none(valid_fallback)
+                    used_pc = valid_fallback
+                    validation_summary["fallback_steps"] += 1
+                    report = fallback_report
+                else:
+                    log(
+                        f"[replay] No pointcloud written for step {step}; "
+                        f"scenario report={to_jsonable(report)} "
+                        f"fallback report={to_jsonable(fallback_report)} "
+                        f"lidar={to_jsonable(lidar_status_snapshot(scenario))}"
+                    )
+                    validation_summary["missing_steps"] += 1
+            else:
+                log(
+                    f"[replay] No pointcloud written for step {step}; "
+                    f"scenario report={to_jsonable(report)} "
+                    f"lidar={to_jsonable(lidar_status_snapshot(scenario))}"
+                )
+                validation_summary["missing_steps"] += 1
+
+            if used_pc is None:
+                validation_summary["invalid_steps"] += 1
+                for info in report.values():
+                    reason = str(info.get("reason", "invalid"))
+                    validation_summary["invalid_reasons"][reason] = (
+                        int(validation_summary["invalid_reasons"].get(reason, 0)) + 1
+                    )
+            else:
+                metadata = build_pointcloud_metadata(scenario, used_pc)
+                if metadata:
+                    writer.write_pointcloud_metadata(metadata, step)
+        try:
+            scenario.set_pointcloud_enabled(False)
+        except Exception:
+            pass
+
+    if args.annotations_enabled and not STOP_REQUESTED:
+        log("[replay] Annotation pass")
+        disable_all_camera_rendering(scenario)
+        try:
+            scenario.set_pointcloud_enabled(False)
+        except Exception:
+            pass
+        from omni.ext.patosim.utils.global_utils import get_stage
+
+        for step in tqdm.tqdm(replay_steps, desc="annotations", leave=False):
+            if STOP_REQUESTED:
+                log("[replay] Stop requested; leaving annotation pass.")
+                break
+            _replay_state, state_dict_common = _advance_replay_step(
+                step=step,
+                reader=reader,
+                scenario=scenario,
+                simulation_app=simulation_app,
+                rep=rep,
+                render_rt_subframes=args.render_rt_subframes,
+                run_render_step=False,
+            )
+            if step not in written_common_steps:
+                writer.write_state_dict_common(state_dict_common, step)
+                written_common_steps.add(step)
+            annotations = gather_annotations(get_stage())
+            semantic_state = extract_semantic_state_from_state_dict(state_dict_common)
+            payload = build_annotation_payload(
+                step=step,
+                base_annotations=annotations,
+                semantic_state=semantic_state,
+            )
+            writer.write_annotations(payload, step)
+            annotations_written_count += 1
+
+    return pc_written_count, annotations_written_count, validation_summary
+
+
+def run_replay(
+    args: argparse.Namespace,
+    reader: Any,
+    writer: Any,
+    simulation_app: Any,
+    rep: Any,
+    load_scenario: Any,
+    get_world: Any,
+) -> Tuple[int, int, Dict[str, Any]]:
+    if str(getattr(args, "pipeline_mode", "staged")) == "legacy":
+        return run_legacy_replay(args, reader, writer, simulation_app, rep, load_scenario, get_world)
+    return run_staged_replay(args, reader, writer, simulation_app, rep, load_scenario, get_world)
 
 
 def main() -> int:
     args = parse_args()
-    enforce_full_capture(args)
+    normalize_args(args)
     args.input_path = os.path.expanduser(args.input_path)
     args.output_path = os.path.expanduser(args.output_path)
 
@@ -633,17 +1421,11 @@ def main() -> int:
             key=os.path.getmtime,
         )
         if not candidates:
-            print(f"[replay] No recording directories found in: {args.input_path}")
+            log(f"[replay] No recording directories found in: {args.input_path}")
             return 1
         args.input_path = candidates[-1]
 
-    input_name = os.path.basename(os.path.normpath(args.input_path))
-    if (
-        args.output_path.endswith("/replays")
-        or args.output_path.endswith(os.path.sep + "replays")
-        or (os.path.isdir(args.output_path) and not os.path.isdir(os.path.join(args.output_path, "state")))
-    ):
-        args.output_path = os.path.join(args.output_path, input_name)
+    args.output_path = resolve_output_path(args.input_path, args.output_path)
 
     install_signal_handlers()
     bootstrap_repo_paths()
@@ -651,23 +1433,33 @@ def main() -> int:
     try:
         simulation_app, rep = init_simulation_app(headless=True)
     except Exception as exc:
-        print(f"[replay] Failed to initialize SimulationApp/Replicator: {exc}")
+        log(f"[replay] Failed to initialize SimulationApp/Replicator: {exc}")
         return 1
 
     try:
         bootstrap_repo_paths()
+        log("[replay] Loading runtime modules...")
         Reader, Writer, load_scenario, get_world = load_runtime_modules()
+        log("[replay] Runtime modules loaded.")
+        log("[replay] Creating reader...")
         reader = Reader(args.input_path)
+        log("[replay] Reader ready.")
+        log("[replay] Creating writer...")
         writer = Writer(args.output_path)
+        log("[replay] Writer ready.")
+        log("[replay] Copying init artifacts...")
         writer.copy_init(args.input_path, overwrite=args.overwrite, verbose=args.verbose)
-        print("============== Replaying ==============")
-        print(f"\tInput path: {args.input_path}")
-        print(f"\tOutput path: {args.output_path}")
-        print(f"\tRgb enabled: {args.rgb_enabled}")
-        print(f"\tSegmentation enabled: {args.segmentation_enabled}")
-        print(f"\tRendering RT subframes: {args.render_rt_subframes}")
-        print(f"\tRender interval: {args.render_interval}")
-        pc_count, ann_count = run_replay(
+        log("[replay] Init artifacts copied.")
+        log("============== Replaying ==============")
+        log(f"\tInput path: {args.input_path}")
+        log(f"\tOutput path: {args.output_path}")
+        log(f"\tRgb enabled: {args.rgb_enabled}")
+        log(f"\tSegmentation enabled: {args.segmentation_enabled}")
+        log(f"\tRendering RT subframes: {args.render_rt_subframes}")
+        log(f"\tRender interval: {args.render_interval}")
+        log(f"\tPipeline mode: {args.pipeline_mode}")
+        log(f"\tCamera serial enabled: {args.camera_serial_enabled}")
+        pc_count, ann_count, pc_validation_summary = run_replay(
             args=args,
             reader=reader,
             writer=writer,
@@ -677,10 +1469,17 @@ def main() -> int:
             get_world=get_world,
         )
     except Exception as exc:
-        print(f"[replay] Replay failed: {exc}")
+        log(f"[replay] Replay failed: {exc}")
         return 1
 
-    write_summary(args.output_path, args.input_path, pc_count, ann_count, args.verbose)
+    write_summary(
+        args.output_path,
+        args.input_path,
+        pc_count,
+        ann_count,
+        pc_validation_summary,
+        args.verbose,
+    )
     return 0
 
 

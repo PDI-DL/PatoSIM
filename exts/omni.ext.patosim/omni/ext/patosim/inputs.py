@@ -67,13 +67,23 @@ class KeyboardDriver(object):
             carb.input.KeyboardInput.D,
             carb.input.KeyboardInput.SPACE,
             carb.input.KeyboardInput.C,
+            carb.input.KeyboardInput.UP,
+            carb.input.KeyboardInput.DOWN,
+            carb.input.KeyboardInput.LEFT,
+            carb.input.KeyboardInput.RIGHT,
+            carb.input.KeyboardInput.I,
+            carb.input.KeyboardInput.J,
+            carb.input.KeyboardInput.K,
+            carb.input.KeyboardInput.L,
         ]
 
         self.buttons = [KeyboardButton(key) for key in key_input_types]
+        self._buttons_by_key = {button._key: button for button in self.buttons}
 
     def _event_callback(self, event: carb.input.KeyboardEvent, *args, **kwargs):
         for button in self.buttons:
             button._event_callback(event, *args, **kwargs)
+        return True
 
     def _refresh_interfaces(self):
         self._appwindow = omni.appwindow.get_default_app_window()
@@ -148,6 +158,12 @@ class KeyboardDriver(object):
         if self._needs_reconnect():
             self._connect()
         return np.array([b.value for b in self.buttons])
+
+    def get_key_state(self, key: carb.input.KeyboardInput) -> bool:
+        if self._needs_reconnect():
+            self._connect()
+        button = self._buttons_by_key.get(key)
+        return bool(button.value) if button is not None else False
     
 
 class GamepadAxis:

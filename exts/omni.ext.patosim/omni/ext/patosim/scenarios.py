@@ -20,6 +20,9 @@ import math
 import os
 import sys
 import warnings
+from pathlib import Path
+
+import carb
 
 # Ensure the local `path_planner` package is importable when running inside Isaac Sim.
 # Isaac's embedded Python doesn't include the repository layout on sys.path by default,
@@ -61,6 +64,46 @@ import omni.replicator.core as rep
 # >>> NOVO: interface do teclado do Kit para teclas extras
 
 
+class _ROVKeyboardController:
+    """Controlador simples de teclado para o teleop 6DOF do ROV."""
+
+    FORCE_KEY_MAP = {
+        carb.input.KeyboardInput.W: np.array([1.0, 0.0, 0.0], dtype=np.float32),
+        carb.input.KeyboardInput.S: np.array([-1.0, 0.0, 0.0], dtype=np.float32),
+        carb.input.KeyboardInput.A: np.array([0.0, 1.0, 0.0], dtype=np.float32),
+        carb.input.KeyboardInput.D: np.array([0.0, -1.0, 0.0], dtype=np.float32),
+        carb.input.KeyboardInput.UP: np.array([0.0, 0.0, 1.0], dtype=np.float32),
+        carb.input.KeyboardInput.DOWN: np.array([0.0, 0.0, -1.0], dtype=np.float32),
+    }
+    TORQUE_KEY_MAP = {
+        carb.input.KeyboardInput.J: np.array([0.0, 0.0, 1.0], dtype=np.float32),
+        carb.input.KeyboardInput.L: np.array([0.0, 0.0, -1.0], dtype=np.float32),
+        carb.input.KeyboardInput.I: np.array([0.0, -1.0, 0.0], dtype=np.float32),
+        carb.input.KeyboardInput.K: np.array([0.0, 1.0, 0.0], dtype=np.float32),
+        carb.input.KeyboardInput.LEFT: np.array([-1.0, 0.0, 0.0], dtype=np.float32),
+        carb.input.KeyboardInput.RIGHT: np.array([1.0, 0.0, 0.0], dtype=np.float32),
+    }
+
+    def __init__(self):
+        self._driver = inputs.KeyboardDriver.ensure_connected()
+
+    def get_force_and_torque(self) -> Tuple[np.ndarray, np.ndarray]:
+        self._driver = inputs.KeyboardDriver.ensure_connected()
+        force = np.zeros(3, dtype=np.float32)
+        torque = np.zeros(3, dtype=np.float32)
+
+        for key, vec in self.FORCE_KEY_MAP.items():
+            if self._driver.get_key_state(key):
+                force += vec
+        for key, vec in self.TORQUE_KEY_MAP.items():
+            if self._driver.get_key_state(key):
+                torque += vec
+
+        return force, torque
+
+    def cleanup(self):
+        self._driver = None
+
 
 
 class Scenario(Module):
@@ -99,8 +142,122 @@ class Scenario(Module):
 
 SCENARIOS = Registry[Scenario]()
 
-#Naofunciona bem ainda
+# Os cenarios terrestres antigos foram mantidos apenas como referencia.
+# Eles nao ficam mais registrados por padrao porque usam occupancy map 2D
+# e dinamica de veiculo terrestre, o que nao combina com o ROV do OceanSim.
+
+
 @SCENARIOS.register()
+class OceanSimROVTeleoperationScenario(Scenario):
+    """Teleop 6DOF do ROV usando o mapeamento de teclado do OceanSim."""
+
+    def __init__(self, robot: Robot, occupancy_map: OccupancyMap):
+        super().__init__(robot, occupancy_map)
+        self._keyboard = _ROVKeyboardController()
+        self._default_position = np.asarray(
+            getattr(self.robot, "spawn_translation", getattr(self.robot, "initial_translation", (-2.0, 0.0, -0.8))),
+            dtype=np.float32,
+        )
+        init_euler = np.asarray(
+            getattr(self.robot, "initial_orientation_euler_deg", (0.0, 0.0, 0.0)),
+            dtype=np.float32,
+        )
+        self._default_orientation = np.asarray(
+            [math.cos(math.radians(init_euler[2]) * 0.5), 0.0, 0.0, math.sin(math.radians(init_euler[2]) * 0.5)],
+            dtype=np.float32,
+        )
+        self._linear_speed = float(getattr(self.robot, "teleop_linear_speed_gain", 0.75))
+        self._angular_speed = float(getattr(self.robot, "teleop_angular_speed_gain", 0.9))
+        self._force_gain = float(getattr(self.robot, "keyboard_linear_velocity_gain", 10.0))
+        self._torque_gain = float(getattr(self.robot, "keyboard_angular_velocity_gain", 10.0))
+
+    def __del__(self):
+        try:
+            self._keyboard.cleanup()
+        except Exception:
+            pass
+
+    def reset(self):
+        if hasattr(self.robot, "set_pose_3d"):
+            self.robot.set_pose_3d(self._default_position, self._default_orientation)
+        self.robot.action.set_value(np.zeros(6, dtype=np.float32))
+        self.robot.write_action(float(getattr(self.robot, "physics_dt", 0.01)))
+
+    def step(self, step_size: float) -> bool:
+        force_dir, torque_dir = self._keyboard.get_force_and_torque()
+        linear_velocity_cmd = force_dir * self._linear_speed
+        angular_velocity_cmd = torque_dir * self._angular_speed
+        force = force_dir * self._force_gain
+        torque = torque_dir * self._torque_gain
+        self.robot.action.set_value(np.concatenate([force, torque]).astype(np.float32))
+        self.robot.write_action(step_size)
+        try:
+            if hasattr(self.robot, "apply_body_velocity_command"):
+                assist_gain = float(getattr(self.robot, "teleop_velocity_assist_gain", 1.0))
+                self.robot.apply_body_velocity_command(
+                    linear_velocity_cmd * assist_gain,
+                    angular_velocity_cmd * assist_gain,
+                )
+        except Exception:
+            pass
+        self.robot.update_state()
+        return True
+
+
+@SCENARIOS.register()
+class OceanSimROVWaypointScenario(Scenario):
+    """Segue a logica original do OceanSim: a cada passo aplica o proximo waypoint 3D."""
+
+    def __init__(self, robot: Robot, occupancy_map: OccupancyMap):
+        super().__init__(robot, occupancy_map)
+        self._default_waypoint_path = (
+            Path(__file__).resolve().parents[3] / "demo" / "demo_waypoints.txt"
+        )
+        env_waypoint_path = os.environ.get("PATOSIM_ROV_WAYPOINTS", "").strip()
+        self._waypoint_path = Path(env_waypoint_path) if env_waypoint_path else self._default_waypoint_path
+        self._waypoints: list[np.ndarray] = []
+        self._default_position = np.asarray(
+            getattr(self.robot, "spawn_translation", getattr(self.robot, "initial_translation", (-2.0, 0.0, -0.8))),
+            dtype=np.float32,
+        )
+        self._default_orientation = np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+
+    def _load_waypoints(self) -> list[np.ndarray]:
+        path = self._waypoint_path if self._waypoint_path.exists() else self._default_waypoint_path
+        loaded: list[np.ndarray] = []
+        with open(path, "r", encoding="utf-8") as file:
+            for line in file:
+                parts = [float(x) for x in line.strip().split() if x.strip()]
+                if len(parts) < 7:
+                    continue
+                loaded.append(np.asarray(parts[:7], dtype=np.float32))
+        return loaded
+
+    def reset(self):
+        self._waypoints = self._load_waypoints()
+        self.robot.action.set_value(np.zeros(6, dtype=np.float32))
+        if self._waypoints and hasattr(self.robot, "set_pose_3d"):
+            first = self._waypoints[0]
+            self.robot.set_pose_3d(first[:3], first[3:7])
+        elif hasattr(self.robot, "set_pose_3d"):
+            self.robot.set_pose_3d(self._default_position, self._default_orientation)
+
+    def step(self, step_size: float) -> bool:
+        self.robot.action.set_value(np.zeros(6, dtype=np.float32))
+
+        if self._waypoints:
+            waypoint = self._waypoints.pop(0)
+            if hasattr(self.robot, "set_pose_3d"):
+                self.robot.set_pose_3d(waypoint[:3], waypoint[3:7])
+        else:
+            self.robot.write_action(step_size)
+
+        self.robot.update_state()
+        return True
+
+
+#Naofunciona bem ainda
+#@SCENARIOS.register()
 class RandomPathFollowingScenarioRearSteer(Scenario):
     """
     Path following compatível com FourWheelRearSteerRobot_V1:
@@ -824,7 +981,7 @@ class KeyboardTeleoperationScenario_ForkliftV3(Scenario):
         self.update_state()
         return True
 
-@SCENARIOS.register()
+#@SCENARIOS.register()
 class KeyboardTeleoperationScenario_forklift(Scenario):
     """
     Teleop p/ FourWheelRearSteerRobot
