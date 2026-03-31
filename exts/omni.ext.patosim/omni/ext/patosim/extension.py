@@ -269,199 +269,7 @@ class PatoSimExtension(omni.ext.IExt):
         self._teleop_window = omni.ui.Window("PatoSim", width=420, height=760)
 
         with self._teleop_window.frame:
-            with ui.VStack():
-                with ui.VStack():
-                    with ui.HStack():
-                        ui.Label("USD Path / URL")
-                        self.scene_usd_field_string_model = ui.SimpleStringModel()
-                        self.scene_usd_field = ui.StringField(model=self.scene_usd_field_string_model, height=25)
-
-                    with ui.HStack():
-                        ui.Label("Scenario Type")
-                        self.scenario_combo_box = ui.ComboBox(0, *SCENARIOS.names())
-                        try:
-                            self.scenario_combo_box.model.get_item_value_model().add_value_changed_fn(
-                                self._on_scenario_selection_changed
-                            )
-                        except Exception:
-                            pass
-
-                    with ui.HStack():
-                        ui.Label("Robot Type")
-                        self.robot_combo_box = ui.ComboBox(0, *ROBOTS.names())
-                        try:
-                            self.robot_combo_box.model.get_item_value_model().add_value_changed_fn(
-                                self._on_robot_selection_changed
-                            )
-                        except Exception:
-                            pass
-
-                    with ui.HStack(height=24):
-                        ui.Label("Camera Preview")
-                        ui.CheckBox(model=self._sensor_preview_toggle_model, width=22)
-                        try:
-                            self._sensor_preview_toggle_model.add_value_changed_fn(
-                                self._on_sensor_preview_toggle_changed
-                            )
-                        except Exception:
-                            pass
-                        ui.Spacer(width=12)
-                        ui.Label("LiDAR Preview")
-                        ui.CheckBox(model=self._lidar_preview_toggle_model, width=22)
-                        try:
-                            self._lidar_preview_toggle_model.add_value_changed_fn(
-                                self._on_lidar_preview_toggle_changed
-                            )
-                        except Exception:
-                            pass
-                    with ui.HStack(height=26):
-                        self._path_planning_button = ui.Button(
-                            "Path Planning Settings",
-                            clicked_fn=self._open_path_planning_window,
-                        )
-                        ui.Button(
-                            "Dataset Object Menu",
-                            clicked_fn=self._open_dataset_object_window,
-                        )
-
-                    with ui.Frame():
-                        ui.Label("OceanSim Params")
-                        with ui.VStack(spacing=6):
-                            with ui.HStack():
-                                ui.Label("Water YAML", width=92)
-                                ui.StringField(model=self._oceansim_water_profile_model, height=25)
-                            with ui.HStack():
-                                ui.Label("Waypoints", width=92)
-                                ui.StringField(model=self._oceansim_waypoint_path_model, height=25)
-                            with ui.HStack():
-                                ui.Label("Lin Speed", width=92)
-                                ui.FloatDrag(model=self._oceansim_linear_speed_model, min=0.05, max=5.0)
-                                ui.Spacer(width=12)
-                                ui.Label("Ang Speed", width=92)
-                                ui.FloatDrag(model=self._oceansim_angular_speed_model, min=0.05, max=5.0)
-                            with ui.HStack():
-                                ui.Label("DVL Debug", width=92)
-                                ui.CheckBox(model=self._oceansim_dvl_debug_model, width=22)
-                                ui.Spacer(width=12)
-                                ui.Button("Use MHL Scene", clicked_fn=lambda: self.scene_usd_field_string_model.set_value(dev_scene_path))
-                            with ui.HStack():
-                                ui.Label("Sonar Refl.", width=92)
-                                ui.CheckBox(model=self._oceansim_apply_sonar_reflectivity_model, width=22)
-                                ui.Label("Apply reflectivity to world meshes on Build")
-                            ui.Label("Sensors")
-                            with ui.HStack():
-                                ui.CheckBox(model=self._oceansim_front_camera_model, width=22)
-                                ui.Label("Front Camera", width=104)
-                                ui.CheckBox(model=self._oceansim_stereo_camera_model, width=22)
-                                ui.Label("Stereo", width=72)
-                                ui.CheckBox(model=self._oceansim_lidar_model, width=22)
-                                ui.Label("LiDAR")
-                            with ui.HStack():
-                                ui.CheckBox(model=self._oceansim_sonar_model, width=22)
-                                ui.Label("Sonar", width=104)
-                                ui.CheckBox(model=self._oceansim_dvl_model, width=22)
-                                ui.Label("DVL", width=104)
-                                ui.CheckBox(model=self._oceansim_barometer_model, width=22)
-                                ui.Label("Barometer")
-                
-                    # -- Build button --
-                    ui.Button("Build", clicked_fn=self.build_scenario)
-
-                    # -- Quick parameter models --
-                    # fallback internal format/index for environments where the
-                    # pointcloud format ComboBox is not present in the UI
-                    self._pc_format_items = ["npy", "ply", "pcd"]
-                    self._pc_format_index = 0
-
-                    # -- Quick Params frame: organized controls after Build --
-                    with ui.Frame():
-                        ui.Label("Quick Params")
-                        with ui.VStack(spacing=6):
-                            with ui.HStack():
-                                ui.Label("Deferred Sensor Processing", width=170)
-                                ui.CheckBox(model=self._deferred_sensor_processing_model, width=22)
-                                try:
-                                    self._deferred_sensor_processing_model.add_value_changed_fn(
-                                        self._on_deferred_sensor_processing_changed
-                                    )
-                                except Exception:
-                                    pass
-                            with ui.HStack():
-                                ui.Label("Pause Previews While Recording", width=170)
-                                ui.CheckBox(model=self._disable_previews_during_recording_model, width=22)
-                                try:
-                                    self._disable_previews_during_recording_model.add_value_changed_fn(
-                                        self._on_disable_previews_during_recording_changed
-                                    )
-                                except Exception:
-                                    pass
-                            with ui.HStack():
-                                ui.Label("Record PointClouds", width=170)
-                                ui.CheckBox(model=self._record_pointcloud_toggle_model, width=22)
-                                try:
-                                    self._record_pointcloud_toggle_model.add_value_changed_fn(
-                                        self._on_record_pointcloud_toggle_changed
-                                    )
-                                except Exception:
-                                    pass
-                            with ui.HStack():
-                                ui.Label("PointCloud Format", width=170)
-                                try:
-                                    items = self._pc_format_items
-                                    self._pc_format_combo = ui.ComboBox(self._pc_format_index, *items)
-                                    try:
-                                        self._pc_format_combo.model.add_value_changed_fn(
-                                            lambda *_args: setattr(
-                                                self,
-                                                "_pc_format_index",
-                                                self._pc_format_combo.model.get_item_value_model().get_value_as_int(),
-                                            )
-                                        )
-                                    except Exception:
-                                        pass
-                                except Exception:
-                                    ui.Label(self._pc_format_items[self._pc_format_index] if hasattr(self, '_pc_format_items') else "npy")
-                            with ui.HStack():
-                                ui.Label("Common Interval", width=170)
-                                ui.IntField(model=self._record_common_interval_model, height=20, width=72)
-                                try:
-                                    self._record_common_interval_model.add_value_changed_fn(
-                                        self._on_record_common_interval_changed
-                                    )
-                                except Exception:
-                                    pass
-                                ui.Label("frames")
-                            with ui.HStack():
-                                ui.Label("PointCloud Interval", width=170)
-                                ui.IntField(model=self._record_pointcloud_interval_model, height=20, width=72)
-                                try:
-                                    self._record_pointcloud_interval_model.add_value_changed_fn(
-                                        self._on_record_pointcloud_params_changed
-                                    )
-                                except Exception:
-                                    pass
-                                ui.Label("frames")
-                            with ui.HStack():
-                                ui.Label("PointCloud Metadata", width=170)
-                                ui.CheckBox(model=self._record_pointcloud_metadata_model, width=22)
-                                try:
-                                    self._record_pointcloud_metadata_model.add_value_changed_fn(
-                                        self._on_record_pointcloud_params_changed
-                                    )
-                                except Exception:
-                                    pass
-                            ui.Label("Bounding-box annotations stay enabled during recording.")
-
-                with ui.VStack():
-                    self.recording_count_label = ui.Label("")
-                    self.recording_dir_label = ui.Label(f"Output directory: {RECORDINGS_DIR}")
-                    self.recording_name_label = ui.Label("")
-                    self.recording_step_label = ui.Label("")
-
-                    ui.Button("Reset", clicked_fn=self.reset)
-                    with ui.HStack():
-                        ui.Button("Start Recording", clicked_fn=self.enable_recording)
-                        ui.Button("Stop Recording", clicked_fn=self.disable_recording)
+            self._build_main_ui_frame()
 
         self._sync_path_planning_button_state()
         self._load_path_planning_models_from_robot()
@@ -490,6 +298,219 @@ class PatoSimExtension(omni.ext.IExt):
             pass
         self.update_recording_count()
         self.clear_recording()
+
+    def _build_main_ui_frame(self):
+        with ui.VStack():
+            with ui.VStack():
+                self._build_scene_selection_section()
+                self._build_preview_and_tools_section()
+                self._build_oceansim_params_section()
+                ui.Button("Build", clicked_fn=self.build_scenario)
+                self._build_quick_params_section()
+
+            with ui.VStack():
+                self._build_recording_status_section()
+
+    def _build_scene_selection_section(self):
+        with ui.HStack():
+            ui.Label("USD Path / URL")
+            self.scene_usd_field_string_model = ui.SimpleStringModel()
+            self.scene_usd_field = ui.StringField(model=self.scene_usd_field_string_model, height=25)
+
+        with ui.HStack():
+            ui.Label("Scenario Type")
+            self.scenario_combo_box = ui.ComboBox(0, *SCENARIOS.names())
+            try:
+                self.scenario_combo_box.model.get_item_value_model().add_value_changed_fn(
+                    self._on_scenario_selection_changed
+                )
+            except Exception:
+                pass
+
+        with ui.HStack():
+            ui.Label("Robot Type")
+            self.robot_combo_box = ui.ComboBox(0, *ROBOTS.names())
+            try:
+                self.robot_combo_box.model.get_item_value_model().add_value_changed_fn(
+                    self._on_robot_selection_changed
+                )
+            except Exception:
+                pass
+
+    def _build_preview_and_tools_section(self):
+        with ui.HStack(height=24):
+            ui.Label("Camera Preview")
+            ui.CheckBox(model=self._sensor_preview_toggle_model, width=22)
+            try:
+                self._sensor_preview_toggle_model.add_value_changed_fn(
+                    self._on_sensor_preview_toggle_changed
+                )
+            except Exception:
+                pass
+            ui.Spacer(width=12)
+            ui.Label("LiDAR Preview")
+            ui.CheckBox(model=self._lidar_preview_toggle_model, width=22)
+            try:
+                self._lidar_preview_toggle_model.add_value_changed_fn(
+                    self._on_lidar_preview_toggle_changed
+                )
+            except Exception:
+                pass
+
+        with ui.HStack(height=26):
+            self._path_planning_button = ui.Button(
+                "Path Planning Settings",
+                clicked_fn=self._open_path_planning_window,
+            )
+            ui.Button(
+                "Dataset Object Menu",
+                clicked_fn=self._open_dataset_object_window,
+            )
+
+    def _build_oceansim_params_section(self):
+        with ui.Frame():
+            ui.Label("OceanSim Params")
+            with ui.VStack(spacing=6):
+                with ui.HStack():
+                    ui.Label("Water YAML", width=92)
+                    ui.StringField(model=self._oceansim_water_profile_model, height=25)
+                with ui.HStack():
+                    ui.Label("Waypoints", width=92)
+                    ui.StringField(model=self._oceansim_waypoint_path_model, height=25)
+                with ui.HStack():
+                    ui.Label("Lin Speed", width=92)
+                    ui.FloatDrag(model=self._oceansim_linear_speed_model, min=0.05, max=5.0)
+                    ui.Spacer(width=12)
+                    ui.Label("Ang Speed", width=92)
+                    ui.FloatDrag(model=self._oceansim_angular_speed_model, min=0.05, max=5.0)
+                with ui.HStack():
+                    ui.Label("DVL Debug", width=92)
+                    ui.CheckBox(model=self._oceansim_dvl_debug_model, width=22)
+                    ui.Spacer(width=12)
+                    ui.Button(
+                        "Use MHL Scene",
+                        clicked_fn=lambda: self.scene_usd_field_string_model.set_value(dev_scene_path),
+                    )
+                with ui.HStack():
+                    ui.Label("Sonar Refl.", width=92)
+                    ui.CheckBox(model=self._oceansim_apply_sonar_reflectivity_model, width=22)
+                    ui.Label("Apply reflectivity to world meshes on Build")
+                ui.Label("Sensors")
+                with ui.HStack():
+                    ui.CheckBox(model=self._oceansim_front_camera_model, width=22)
+                    ui.Label("Front Camera", width=104)
+                    ui.CheckBox(model=self._oceansim_stereo_camera_model, width=22)
+                    ui.Label("Stereo", width=72)
+                    ui.CheckBox(model=self._oceansim_lidar_model, width=22)
+                    ui.Label("LiDAR")
+                with ui.HStack():
+                    ui.CheckBox(model=self._oceansim_sonar_model, width=22)
+                    ui.Label("Sonar", width=104)
+                    ui.CheckBox(model=self._oceansim_dvl_model, width=22)
+                    ui.Label("DVL", width=104)
+                    ui.CheckBox(model=self._oceansim_barometer_model, width=22)
+                    ui.Label("Barometer")
+
+    def _ensure_pointcloud_format_models(self):
+        # Keep a valid fallback even if the combo-box cannot be created in the UI.
+        self._pc_format_items = ["npy", "ply", "pcd"]
+        self._pc_format_index = 0
+
+    def _build_quick_params_section(self):
+        self._ensure_pointcloud_format_models()
+
+        with ui.Frame():
+            ui.Label("Quick Params")
+            with ui.VStack(spacing=6):
+                with ui.HStack():
+                    ui.Label("Deferred Sensor Processing", width=170)
+                    ui.CheckBox(model=self._deferred_sensor_processing_model, width=22)
+                    try:
+                        self._deferred_sensor_processing_model.add_value_changed_fn(
+                            self._on_deferred_sensor_processing_changed
+                        )
+                    except Exception:
+                        pass
+                with ui.HStack():
+                    ui.Label("Pause Previews While Recording", width=170)
+                    ui.CheckBox(model=self._disable_previews_during_recording_model, width=22)
+                    try:
+                        self._disable_previews_during_recording_model.add_value_changed_fn(
+                            self._on_disable_previews_during_recording_changed
+                        )
+                    except Exception:
+                        pass
+                with ui.HStack():
+                    ui.Label("Record PointClouds", width=170)
+                    ui.CheckBox(model=self._record_pointcloud_toggle_model, width=22)
+                    try:
+                        self._record_pointcloud_toggle_model.add_value_changed_fn(
+                            self._on_record_pointcloud_toggle_changed
+                        )
+                    except Exception:
+                        pass
+                with ui.HStack():
+                    ui.Label("PointCloud Format", width=170)
+                    try:
+                        items = self._pc_format_items
+                        self._pc_format_combo = ui.ComboBox(self._pc_format_index, *items)
+                        try:
+                            self._pc_format_combo.model.add_value_changed_fn(
+                                lambda *_args: setattr(
+                                    self,
+                                    "_pc_format_index",
+                                    self._pc_format_combo.model.get_item_value_model().get_value_as_int(),
+                                )
+                            )
+                        except Exception:
+                            pass
+                    except Exception:
+                        ui.Label(
+                            self._pc_format_items[self._pc_format_index]
+                            if hasattr(self, "_pc_format_items")
+                            else "npy"
+                        )
+                with ui.HStack():
+                    ui.Label("Common Interval", width=170)
+                    ui.IntField(model=self._record_common_interval_model, height=20, width=72)
+                    try:
+                        self._record_common_interval_model.add_value_changed_fn(
+                            self._on_record_common_interval_changed
+                        )
+                    except Exception:
+                        pass
+                    ui.Label("frames")
+                with ui.HStack():
+                    ui.Label("PointCloud Interval", width=170)
+                    ui.IntField(model=self._record_pointcloud_interval_model, height=20, width=72)
+                    try:
+                        self._record_pointcloud_interval_model.add_value_changed_fn(
+                            self._on_record_pointcloud_params_changed
+                        )
+                    except Exception:
+                        pass
+                    ui.Label("frames")
+                with ui.HStack():
+                    ui.Label("PointCloud Metadata", width=170)
+                    ui.CheckBox(model=self._record_pointcloud_metadata_model, width=22)
+                    try:
+                        self._record_pointcloud_metadata_model.add_value_changed_fn(
+                            self._on_record_pointcloud_params_changed
+                        )
+                    except Exception:
+                        pass
+                ui.Label("Bounding-box annotations stay enabled during recording.")
+
+    def _build_recording_status_section(self):
+        self.recording_count_label = ui.Label("")
+        self.recording_dir_label = ui.Label(f"Output directory: {RECORDINGS_DIR}")
+        self.recording_name_label = ui.Label("")
+        self.recording_step_label = ui.Label("")
+
+        ui.Button("Reset", clicked_fn=self.reset)
+        with ui.HStack():
+            ui.Button("Start Recording", clicked_fn=self.enable_recording)
+            ui.Button("Stop Recording", clicked_fn=self.disable_recording)
 
     def build_occ_map_frame(self):
         if self.scenario is not None:
