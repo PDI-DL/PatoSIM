@@ -3,6 +3,8 @@ _*/
 
 .DS_Store
 **/.vscode/ipch
+.vscode/extensions.json
+.vscode/settings.json
 
 # byte-compiled python files
 *.py[cod]
