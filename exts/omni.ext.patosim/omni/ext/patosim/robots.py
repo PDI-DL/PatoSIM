@@ -455,11 +455,11 @@ class OceanSimROVRobot(Robot):
 
     chase_camera_base_path: str = ""
     # Chase camera tuned for the BlueROV scene:
-    # move farther back and slightly higher to keep the full robot in frame.
-    chase_camera_x_offset: float = -6.5
+    # keep the vehicle framed without starting too far away.
+    chase_camera_x_offset: float = -2.0
     chase_camera_y_offset: float = 0.0
-    chase_camera_z_offset: float = 2.6
-    chase_camera_tilt_angle: float = 22.0
+    chase_camera_z_offset: float = 2.0
+    chase_camera_tilt_angle: float = 45.0
 
     occupancy_map_radius: float = 1.0
     occupancy_map_z_min: float = -5.0
@@ -903,6 +903,22 @@ class OceanSimROVRobot(Robot):
             position=np.asarray(position, dtype=np.float32),
             orientation=np.asarray(orientation, dtype=np.float32),
         )
+
+    def get_yaw_from_orientation(self) -> float:
+        """Extrai yaw (rotação em torno do Z global) da orientação atual.
+
+        Assume quaternion no formato wxyz (convenção Isaac Sim).
+        """
+        try:
+            pose = self.get_pose_3d()
+            ori = np.asarray(pose.orientation, dtype=np.float32)
+            # Isaac Sim: orientation = [w, x, y, z]
+            w, x, y, z = float(ori[0]), float(ori[1]), float(ori[2]), float(ori[3])
+            siny_cosp = 2.0 * (w * z + x * y)
+            cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+            return float(np.arctan2(siny_cosp, cosy_cosp))
+        except Exception:
+            return 0.0
 
 
 # Os robos abaixo foram mantidos apenas como legado de locomocao terrestre.

@@ -15,6 +15,7 @@
 
 import os
 import numpy as np
+import math
 from pathlib import Path
 
 import isaacsim.core.utils.prims as prim_utils
@@ -324,6 +325,7 @@ def _insert_dataset_object_into_scene(
     scene_root_path: str,
     dataset_object_usd: str,
     reflectivity: float,
+    config: Config | None = None,
 ) -> str | None:
     asset_entry = _dataset_object_entry_from_path(dataset_object_usd)
     if asset_entry is None:
@@ -343,7 +345,18 @@ def _insert_dataset_object_into_scene(
     prim_path = f"{scene_root_path}/dataset_objects/{safe_name}"
     prim_utils.delete_prim(prim_path)
     add_reference_to_stage(asset_entry["path"], prim_path)
-    _set_prim_world_translation(prim_path, center)
+    cfg_pos = getattr(config, "dataset_object_position", None)
+    if (
+        cfg_pos is not None
+        and hasattr(cfg_pos, "__len__")
+        and len(cfg_pos) == 3
+        and all(math.isfinite(float(v)) for v in cfg_pos)
+    ):
+        position = np.array([float(v) for v in cfg_pos], dtype=np.float32)
+    else:
+        position = center
+
+    _set_prim_world_translation(prim_path, position)
     _enable_collisions_for_subtree(prim_path)
     _mark_dataset_object_for_annotations(prim_path, asset_entry, reflectivity=float(reflectivity))
     return prim_path
@@ -388,6 +401,7 @@ def load_scenario(path: str) -> Scenario:
             "/World/scene",
             str(getattr(config, "dataset_object_usd", "")),
             float(getattr(config, "dataset_object_reflectivity", 1.5)),
+            config=config,
         )
     robot = robot_type.build("/World/robot")
     chase_camera_path = robot.build_chase_camera()
@@ -439,6 +453,7 @@ async def build_scenario_from_config(config: Config):
             "/World/scene",
             str(getattr(config, "dataset_object_usd", "")),
             float(getattr(config, "dataset_object_reflectivity", 1.5)),
+            config=config,
         )
     if not is_underwater_robot:
         objects.GroundPlane("/World/ground_plane", visible=False)

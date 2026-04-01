@@ -51,7 +51,7 @@ except Exception as exc:
         RuntimeWarning,
     )
 
-from omni.ext.patosim.utils.path_utils import PathHelper, vector_angle
+from omni.ext.patosim.utils.path_utils import PathHelper, PathHelper3D, vector_angle
 from omni.ext.patosim.utils.registry import Registry
 from omni.ext.patosim.common import Module, Buffer
 from omni.ext.patosim.robots import Robot
@@ -215,7 +215,7 @@ class OceanSimROVWaypointScenario(Scenario):
         )
         env_waypoint_path = os.environ.get("PATOSIM_ROV_WAYPOINTS", "").strip()
         self._waypoint_path = Path(env_waypoint_path) if env_waypoint_path else self._default_waypoint_path
-        self._waypoints: list[np.ndarray] = []
+        self._waypoints = np.empty((0, 7), dtype=np.float32)
         self._default_position = np.asarray(
             getattr(self.robot, "spawn_translation", getattr(self.robot, "initial_translation", (-2.0, 0.0, -0.8))),
             dtype=np.float32,
@@ -234,9 +234,33 @@ class OceanSimROVWaypointScenario(Scenario):
         return loaded
 
     def reset(self):
-        self._waypoints = self._load_waypoints()
+        path = self._waypoint_path if self._waypoint_path.exists() else self._default_waypoint_path
+        try:
+            self._waypoints = np.loadtxt(path, dtype=np.float32)
+        except Exception:
+            self._waypoints = np.empty((0, 7), dtype=np.float32)
+
+        if getattr(self._waypoints, "ndim", 0) == 1 and self._waypoints.size > 0:
+            self._waypoints = self._waypoints.reshape(1, -1)
+        if getattr(self._waypoints, "size", 0) > 0 and self._waypoints.shape[1] < 7:
+            warnings.warn(
+                f"[OceanSimROVWaypointScenario] Waypoint file has {self._waypoints.shape[1]} "
+                f"columns, expected 7 (x y z qx qy qz qw). Ignoring file.",
+                RuntimeWarning,
+            )
+            self._waypoints = np.empty((0, 7), dtype=np.float32)
+        if getattr(self._waypoints, "size", 0) > 0:
+            invalid = ~np.isfinite(self._waypoints).all(axis=1)
+            if np.any(invalid):
+                warnings.warn(
+                    f"[OceanSimROVWaypointScenario] Removed {int(np.sum(invalid))} "
+                    f"waypoints with NaN/Inf values.",
+                    RuntimeWarning,
+                )
+                self._waypoints = self._waypoints[~invalid]
+
         self.robot.action.set_value(np.zeros(6, dtype=np.float32))
-        if self._waypoints and hasattr(self.robot, "set_pose_3d"):
+        if len(self._waypoints) > 0 and hasattr(self.robot, "set_pose_3d"):
             first = self._waypoints[0]
             self.robot.set_pose_3d(first[:3], first[3:7])
         elif hasattr(self.robot, "set_pose_3d"):
@@ -245,8 +269,9 @@ class OceanSimROVWaypointScenario(Scenario):
     def step(self, step_size: float) -> bool:
         self.robot.action.set_value(np.zeros(6, dtype=np.float32))
 
-        if self._waypoints:
-            waypoint = self._waypoints.pop(0)
+        if len(self._waypoints) > 0:
+            waypoint = self._waypoints[0]
+            self._waypoints = self._waypoints[1:]
             if hasattr(self.robot, "set_pose_3d"):
                 self.robot.set_pose_3d(waypoint[:3], waypoint[3:7])
         else:
@@ -254,6 +279,219 @@ class OceanSimROVWaypointScenario(Scenario):
 
         self.robot.update_state()
         return True
+
+
+@SCENARIOS.register()
+class OceanSimROVPathFollowingScenario(Scenario):
+    """
+    Navegação autônoma 3D para OceanSimROVRobot.
+
+    Gera caminhos aleatórios 3D usando o planejador BFS 2D para XY e
+    interpolação linear de Z para profundidade. Usa pure-pursuit 3D para
+    calcular comandos de velocidade em body frame [Fx, Fy, Fz, 0, 0, Tz].
+    """
+
+    def __init__(self, robot, occupancy_map):
+        super().__init__(robot, occupancy_map)
+        self.target_path = Buffer()   # (N, 3) XYZ world float32
+        self._helper = None           # PathHelper3D
+        self._sim_time_s = 0.0
+        self._last_replan_time_s = -1e9
+        self._replan_cooldown_s = 1.5
+        self._planner_min_goal_distance_m = 2.0
+
+        # Parâmetros de controle — ajustáveis pela UI de Path Planning
+        self.rov_path_xy_speed = 0.75    # m/s horizontal
+        self.rov_path_z_speed = 0.3      # m/s vertical
+        self.rov_path_yaw_gain = 1.2     # rad/s por rad de erro de heading
+        self.rov_path_lookahead = 1.5    # m de lookahead
+        self.rov_path_goal_threshold = 0.5  # m para considerar goal atingido
+        self.rov_path_z_min = -5.0
+        self.rov_path_z_max = -0.3
+        self.is_alive = True
+
+    @staticmethod
+    def _wrap_angle(angle: float) -> float:
+        while angle > math.pi:
+            angle -= 2.0 * math.pi
+        while angle < -math.pi:
+            angle += 2.0 * math.pi
+        return angle
+
+    def _can_replan_now(self) -> bool:
+        return (self._sim_time_s - self._last_replan_time_s) >= self._replan_cooldown_s
+
+    def _try_replan(self) -> bool:
+        if not self._can_replan_now():
+            return False
+        ok = self.set_random_target_path()
+        self._last_replan_time_s = self._sim_time_s
+        return ok
+
+    def _choose_endpoint(self, output) -> tuple:
+        """Prefere endpoints mais distantes do start."""
+        visited = output.visited
+        ys, xs = np.where(visited != 0)
+        if len(ys) == 0:
+            raise RuntimeError("Sem endpoints alcançáveis do planejador.")
+        dists = output.distance_to_start[ys, xs]
+        min_px = max(4.0, self._planner_min_goal_distance_m /
+                     max(getattr(self.occupancy_map, "resolution", 0.25), 1e-6))
+        valid = dists >= min_px
+        if np.any(valid):
+            ys, xs, dists = ys[valid], xs[valid], dists[valid]
+        order = np.argsort(dists)
+        tail_start = int(0.6 * len(order))
+        candidates = order[tail_start:] if tail_start < len(order) else order
+        choice = int(np.random.choice(candidates))
+        return int(ys[choice]), int(xs[choice])
+
+    def set_random_target_path(self) -> bool:
+        """Gera um caminho 3D aleatório a partir da pose atual."""
+        try:
+            pose = self.robot.get_pose_3d()
+            pos = np.asarray(pose.position, dtype=np.float32)
+        except Exception:
+            return False
+        current_z = float(pos[2])
+
+        start_px = self.occupancy_map.world_to_pixel_numpy(
+            np.array([[float(pos[0]), float(pos[1])]], dtype=np.float32)
+        )
+        start = (int(start_px[0, 1]), int(start_px[0, 0]))
+        freespace = self.occupancy_map.freespace_mask()
+
+        path_3d = None
+        try:
+            if _generate_paths is not None:
+                output = _generate_paths(start, freespace)
+                end = self._choose_endpoint(output)
+                path_px = output.unroll_path(end)[:, ::-1]  # (row,col) → (col,row) = (x,y)
+                path_xy = self.occupancy_map.pixel_to_world_numpy(path_px)
+                n = len(path_xy)
+                target_z = float(np.random.uniform(
+                    max(current_z - 1.5, self.rov_path_z_min),
+                    min(current_z + 1.5, self.rov_path_z_max),
+                ))
+                z_profile = np.linspace(current_z, target_z, n, dtype=np.float32)
+                path_3d = np.column_stack(
+                    [path_xy.astype(np.float32), z_profile]
+                )
+        except Exception as exc:
+            warnings.warn(f"[OceanSimROVPathFollowingScenario] erro no planejador: {exc}", RuntimeWarning)
+
+        if path_3d is None or len(path_3d) < 2:
+            # Fallback: linha reta à frente
+            try:
+                yaw = self.robot.get_yaw_from_orientation()
+            except Exception:
+                yaw = 0.0
+            fwd = np.array([math.cos(yaw), math.sin(yaw), -0.3], dtype=np.float32)
+            path_3d = np.asarray([pos, pos + 2.0 * fwd], dtype=np.float32)
+
+        self.target_path.set_value(path_3d)
+        self._helper = PathHelper3D(path_3d)
+        return True
+
+    def reset(self):
+        self.robot.action.set_value(np.zeros(6, dtype=np.float32))
+        self._helper = None
+        self._sim_time_s = 0.0
+        self._last_replan_time_s = -1e9
+        try:
+            self.robot.post_reset()
+        except Exception:
+            pass
+        self.set_random_target_path()
+        self.is_alive = True
+
+    def step(self, step_size: float) -> bool:
+        self._sim_time_s += float(step_size)
+        try:
+            self.robot.update_state()
+        except Exception:
+            pass
+
+        path = self.target_path.get_value()
+        if path is None or self._helper is None or len(path) < 2:
+            self._try_replan()
+            self.robot.action.set_value(np.zeros(6, dtype=np.float32))
+            self.robot.write_action(step_size)
+            return self.is_alive
+
+        try:
+            pose = self.robot.get_pose_3d()
+            pt_robot = np.asarray(pose.position, dtype=np.float32)
+        except Exception:
+            self.robot.write_action(step_size)
+            return self.is_alive
+
+        # Checar goal
+        goal = np.asarray(path[-1], dtype=np.float32)
+        if float(np.linalg.norm(pt_robot - goal)) < self.rov_path_goal_threshold:
+            self._try_replan()
+            self.robot.write_action(step_size)
+            return self.is_alive
+
+        # Lookahead
+        _, s_near, _, _ = self._helper.find_nearest(pt_robot)
+        pt_target = self._helper.get_point_by_distance(
+            s_near + self.rov_path_lookahead
+        )
+
+        # Erros
+        error_world = pt_target - pt_robot
+        error_xy = error_world[:2]
+        error_z = float(error_world[2])
+
+        try:
+            yaw_current = self.robot.get_yaw_from_orientation()
+        except Exception:
+            yaw_current = 0.0
+
+        yaw_target = float(np.arctan2(float(error_xy[1]), float(error_xy[0])))
+        yaw_error = self._wrap_angle(yaw_target - yaw_current)
+
+        # Velocidade em body frame
+        cos_y = math.cos(yaw_current)
+        sin_y = math.sin(yaw_current)
+        xy_mag = float(np.linalg.norm(error_xy))
+
+        if xy_mag > 1e-4:
+            ex_b = cos_y * float(error_xy[0]) + sin_y * float(error_xy[1])
+            ey_b = -sin_y * float(error_xy[0]) + cos_y * float(error_xy[1])
+            vx = self.rov_path_xy_speed * (ex_b / xy_mag)
+            vy = self.rov_path_xy_speed * (ey_b / xy_mag)
+        else:
+            vx = vy = 0.0
+
+        vz = float(np.clip(
+            error_z / max(abs(error_z), 1e-4) * self.rov_path_z_speed,
+            -self.rov_path_z_speed,
+            self.rov_path_z_speed,
+        ))
+        # Velocidade → force estimada (linear drag coefficient)
+        drag_xy = 10.0   # N·s/m (aprox. drag do BlueROV em XY)
+        drag_z = 12.0    # N·s/m (drag em Z é maior)
+        drag_yaw = 1.0   # N·m·s/rad
+
+        rov_angular_speed = float(getattr(self.robot, "teleop_angular_speed_gain", 0.9))
+        yaw_rate = float(np.clip(
+            self.rov_path_yaw_gain * yaw_error, -rov_angular_speed, rov_angular_speed
+        ))
+
+        action = np.array([
+            drag_xy * vx,   # Fx
+            drag_xy * vy,   # Fy
+            drag_z * vz,    # Fz
+            0.0,            # Tx (roll — manter neutro)
+            0.0,            # Ty (pitch — manter neutro)
+            drag_yaw * yaw_rate,  # Tz
+        ], dtype=np.float32)
+
+        self.robot.action.set_value(action)
+        self.robot.write_action(step_size)
+        return self.is_alive
 
 
 #Naofunciona bem ainda
@@ -385,7 +623,10 @@ class RandomPathFollowingScenarioRearSteer(Scenario):
         for p in out[1:]:
             if np.linalg.norm(p - filtered[-1]) > 0.02:
                 filtered.append(p)
-        return np.asarray(filtered, dtype=np.float32)
+        result = np.asarray(filtered, dtype=np.float32)
+        if result.shape[0] < 2:
+            return path_world
+        return result
 
     def _choose_endpoint(self, output) -> Tuple[int, int]:
         visited = output.visited
@@ -1227,7 +1468,37 @@ class RandomPathFollowingScenario(Scenario):
         self.pose_sampler = pose_samplers.UniformPoseSampler()
         self.is_alive = True
         self.target_path = Buffer()
+        self._helper = None
         self.collision_occupancy_map = occupancy_map.buffered(robot.occupancy_map_collision_radius)
+        self._sim_time_s = 0.0
+        self._last_replan_time_s = -1e9
+        self._replan_cooldown_s = 0.5
+
+    def _smooth_path(self, path_world: np.ndarray) -> np.ndarray:
+        """Single-pass smoothing. Mirrors the RearSteer implementation."""
+        if path_world is None or len(path_world) < 3:
+            return path_world
+        out = path_world.astype(np.float32)
+        refined = [out[0]]
+        for i in range(len(out) - 1):
+            p, q = out[i], out[i + 1]
+            refined.append(0.75 * p + 0.25 * q)
+            refined.append(0.25 * p + 0.75 * q)
+        refined.append(out[-1])
+        out = np.asarray(refined, dtype=np.float32)
+        filtered = [out[0]]
+        for p in out[1:]:
+            if np.linalg.norm(p - filtered[-1]) > 0.02:
+                filtered.append(p)
+        result = np.asarray(filtered, dtype=np.float32)
+        return result if result.shape[0] >= 2 else path_world
+
+    def _try_replan(self) -> bool:
+        if (self._sim_time_s - self._last_replan_time_s) < self._replan_cooldown_s:
+            return False
+        self.set_random_target_path()
+        self._last_replan_time_s = self._sim_time_s
+        return True
 
     def set_random_target_path(self):
         current_pose = self.robot.get_pose_2d()
@@ -1237,39 +1508,67 @@ class RandomPathFollowingScenario(Scenario):
         ]))
         freespace = self.buffered_occupancy_map.freespace_mask()
 
-        start = (start_px[0, 1], start_px[0, 0])
+        start = (int(start_px[0, 1]), int(start_px[0, 0]))
 
-        output = generate_paths(start, freespace)
-        end = output.sample_random_end_point()
-        path = output.unroll_path(end)
-        path = path[:, ::-1] # y,x -> x,y coordinates
-        path = self.occupancy_map.pixel_to_world_numpy(path)
+        path = None
+        try:
+            if _generate_paths is not None:
+                output = _generate_paths(start, freespace)
+                end = output.sample_random_end_point()
+                path_px = output.unroll_path(end)
+                path_px = path_px[:, ::-1]
+                path = self.occupancy_map.pixel_to_world_numpy(path_px)
+            elif hasattr(self.robot, "plan_path_from_occupancy_map"):
+                path_list = self.robot.plan_path_from_occupancy_map(self.occupancy_map)
+                path = np.asarray(path_list, dtype=np.float32)
+        except Exception as exc:
+            warnings.warn(f"[RandomPathFollowingScenario] path generation failed: {exc}", RuntimeWarning)
+            path = None
+
+        if path is None or len(path) < 2:
+            forward = np.array([math.cos(current_pose.theta), math.sin(current_pose.theta)])
+            origin = np.array([current_pose.x, current_pose.y], dtype=np.float32)
+            path = np.asarray([origin, origin + 1.0 * forward], dtype=np.float32)
+
+        path = self._smooth_path(path)
         self.target_path.set_value(path)
-        self.target_path_helper = PathHelper(path)
+        self._helper = PathHelper(path)
 
     def reset(self):
         self.robot.action.set_value(np.zeros(2))
         pose = self.pose_sampler.sample(self.buffered_occupancy_map)
         self.robot.set_pose_2d(pose)
+        self._sim_time_s = 0.0
+        self._last_replan_time_s = -1e9
         self.set_random_target_path()
         self.is_alive = True
     
     def step(self, step_size: float):
 
+        self._sim_time_s += float(step_size)
         self.update_state()
         target_path = self.target_path.get_value()
         current_pose = self.robot.get_pose_2d()
 
-        if not self.collision_occupancy_map.check_world_point_in_bounds(current_pose):
-            self.is_alive = False
+        if self._helper is None or self.target_path.get_value() is None:
+            self.set_random_target_path()
+            self.robot.write_action(step_size)
             return self.is_alive
-        elif not self.collision_occupancy_map.check_world_point_in_freespace(current_pose):
-            self.is_alive = False
+
+        if not self.collision_occupancy_map.check_world_point_in_bounds(current_pose):
+            self._try_replan()
+            self.robot.action.set_value(np.zeros(2))
+            self.robot.write_action(step_size)
+            return self.is_alive
+        if not self.collision_occupancy_map.check_world_point_in_freespace(current_pose):
+            self._try_replan()
+            self.robot.action.set_value(np.zeros(2))
+            self.robot.write_action(step_size)
             return self.is_alive
     
         pt_robot = np.array([current_pose.x, current_pose.y])
-        pt_path, pt_path_length, _, _ = self.target_path_helper.find_nearest(pt_robot)
-        pt_target = self.target_path_helper.get_point_by_distance(distance=
+        pt_path, pt_path_length, _, _ = self._helper.find_nearest(pt_robot)
+        pt_target = self._helper.get_point_by_distance(distance=
             pt_path_length + self.robot.path_following_target_point_offset_meters
         )
 
@@ -1281,7 +1580,12 @@ class RandomPathFollowingScenario(Scenario):
         else:
             vec_robot_unit = np.array([np.cos(current_pose.theta), np.sin(current_pose.theta)])
             vec_target = (pt_target - pt_robot)
-            vec_target_unit = vec_target / np.sqrt(np.sum(vec_target**2))
+            norm = float(np.sqrt(np.sum(vec_target**2)))
+            if norm < 1e-6:
+                self.set_random_target_path()
+                self.robot.write_action(step_size)
+                return self.is_alive
+            vec_target_unit = vec_target / norm
             d_theta = vector_angle(vec_robot_unit, vec_target_unit)
 
             if abs(d_theta) > self.robot.path_following_forward_angle_threshold:

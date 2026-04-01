@@ -23,6 +23,7 @@ class Config:
     enable_rov_sonar: bool = True
     enable_rov_dvl: bool = True
     enable_rov_barometer: bool = True
+    dataset_object_position: tuple = (0.0, 0.0, 0.0)
 
     def to_json(self):
         return json.dumps(asdict(self), indent=2)

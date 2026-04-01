@@ -115,3 +115,57 @@ class PathHelper:
 
         
         return min_pt, min_pt_dist_along_path, min_pt_seg, min_pt_dist_to_seg
+
+
+class PathHelper3D:
+    """PathHelper para caminhos XYZ 3D (array N×3 float32)."""
+
+    def __init__(self, points: np.ndarray):
+        assert points.ndim == 2 and points.shape[1] >= 3, \
+            "PathHelper3D requer array (N, 3)"
+        self.points = np.asarray(points[:, :3], dtype=np.float32)
+        self._cumulative_distances = [0.0]
+        for i in range(1, len(self.points)):
+            d = float(np.linalg.norm(self.points[i] - self.points[i - 1]))
+            self._cumulative_distances.append(self._cumulative_distances[-1] + d)
+
+    @property
+    def total_length(self) -> float:
+        return self._cumulative_distances[-1]
+
+    def find_nearest(self, point: np.ndarray):
+        """Retorna (ponto_mais_proximo_3d, dist_ao_longo_caminho, (seg_i, seg_j), dist_ao_seg)."""
+        pt = np.asarray(point[:3], dtype=np.float32)
+        best_dist = float("inf")
+        best_s = 0.0
+        best_pt = self.points[0].copy()
+        best_seg = (0, min(1, len(self.points) - 1))
+        for i in range(len(self.points) - 1):
+            a, b = self.points[i], self.points[i + 1]
+            ab = b - a
+            ab_len_sq = float(np.dot(ab, ab))
+            t = float(np.clip(np.dot(pt - a, ab) / ab_len_sq, 0.0, 1.0)) \
+                if ab_len_sq > 1e-12 else 0.0
+            proj = a + t * ab
+            dist = float(np.linalg.norm(pt - proj))
+            if dist < best_dist:
+                best_dist = dist
+                seg_len = float(np.linalg.norm(ab))
+                best_s = self._cumulative_distances[i] + t * seg_len
+                best_pt = proj
+                best_seg = (i, i + 1)
+        return best_pt, best_s, best_seg, best_dist
+
+    def get_point_by_distance(self, distance: float) -> np.ndarray:
+        total = self._cumulative_distances[-1]
+        distance = float(np.clip(distance, 0.0, total))
+        for i in range(len(self._cumulative_distances) - 1):
+            if self._cumulative_distances[i + 1] >= distance - 1e-9:
+                seg_start = self._cumulative_distances[i]
+                seg_end = self._cumulative_distances[i + 1]
+                seg_len = seg_end - seg_start
+                if seg_len < 1e-12:
+                    return self.points[i].copy()
+                t = (distance - seg_start) / seg_len
+                return self.points[i] + t * (self.points[i + 1] - self.points[i])
+        return self.points[-1].copy()

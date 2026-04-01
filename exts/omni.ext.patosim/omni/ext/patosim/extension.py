@@ -82,7 +82,11 @@ class PatoSimExtension(omni.ext.IExt):
         self.step: int = 0
         self.is_recording: bool = False
         self.recording_enabled: bool = False
-        self.deferred_sensor_processing_enabled: bool = True
+        self.recording_count_label = None
+        self.recording_dir_label = None
+        self.recording_name_label = None
+        self.recording_step_label = None
+        self.deferred_sensor_processing_enabled: bool = True  # Always on; replay handles sensor data
         self.disable_pointcloud_during_recording: bool = True
         self.disable_previews_during_recording: bool = True
         self.record_common_interval: int = 2
@@ -129,7 +133,7 @@ class PatoSimExtension(omni.ext.IExt):
         self._record_pointcloud_metadata = True
 
         # Visualization window for occupancy map
-        self._visualize_window = omni.ui.Window("PatoSim - Occupancy Map", width=300, height=300)
+        self._visualize_window = omni.ui.Window("PatoSim - Occupancy Map", width=300, height=340)
         try:
             self._visualize_window.visible = True
         except Exception:
@@ -142,7 +146,7 @@ class PatoSimExtension(omni.ext.IExt):
         self._sensor_preview_target_width = 256
         self._sensor_preview_target_height = 144
         self._lidar_preview_target_size = 180
-        self._sensor_preview_window = omni.ui.Window("PatoSim - Sensor Preview", width=900, height=520)
+        self._sensor_preview_window = omni.ui.Window("PatoSim - Sensor Preview", width=900, height=580)
         try:
             self._sensor_preview_window.visible = self._sensor_preview_enabled
         except Exception:
@@ -151,7 +155,7 @@ class PatoSimExtension(omni.ext.IExt):
             self._sensor_preview_frame = ui.Frame()
             self._sensor_preview_frame.set_build_fn(self._build_sensor_preview_frame)
 
-        self._lidar_preview_window = omni.ui.Window("PatoSim - LiDAR Preview", width=280, height=360)
+        self._lidar_preview_window = omni.ui.Window("PatoSim - LiDAR Preview", width=300, height=440)
         try:
             self._lidar_preview_window.visible = False
         except Exception:
@@ -159,7 +163,7 @@ class PatoSimExtension(omni.ext.IExt):
         with self._lidar_preview_window.frame:
             self._lidar_preview_frame = ui.Frame()
             self._lidar_preview_frame.set_build_fn(self._build_lidar_preview_frame)
-        self._path_planning_window = omni.ui.Window("PatoSim - Path Planning", width=340, height=420)
+        self._path_planning_window = omni.ui.Window("PatoSim - Path Planning", width=340, height=380)
         try:
             self._path_planning_window.visible = False
         except Exception:
@@ -211,6 +215,33 @@ class PatoSimExtension(omni.ext.IExt):
         self._record_common_interval_model = ui.SimpleIntModel(self.record_common_interval)
         self._record_pointcloud_interval_model = ui.SimpleIntModel(self._record_pointcloud_interval)
         self._record_pointcloud_metadata_model = ui.SimpleBoolModel(self._record_pointcloud_metadata)
+        try:
+            self._sensor_preview_toggle_model.add_value_changed_fn(
+                self._on_sensor_preview_toggle_changed
+            )
+            self._lidar_preview_toggle_model.add_value_changed_fn(
+                self._on_lidar_preview_toggle_changed
+            )
+            self._deferred_sensor_processing_model.add_value_changed_fn(
+                self._on_deferred_sensor_processing_changed
+            )
+            self._disable_previews_during_recording_model.add_value_changed_fn(
+                self._on_disable_previews_during_recording_changed
+            )
+            self._record_pointcloud_toggle_model.add_value_changed_fn(
+                self._on_record_pointcloud_toggle_changed
+            )
+            self._record_common_interval_model.add_value_changed_fn(
+                self._on_record_common_interval_changed
+            )
+            self._record_pointcloud_interval_model.add_value_changed_fn(
+                self._on_record_pointcloud_params_changed
+            )
+            self._record_pointcloud_metadata_model.add_value_changed_fn(
+                self._on_record_pointcloud_params_changed
+            )
+        except Exception:
+            pass
         self._path_planning_models = {
             "path_following_speed": ui.SimpleFloatModel(2.0),
             "path_following_angular_gain": ui.SimpleFloatModel(1.4),
@@ -246,12 +277,13 @@ class PatoSimExtension(omni.ext.IExt):
         self._dataset_object_assets = []
         self._dataset_object_selected_index = 0
         self._dataset_object_status_text = "Dataset object disabled."
+        self._replay_config_status_text = ""
         try:
             self._dataset_object_assets = self._scan_dataset_object_assets()
         except Exception:
             self._dataset_object_assets = []
 
-        self._dataset_object_window = omni.ui.Window("PatoSim - Dataset Object", width=440, height=260)
+        self._dataset_object_window = omni.ui.Window("PatoSim - Dataset Object", width=440, height=220)
         try:
             self._dataset_object_window.visible = False
         except Exception:
@@ -260,13 +292,67 @@ class PatoSimExtension(omni.ext.IExt):
             self._dataset_object_frame = ui.Frame()
             self._dataset_object_frame.set_build_fn(self._build_dataset_object_frame)
 
+        self._robot_setup_window = omni.ui.Window("PatoSim - Robot Setup", width=400, height=420)
+        try:
+            self._robot_setup_window.visible = False
+        except Exception:
+            pass
+        with self._robot_setup_window.frame:
+            self._robot_setup_frame = ui.Frame()
+            self._robot_setup_frame.set_build_fn(self._build_robot_setup_frame)
+
+        self._recording_settings_window = omni.ui.Window("PatoSim - Recording Settings", width=440, height=280)
+        try:
+            self._recording_settings_window.visible = False
+        except Exception:
+            pass
+        with self._recording_settings_window.frame:
+            self._recording_settings_frame = ui.Frame()
+            self._recording_settings_frame.set_build_fn(self._build_recording_settings_frame)
+
+        self._replay_config_window = omni.ui.Window("PatoSim - Replay Config", width=420, height=240)
+        try:
+            self._replay_config_window.visible = False
+        except Exception:
+            pass
+        with self._replay_config_window.frame:
+            self._replay_config_frame = ui.Frame()
+            self._replay_config_frame.set_build_fn(self._build_replay_config_frame)
+
+        self._window_manager_window = omni.ui.Window("PatoSim - Window Manager", width=360, height=280)
+        try:
+            self._window_manager_window.visible = False
+        except Exception:
+            pass
+        with self._window_manager_window.frame:
+            self._window_manager_frame = ui.Frame()
+            self._window_manager_frame.set_build_fn(self._build_window_manager_frame)
+
+        self._occ_map_window_toggle_model = ui.SimpleBoolModel(True)
+        self._robot_setup_window_toggle_model = ui.SimpleBoolModel(False)
+        self._recording_settings_window_toggle_model = ui.SimpleBoolModel(False)
+        self._path_planning_window_toggle_model = ui.SimpleBoolModel(False)
+        self._dataset_object_window_toggle_model = ui.SimpleBoolModel(False)
+        self._replay_config_window_toggle_model = ui.SimpleBoolModel(False)
+        self._window_manager_window_toggle_model = ui.SimpleBoolModel(False)
+        try:
+            self._occ_map_window_toggle_model.add_value_changed_fn(self._on_occ_map_window_toggle_changed)
+            self._robot_setup_window_toggle_model.add_value_changed_fn(self._on_robot_setup_window_toggle_changed)
+            self._recording_settings_window_toggle_model.add_value_changed_fn(self._on_recording_settings_window_toggle_changed)
+            self._path_planning_window_toggle_model.add_value_changed_fn(self._on_path_planning_window_toggle_changed)
+            self._dataset_object_window_toggle_model.add_value_changed_fn(self._on_dataset_object_window_toggle_changed)
+            self._replay_config_window_toggle_model.add_value_changed_fn(self._on_replay_config_window_toggle_changed)
+            self._window_manager_window_toggle_model.add_value_changed_fn(self._on_window_manager_window_toggle_changed)
+        except Exception:
+            pass
+
         # discover available USD worlds in the working directory and DATA_DIR
         try:
             self._available_worlds = self._scan_worlds()
         except Exception:
             self._available_worlds = []
 
-        self._teleop_window = omni.ui.Window("PatoSim", width=420, height=760)
+        self._teleop_window = omni.ui.Window("PatoSim", width=420, height=340)
 
         with self._teleop_window.frame:
             self._build_main_ui_frame()
@@ -300,15 +386,14 @@ class PatoSimExtension(omni.ext.IExt):
         self.clear_recording()
 
     def _build_main_ui_frame(self):
-        with ui.VStack():
-            with ui.VStack():
+        with ui.ScrollingFrame():
+            with ui.VStack(height=0, spacing=4):
                 self._build_scene_selection_section()
-                self._build_preview_and_tools_section()
-                self._build_oceansim_params_section()
-                ui.Button("Build", clicked_fn=self.build_scenario)
-                self._build_quick_params_section()
-
-            with ui.VStack():
+                ui.Spacer(height=4)
+                self._build_primary_controls_section()
+                ui.Spacer(height=4)
+                self._build_tool_launcher_section()
+                ui.Spacer(height=4)
                 self._build_recording_status_section()
 
     def _build_scene_selection_section(self):
@@ -316,6 +401,13 @@ class PatoSimExtension(omni.ext.IExt):
             ui.Label("USD Path / URL")
             self.scene_usd_field_string_model = ui.SimpleStringModel()
             self.scene_usd_field = ui.StringField(model=self.scene_usd_field_string_model, height=25)
+
+        with ui.HStack():
+            ui.Spacer()
+            ui.Button(
+                "Use MHL Scene",
+                clicked_fn=lambda: self.scene_usd_field_string_model.set_value(dev_scene_path),
+            )
 
         with ui.HStack():
             ui.Label("Scenario Type")
@@ -337,38 +429,37 @@ class PatoSimExtension(omni.ext.IExt):
             except Exception:
                 pass
 
-    def _build_preview_and_tools_section(self):
+    def _build_primary_controls_section(self):
         with ui.HStack(height=24):
             ui.Label("Camera Preview")
             ui.CheckBox(model=self._sensor_preview_toggle_model, width=22)
-            try:
-                self._sensor_preview_toggle_model.add_value_changed_fn(
-                    self._on_sensor_preview_toggle_changed
-                )
-            except Exception:
-                pass
-            ui.Spacer(width=12)
-            ui.Label("LiDAR Preview")
-            ui.CheckBox(model=self._lidar_preview_toggle_model, width=22)
-            try:
-                self._lidar_preview_toggle_model.add_value_changed_fn(
-                    self._on_lidar_preview_toggle_changed
-                )
-            except Exception:
-                pass
 
         with ui.HStack(height=26):
+            ui.Button("Build", clicked_fn=self.build_scenario)
+            ui.Button("Start Recording", clicked_fn=self.enable_recording)
+            ui.Button("Stop Recording", clicked_fn=self.disable_recording)
+
+    def _build_tool_launcher_section(self):
+        with ui.HStack(height=26):
+            ui.Button("Robot Setup", clicked_fn=self._open_robot_setup_window)
+            ui.Button("Recording Settings", clicked_fn=self._open_recording_settings_window)
+            ui.Button("Window Manager", clicked_fn=self._open_window_manager_window)
+        with ui.HStack(height=26):
             self._path_planning_button = ui.Button(
-                "Path Planning Settings",
+                "Path Planning",
                 clicked_fn=self._open_path_planning_window,
             )
-            ui.Button(
-                "Dataset Object Menu",
-                clicked_fn=self._open_dataset_object_window,
-            )
+            ui.Button("Dataset Object", clicked_fn=self._open_dataset_object_window)
+            ui.Button("Replay Config", clicked_fn=self._open_replay_config_window)
 
     def _build_oceansim_params_section(self):
-        with ui.Frame():
+        if not self._is_oceansim_robot_selected():
+            with ui.VStack(spacing=4, height=0):
+                ui.Label("Parametros do ROV / OceanSim")
+                ui.Label("Disponivel apenas para o robot OceanSimROVRobot.")
+            return
+
+        with ui.VStack(spacing=4, height=0):
             ui.Label("OceanSim Params")
             with ui.VStack(spacing=6):
                 with ui.HStack():
@@ -383,14 +474,9 @@ class PatoSimExtension(omni.ext.IExt):
                     ui.Spacer(width=12)
                     ui.Label("Ang Speed", width=92)
                     ui.FloatDrag(model=self._oceansim_angular_speed_model, min=0.05, max=5.0)
-                with ui.HStack():
+                with ui.HStack(height=22):
                     ui.Label("DVL Debug", width=92)
                     ui.CheckBox(model=self._oceansim_dvl_debug_model, width=22)
-                    ui.Spacer(width=12)
-                    ui.Button(
-                        "Use MHL Scene",
-                        clicked_fn=lambda: self.scene_usd_field_string_model.set_value(dev_scene_path),
-                    )
                 with ui.HStack():
                     ui.Label("Sonar Refl.", width=92)
                     ui.CheckBox(model=self._oceansim_apply_sonar_reflectivity_model, width=22)
@@ -411,118 +497,111 @@ class PatoSimExtension(omni.ext.IExt):
                     ui.CheckBox(model=self._oceansim_barometer_model, width=22)
                     ui.Label("Barometer")
 
+    def _build_robot_setup_frame(self):
+        with ui.ScrollingFrame():
+            with ui.VStack(spacing=8, height=0):
+                ui.Label("Robot Setup")
+                self._build_oceansim_params_section()
+                with ui.HStack(height=26):
+                    ui.Button("Enable Cameras", clicked_fn=self._enable_all_cameras)
+                    ui.Button("Disable Cameras", clicked_fn=self._disable_all_cameras)
+                with ui.HStack(height=26):
+                    ui.Button("Enable LiDAR", clicked_fn=self._enable_all_lidar)
+                    ui.Button("Disable LiDAR", clicked_fn=self._disable_all_lidar)
+
     def _ensure_pointcloud_format_models(self):
         # Keep a valid fallback even if the combo-box cannot be created in the UI.
-        self._pc_format_items = ["npy", "ply", "pcd"]
-        self._pc_format_index = 0
+        if not hasattr(self, "_pc_format_items"):
+            self._pc_format_items = ["npy", "ply", "pcd"]
+        if not hasattr(self, "_pc_format_index"):
+            self._pc_format_index = 0
 
     def _build_quick_params_section(self):
         self._ensure_pointcloud_format_models()
 
-        with ui.Frame():
-            ui.Label("Quick Params")
+        with ui.VStack(spacing=4, height=0):
+            ui.Label("Gravacao")
             with ui.VStack(spacing=6):
-                with ui.HStack():
-                    ui.Label("Deferred Sensor Processing", width=170)
-                    ui.CheckBox(model=self._deferred_sensor_processing_model, width=22)
-                    try:
-                        self._deferred_sensor_processing_model.add_value_changed_fn(
-                            self._on_deferred_sensor_processing_changed
-                        )
-                    except Exception:
-                        pass
+                with ui.VStack(spacing=2, height=0):
+                    ui.Label("Modo: Gravacao leve (apenas pose e controle)")
+                    ui.Label(
+                        "Imagens, depth, segmentacao e nuvem de pontos sao gerados no replay offline.",
+                        word_wrap=True,
+                    )
                 with ui.HStack():
                     ui.Label("Pause Previews While Recording", width=170)
                     ui.CheckBox(model=self._disable_previews_during_recording_model, width=22)
-                    try:
-                        self._disable_previews_during_recording_model.add_value_changed_fn(
-                            self._on_disable_previews_during_recording_changed
-                        )
-                    except Exception:
-                        pass
-                with ui.HStack():
-                    ui.Label("Record PointClouds", width=170)
-                    ui.CheckBox(model=self._record_pointcloud_toggle_model, width=22)
-                    try:
-                        self._record_pointcloud_toggle_model.add_value_changed_fn(
-                            self._on_record_pointcloud_toggle_changed
-                        )
-                    except Exception:
-                        pass
-                with ui.HStack():
-                    ui.Label("PointCloud Format", width=170)
-                    try:
-                        items = self._pc_format_items
-                        self._pc_format_combo = ui.ComboBox(self._pc_format_index, *items)
-                        try:
-                            self._pc_format_combo.model.add_value_changed_fn(
-                                lambda *_args: setattr(
-                                    self,
-                                    "_pc_format_index",
-                                    self._pc_format_combo.model.get_item_value_model().get_value_as_int(),
-                                )
-                            )
-                        except Exception:
-                            pass
-                    except Exception:
-                        ui.Label(
-                            self._pc_format_items[self._pc_format_index]
-                            if hasattr(self, "_pc_format_items")
-                            else "npy"
-                        )
                 with ui.HStack():
                     ui.Label("Common Interval", width=170)
                     ui.IntField(model=self._record_common_interval_model, height=20, width=72)
-                    try:
-                        self._record_common_interval_model.add_value_changed_fn(
-                            self._on_record_common_interval_changed
-                        )
-                    except Exception:
-                        pass
                     ui.Label("frames")
-                with ui.HStack():
-                    ui.Label("PointCloud Interval", width=170)
-                    ui.IntField(model=self._record_pointcloud_interval_model, height=20, width=72)
-                    try:
-                        self._record_pointcloud_interval_model.add_value_changed_fn(
-                            self._on_record_pointcloud_params_changed
-                        )
-                    except Exception:
-                        pass
-                    ui.Label("frames")
-                with ui.HStack():
-                    ui.Label("PointCloud Metadata", width=170)
-                    ui.CheckBox(model=self._record_pointcloud_metadata_model, width=22)
-                    try:
-                        self._record_pointcloud_metadata_model.add_value_changed_fn(
-                            self._on_record_pointcloud_params_changed
-                        )
-                    except Exception:
-                        pass
+                ui.Label("Configuracoes de pointcloud agora ficam em Replay Config.")
                 ui.Label("Bounding-box annotations stay enabled during recording.")
 
-    def _build_recording_status_section(self):
-        self.recording_count_label = ui.Label("")
-        self.recording_dir_label = ui.Label(f"Output directory: {RECORDINGS_DIR}")
-        self.recording_name_label = ui.Label("")
-        self.recording_step_label = ui.Label("")
+    def _build_window_toggles_section(self):
+        with ui.VStack(spacing=4, height=0):
+            ui.Label("Janelas Flutuantes")
+            with ui.VStack(spacing=6):
+                with ui.HStack():
+                    ui.CheckBox(model=self._occ_map_window_toggle_model, width=22)
+                    ui.Label("Mapa de Ocupacao")
+                with ui.HStack():
+                    ui.CheckBox(model=self._robot_setup_window_toggle_model, width=22)
+                    ui.Label("Robot Setup")
+                with ui.HStack():
+                    ui.CheckBox(model=self._recording_settings_window_toggle_model, width=22)
+                    ui.Label("Recording Settings")
+                with ui.HStack():
+                    ui.CheckBox(model=self._sensor_preview_toggle_model, width=22)
+                    ui.Label("Preview de Sensores")
+                with ui.HStack():
+                    ui.CheckBox(model=self._lidar_preview_toggle_model, width=22)
+                    ui.Label("Preview LiDAR")
+                with ui.HStack():
+                    ui.CheckBox(model=self._path_planning_window_toggle_model, width=22)
+                    ui.Label("Planejamento de Rota")
+                with ui.HStack():
+                    ui.CheckBox(model=self._dataset_object_window_toggle_model, width=22)
+                    ui.Label("Objeto de Dataset")
+                with ui.HStack():
+                    ui.CheckBox(model=self._replay_config_window_toggle_model, width=22)
+                    ui.Label("Replay Config")
 
-        ui.Button("Reset", clicked_fn=self.reset)
-        with ui.HStack():
-            ui.Button("Start Recording", clicked_fn=self.enable_recording)
-            ui.Button("Stop Recording", clicked_fn=self.disable_recording)
+    def _build_window_manager_frame(self):
+        with ui.ScrollingFrame():
+            with ui.VStack(spacing=8, height=0):
+                ui.Label("Window Manager")
+                self._build_window_toggles_section()
+
+    def _build_recording_settings_frame(self):
+        with ui.ScrollingFrame():
+            with ui.VStack(spacing=8, height=0):
+                ui.Label("Recording Settings")
+                self._quick_params_frame = ui.Frame()
+                self._quick_params_frame.set_build_fn(self._build_quick_params_section)
+                with ui.Frame():
+                    with ui.VStack(spacing=6):
+                        self.recording_count_label = ui.Label("")
+                        self.recording_dir_label = ui.Label(f"Output directory: {RECORDINGS_DIR}")
+                        ui.Button("Reset", clicked_fn=self.reset)
+                self.update_recording_count()
+
+    def _build_recording_status_section(self):
+        self.recording_name_label = ui.Label("Current recording name: ")
+        self.recording_step_label = ui.Label("Current recording duration: 0.00s")
 
     def build_occ_map_frame(self):
         if self.scenario is not None:
             self._update_occ_map_goal_info_text()
-            with ui.VStack(spacing=6):
-                with ui.HStack(height=42):
-                    ui.Label("Goal Info", width=72)
-                    self._occ_map_goal_info_label = ui.Label(self._occ_map_goal_info_text)
-                with ui.HStack():
-                    ui.ImageWithProvider(
-                        self._occupancy_map_image_provider
-                    )
+            with ui.ScrollingFrame():
+                with ui.VStack(spacing=6, height=0):
+                    with ui.HStack(height=42):
+                        ui.Label("Goal Info", width=72)
+                        self._occ_map_goal_info_label = ui.Label(self._occ_map_goal_info_text)
+                    with ui.HStack():
+                        ui.ImageWithProvider(
+                            self._occupancy_map_image_provider
+                        )
 
     def draw_occ_map(self):
         if self.scenario is not None:
@@ -571,149 +650,151 @@ class PatoSimExtension(omni.ext.IExt):
         title_height = 34 if compact else 24
         section_height = 42 if compact else 36
         mode_combo_width = 130 if compact else 160
-        with ui.VStack(spacing=8, height=0):
-            with ui.HStack(height=title_height):
-                ui.Label(self._sensor_preview_title_text("Camera Preview"))
-                ui.Spacer()
-            with ui.VStack(spacing=2, height=42 if compact else 36):
-                ui.Label(self._sensor_preview_title_text("Mode"))
+        with ui.ScrollingFrame():
+            with ui.VStack(spacing=8, height=0):
+                with ui.HStack(height=title_height):
+                    ui.Label(self._sensor_preview_title_text("Camera Preview"))
+                    ui.Spacer()
+                with ui.VStack(spacing=2, height=42 if compact else 36):
+                    ui.Label(self._sensor_preview_title_text("Mode"))
+                    with ui.HStack(height=24):
+                        mode_combo = ui.ComboBox(
+                            self._preview_mode_items.index(self._sensor_preview_mode),
+                            *self._preview_mode_items,
+                            width=mode_combo_width,
+                        )
+                        try:
+                            mode_combo.model.get_item_value_model().add_value_changed_fn(
+                                self._on_sensor_preview_mode_changed
+                            )
+                        except Exception:
+                            pass
+                        ui.Spacer()
+                with ui.VStack(spacing=2, height=section_height):
+                    ui.Label(self._sensor_preview_title_text("Resolution"))
+                    with ui.HStack(height=20):
+                        ui.Label(f"{self._sensor_preview_target_width}x{self._sensor_preview_target_height}")
+                        ui.Spacer()
+                with ui.HStack(height=self._sensor_preview_target_height + 32, spacing=8):
+                    with ui.VStack(width=self._sensor_preview_target_width + 8, spacing=4):
+                        ui.Label("Front Camera")
+                        ui.ImageWithProvider(
+                            self._front_camera_preview_provider,
+                            width=self._sensor_preview_target_width,
+                            height=self._sensor_preview_target_height,
+                        )
+                    with ui.VStack(width=self._sensor_preview_target_width + 8, spacing=4):
+                        ui.Label("Underwater Camera")
+                        ui.ImageWithProvider(
+                            self._underwater_camera_preview_provider,
+                            width=self._sensor_preview_target_width,
+                            height=self._sensor_preview_target_height,
+                        )
+                    with ui.VStack(width=self._sensor_preview_target_width + 8, spacing=4):
+                        ui.Label("Sonar")
+                        ui.ImageWithProvider(
+                            self._sonar_preview_provider,
+                            width=self._sensor_preview_target_width,
+                            height=self._sensor_preview_target_height,
+                        )
+                ui.Spacer(height=4)
+                self._sensor_pose_header_label = ui.Label("Sensor Poses Relative To Robot")
+                with ui.VStack(height=pose_panel_height):
+                    self._sensor_pose_label = ui.Label(self._sensor_pose_text)
+
+    def _build_lidar_preview_frame(self):
+        with ui.ScrollingFrame():
+            with ui.VStack(spacing=6, height=0):
                 with ui.HStack(height=24):
+                    ui.Label("LiDAR Preview (Top-Down)")
+                    ui.Spacer()
+                    ui.Label("Mode", width=42)
                     mode_combo = ui.ComboBox(
-                        self._preview_mode_items.index(self._sensor_preview_mode),
+                        self._preview_mode_items.index(self._lidar_preview_mode),
                         *self._preview_mode_items,
-                        width=mode_combo_width,
+                        width=120,
                     )
                     try:
                         mode_combo.model.get_item_value_model().add_value_changed_fn(
-                            self._on_sensor_preview_mode_changed
+                            self._on_lidar_preview_mode_changed
                         )
                     except Exception:
                         pass
-                    ui.Spacer()
-            with ui.VStack(spacing=2, height=section_height):
-                ui.Label(self._sensor_preview_title_text("Resolution"))
                 with ui.HStack(height=20):
-                    ui.Label(f"{self._sensor_preview_target_width}x{self._sensor_preview_target_height}")
+                    ui.Label("Resolution")
+                    ui.Label(f"{self._lidar_preview_target_size}x{self._lidar_preview_target_size}")
+                with ui.HStack(height=22):
+                    ui.Label("Auto Range")
+                    ui.CheckBox(model=self._lidar_preview_auto_range_model, width=22)
+                    try:
+                        self._lidar_preview_auto_range_model.add_value_changed_fn(
+                            self._on_lidar_preview_params_changed
+                        )
+                    except Exception:
+                        pass
+                    ui.Spacer(width=8)
+                    ui.Label("Range (m)")
+                    ui.IntField(model=self._lidar_preview_range_model, height=20, width=56)
+                    try:
+                        self._lidar_preview_range_model.add_value_changed_fn(
+                            self._on_lidar_preview_params_changed
+                        )
+                    except Exception:
+                        pass
+                with ui.HStack(height=22):
+                    ui.Label("Point Size")
+                    ui.IntField(model=self._lidar_preview_point_size_model, height=20, width=56)
+                    try:
+                        self._lidar_preview_point_size_model.add_value_changed_fn(
+                            self._on_lidar_preview_params_changed
+                        )
+                    except Exception:
+                        pass
+                    ui.Spacer(width=8)
+                    ui.Label("History")
+                    ui.IntField(model=self._lidar_preview_history_frames_model, height=20, width=56)
+                    try:
+                        self._lidar_preview_history_frames_model.add_value_changed_fn(
+                            self._on_lidar_preview_params_changed
+                        )
+                    except Exception:
+                        pass
+                with ui.HStack(height=22):
+                    ui.Label("Swap XY")
+                    ui.CheckBox(model=self._lidar_preview_swap_xy_model, width=22)
+                    try:
+                        self._lidar_preview_swap_xy_model.add_value_changed_fn(
+                            self._on_lidar_preview_params_changed
+                        )
+                    except Exception:
+                        pass
+                with ui.HStack(height=22):
+                    ui.Label("Flip X")
+                    ui.CheckBox(model=self._lidar_preview_flip_x_model, width=22)
+                    try:
+                        self._lidar_preview_flip_x_model.add_value_changed_fn(
+                            self._on_lidar_preview_params_changed
+                        )
+                    except Exception:
+                        pass
+                    ui.Spacer(width=8)
+                    ui.Label("Flip Y")
+                    ui.CheckBox(model=self._lidar_preview_flip_y_model, width=22)
+                    try:
+                        self._lidar_preview_flip_y_model.add_value_changed_fn(
+                            self._on_lidar_preview_params_changed
+                        )
+                    except Exception:
+                        pass
+                with ui.HStack(height=self._lidar_preview_target_size + 8):
                     ui.Spacer()
-            with ui.HStack(height=self._sensor_preview_target_height + 32, spacing=8):
-                with ui.VStack(width=self._sensor_preview_target_width + 8, spacing=4):
-                    ui.Label("Front Camera")
                     ui.ImageWithProvider(
-                        self._front_camera_preview_provider,
-                        width=self._sensor_preview_target_width,
-                        height=self._sensor_preview_target_height,
+                        self._lidar_preview_image_provider,
+                        width=self._lidar_preview_target_size,
+                        height=self._lidar_preview_target_size,
                     )
-                with ui.VStack(width=self._sensor_preview_target_width + 8, spacing=4):
-                    ui.Label("Underwater Camera")
-                    ui.ImageWithProvider(
-                        self._underwater_camera_preview_provider,
-                        width=self._sensor_preview_target_width,
-                        height=self._sensor_preview_target_height,
-                    )
-                with ui.VStack(width=self._sensor_preview_target_width + 8, spacing=4):
-                    ui.Label("Sonar")
-                    ui.ImageWithProvider(
-                        self._sonar_preview_provider,
-                        width=self._sensor_preview_target_width,
-                        height=self._sensor_preview_target_height,
-                    )
-            ui.Spacer(height=4)
-            self._sensor_pose_header_label = ui.Label("Sensor Poses Relative To Robot")
-            with ui.ScrollingFrame(height=pose_panel_height):
-                self._sensor_pose_label = ui.Label(self._sensor_pose_text)
-
-    def _build_lidar_preview_frame(self):
-        with ui.VStack(spacing=6, height=0):
-            with ui.HStack(height=24):
-                ui.Label("LiDAR Preview (Top-Down)")
-                ui.Spacer()
-                ui.Label("Mode", width=42)
-                mode_combo = ui.ComboBox(
-                    self._preview_mode_items.index(self._lidar_preview_mode),
-                    *self._preview_mode_items,
-                    width=120,
-                )
-                try:
-                    mode_combo.model.get_item_value_model().add_value_changed_fn(
-                        self._on_lidar_preview_mode_changed
-                    )
-                except Exception:
-                    pass
-            with ui.HStack(height=20):
-                ui.Label("Resolution")
-                ui.Label(f"{self._lidar_preview_target_size}x{self._lidar_preview_target_size}")
-            with ui.HStack(height=22):
-                ui.Label("Auto Range")
-                ui.CheckBox(model=self._lidar_preview_auto_range_model, width=22)
-                try:
-                    self._lidar_preview_auto_range_model.add_value_changed_fn(
-                        self._on_lidar_preview_params_changed
-                    )
-                except Exception:
-                    pass
-                ui.Spacer(width=8)
-                ui.Label("Range (m)")
-                ui.IntField(model=self._lidar_preview_range_model, height=20, width=56)
-                try:
-                    self._lidar_preview_range_model.add_value_changed_fn(
-                        self._on_lidar_preview_params_changed
-                    )
-                except Exception:
-                    pass
-            with ui.HStack(height=22):
-                ui.Label("Point Size")
-                ui.IntField(model=self._lidar_preview_point_size_model, height=20, width=56)
-                try:
-                    self._lidar_preview_point_size_model.add_value_changed_fn(
-                        self._on_lidar_preview_params_changed
-                    )
-                except Exception:
-                    pass
-                ui.Spacer(width=8)
-                ui.Label("History")
-                ui.IntField(model=self._lidar_preview_history_frames_model, height=20, width=56)
-                try:
-                    self._lidar_preview_history_frames_model.add_value_changed_fn(
-                        self._on_lidar_preview_params_changed
-                    )
-                except Exception:
-                    pass
-            with ui.HStack(height=22):
-                ui.Label("Swap XY")
-                ui.CheckBox(model=self._lidar_preview_swap_xy_model, width=22)
-                try:
-                    self._lidar_preview_swap_xy_model.add_value_changed_fn(
-                        self._on_lidar_preview_params_changed
-                    )
-                except Exception:
-                    pass
-            with ui.HStack(height=22):
-                ui.Label("Flip X")
-                ui.CheckBox(model=self._lidar_preview_flip_x_model, width=22)
-                try:
-                    self._lidar_preview_flip_x_model.add_value_changed_fn(
-                        self._on_lidar_preview_params_changed
-                    )
-                except Exception:
-                    pass
-                ui.Spacer(width=8)
-                ui.Label("Flip Y")
-                ui.CheckBox(model=self._lidar_preview_flip_y_model, width=22)
-                try:
-                    self._lidar_preview_flip_y_model.add_value_changed_fn(
-                        self._on_lidar_preview_params_changed
-                    )
-                except Exception:
-                    pass
-            with ui.HStack(height=self._lidar_preview_target_size + 8):
-                ui.Spacer()
-                ui.ImageWithProvider(
-                    self._lidar_preview_image_provider,
-                    width=self._lidar_preview_target_size,
-                    height=self._lidar_preview_target_size,
-                )
-                ui.Spacer()
-            self._lidar_preview_stats_label = ui.Label(self._lidar_preview_stats_text)
+                    ui.Spacer()
+                self._lidar_preview_stats_label = ui.Label(self._lidar_preview_stats_text)
 
     def _get_sensor_preview_window_width(self) -> int:
         try:
@@ -817,15 +898,146 @@ class PatoSimExtension(omni.ext.IExt):
         except Exception:
             return None
 
+    def _is_oceansim_robot_selected(self) -> bool:
+        robot_type = self._get_selected_robot_type()
+        return getattr(robot_type, "__name__", "") == "OceanSimROVRobot"
+
+    def _rebuild_dynamic_ui_sections(self):
+        for attr_name in (
+            "_robot_setup_frame",
+            "_recording_settings_frame",
+            "_replay_config_frame",
+        ):
+            frame = getattr(self, attr_name, None)
+            if frame is None:
+                continue
+            try:
+                frame.rebuild()
+            except Exception:
+                pass
+
+    def _set_simple_window_visible(self, window_attr: str, model_attr: str, enabled: bool):
+        enabled = bool(enabled)
+        window = getattr(self, window_attr, None)
+        if window is not None:
+            try:
+                window.visible = enabled
+            except Exception:
+                pass
+        model = getattr(self, model_attr, None)
+        if model is not None:
+            try:
+                if bool(model.as_bool) != enabled:
+                    model.set_value(enabled)
+            except Exception:
+                pass
+
+    def _on_occ_map_window_toggle_changed(self, model):
+        try:
+            enabled = bool(model.as_bool)
+        except Exception:
+            enabled = True
+        self._set_simple_window_visible("_visualize_window", "_occ_map_window_toggle_model", enabled)
+
+    def _on_robot_setup_window_toggle_changed(self, model):
+        try:
+            enabled = bool(model.as_bool)
+        except Exception:
+            enabled = False
+        self._set_simple_window_visible(
+            "_robot_setup_window",
+            "_robot_setup_window_toggle_model",
+            enabled,
+        )
+        if enabled:
+            try:
+                self._robot_setup_frame.rebuild()
+            except Exception:
+                pass
+
+    def _on_recording_settings_window_toggle_changed(self, model):
+        try:
+            enabled = bool(model.as_bool)
+        except Exception:
+            enabled = False
+        self._set_simple_window_visible(
+            "_recording_settings_window",
+            "_recording_settings_window_toggle_model",
+            enabled,
+        )
+        if enabled:
+            try:
+                self._recording_settings_frame.rebuild()
+            except Exception:
+                pass
+
+    def _on_path_planning_window_toggle_changed(self, model):
+        try:
+            enabled = bool(model.as_bool)
+        except Exception:
+            enabled = False
+        self._set_simple_window_visible(
+            "_path_planning_window",
+            "_path_planning_window_toggle_model",
+            enabled,
+        )
+        if enabled:
+            try:
+                self._path_planning_frame.rebuild()
+            except Exception:
+                pass
+
+    def _on_dataset_object_window_toggle_changed(self, model):
+        try:
+            enabled = bool(model.as_bool)
+        except Exception:
+            enabled = False
+        self._set_simple_window_visible(
+            "_dataset_object_window",
+            "_dataset_object_window_toggle_model",
+            enabled,
+        )
+        if enabled:
+            self._refresh_dataset_object_assets()
+
+    def _on_replay_config_window_toggle_changed(self, model):
+        try:
+            enabled = bool(model.as_bool)
+        except Exception:
+            enabled = False
+        self._set_simple_window_visible(
+            "_replay_config_window",
+            "_replay_config_window_toggle_model",
+            enabled,
+        )
+        if enabled:
+            try:
+                self._replay_config_frame.rebuild()
+            except Exception:
+                pass
+
+    def _on_window_manager_window_toggle_changed(self, model):
+        try:
+            enabled = bool(model.as_bool)
+        except Exception:
+            enabled = False
+        self._set_simple_window_visible(
+            "_window_manager_window",
+            "_window_manager_window_toggle_model",
+            enabled,
+        )
+        if enabled:
+            try:
+                self._window_manager_frame.rebuild()
+            except Exception:
+                pass
+
     def _is_path_planning_selected(self) -> bool:
         return self._get_selected_scenario_name() == "RandomPathFollowingScenarioRearSteer"
 
     def _sync_path_planning_button_state(self):
-        try:
-            if self._path_planning_button is not None:
-                self._path_planning_button.enabled = self._is_path_planning_selected()
-        except Exception:
-            pass
+        # Button always enabled; context shown inside the window
+        pass
 
     def _apply_sensor_preview_mode_settings(self):
         if self._sensor_preview_mode == "robust":
@@ -841,7 +1053,7 @@ class PatoSimExtension(omni.ext.IExt):
             self._sensor_preview_target_height = 144
             try:
                 self._sensor_preview_window.width = 900
-                self._sensor_preview_window.height = 520
+                self._sensor_preview_window.height = 580
             except Exception:
                 pass
 
@@ -868,8 +1080,8 @@ class PatoSimExtension(omni.ext.IExt):
             except Exception:
                 pass
             try:
-                self._lidar_preview_window.width = 280
-                self._lidar_preview_window.height = 360
+                self._lidar_preview_window.width = 300
+                self._lidar_preview_window.height = 440
             except Exception:
                 pass
         self._lidar_preview_history = self._lidar_preview_history[-self._lidar_preview_history_frames:]
@@ -973,14 +1185,9 @@ class PatoSimExtension(omni.ext.IExt):
             self._update_path_planning_info("Applied to robot defaults; rebuild to use in path planning.")
 
     def _update_path_planning_info(self, text: str):
-        if self._path_planning_info_label is not None:
-            self._path_planning_info_label.text = text
-
-    def _open_path_planning_window(self):
-        self._load_path_planning_models_from_robot()
-        self._update_path_planning_info("Adjust values and click Apply.")
         try:
-            self._path_planning_window.visible = True
+            if self._path_planning_info_label is not None:
+                self._path_planning_info_label.text = text
         except Exception:
             pass
         try:
@@ -988,35 +1195,149 @@ class PatoSimExtension(omni.ext.IExt):
         except Exception:
             pass
 
+    def _open_path_planning_window(self):
+        self._load_path_planning_models_from_robot()
+        self._update_path_planning_info("Adjust values and click Apply.")
+        self._set_simple_window_visible("_path_planning_window", "_path_planning_window_toggle_model", True)
+        try:
+            self._path_planning_frame.rebuild()
+        except Exception:
+            pass
+
+    def _open_robot_setup_window(self):
+        self._set_simple_window_visible("_robot_setup_window", "_robot_setup_window_toggle_model", True)
+        try:
+            self._robot_setup_frame.rebuild()
+        except Exception:
+            pass
+
+    def _open_recording_settings_window(self):
+        self._set_simple_window_visible(
+            "_recording_settings_window",
+            "_recording_settings_window_toggle_model",
+            True,
+        )
+        try:
+            self._recording_settings_frame.rebuild()
+        except Exception:
+            pass
+
+    def _open_replay_config_window(self):
+        self._set_simple_window_visible("_replay_config_window", "_replay_config_window_toggle_model", True)
+        try:
+            self._replay_config_frame.rebuild()
+        except Exception:
+            pass
+
+    def _open_window_manager_window(self):
+        self._set_simple_window_visible(
+            "_window_manager_window",
+            "_window_manager_window_toggle_model",
+            True,
+        )
+        try:
+            self._window_manager_frame.rebuild()
+        except Exception:
+            pass
+
     def _build_path_planning_frame(self):
-        with ui.VStack(spacing=6, height=0):
-            ui.Label("Path Planning Parameters")
-            with ui.HStack():
-                ui.Button("Load From Robot", clicked_fn=lambda: self._load_path_planning_models_from_robot())
-                ui.Button("Apply", clicked_fn=self._apply_path_planning_settings)
-            field_specs = [
-                ("Speed", "path_following_speed"),
-                ("Angular Gain", "path_following_angular_gain"),
-                ("Stop Dist", "path_following_stop_distance_threshold"),
-                ("Target Offset", "path_following_target_point_offset_meters"),
-                ("Max Steer Cmd", "path_following_max_steer_command"),
-                ("Delta Rate", "path_following_delta_rate_limit"),
-                ("Lookahead Min", "path_following_lookahead_min"),
-                ("Lookahead Max", "path_following_lookahead_max"),
-                ("Safety Points", "path_following_safety_points"),
-                ("Safety Margin", "path_following_safety_margin"),
-                ("Min Speed", "path_following_min_speed"),
-                ("Smooth Iters", "path_following_smoothing_iterations"),
-            ]
-            for label, key in field_specs:
-                with ui.HStack(height=22):
-                    ui.Label(label, width=120)
-                    model = self._path_planning_models[key]
-                    if "points" in key or "iterations" in key:
-                        ui.IntField(model=model, width=90, height=20)
-                    else:
-                        ui.FloatField(model=model, width=90, height=20)
-            self._path_planning_info_label = ui.Label("Select path planning and click Load From Robot.")
+        with ui.ScrollingFrame():
+            with ui.VStack(spacing=6, height=0):
+                ui.Label("Path Planning Parameters")
+                if not self._is_path_planning_selected():
+                    ui.Label(
+                        "Aviso: cenario selecionado nao e RandomPathFollowingScenarioRearSteer. "
+                        "Parametros serao aplicados ao robo mas so terao efeito ao usar esse cenario.",
+                        word_wrap=True,
+                    )
+                with ui.HStack():
+                    ui.Button("Load From Robot", clicked_fn=lambda: self._load_path_planning_models_from_robot())
+                    ui.Button("Apply", clicked_fn=self._apply_path_planning_settings)
+                field_specs = [
+                    ("Speed", "path_following_speed"),
+                    ("Angular Gain", "path_following_angular_gain"),
+                    ("Stop Dist", "path_following_stop_distance_threshold"),
+                    ("Target Offset", "path_following_target_point_offset_meters"),
+                    ("Max Steer Cmd", "path_following_max_steer_command"),
+                    ("Delta Rate", "path_following_delta_rate_limit"),
+                    ("Lookahead Min", "path_following_lookahead_min"),
+                    ("Lookahead Max", "path_following_lookahead_max"),
+                    ("Safety Points", "path_following_safety_points"),
+                    ("Safety Margin", "path_following_safety_margin"),
+                    ("Min Speed", "path_following_min_speed"),
+                    ("Smooth Iters", "path_following_smoothing_iterations"),
+                ]
+                for label, key in field_specs:
+                    with ui.HStack(height=22):
+                        ui.Label(label, width=120)
+                        model = self._path_planning_models[key]
+                        if "points" in key or "iterations" in key:
+                            ui.IntField(model=model, width=90, height=20)
+                        else:
+                            ui.FloatField(model=model, width=90, height=20)
+                self._path_planning_info_label = ui.Label("Select path planning and click Load From Robot.")
+
+    def _build_replay_config_frame(self):
+        replay_mode = bool(getattr(self, "deferred_sensor_processing_enabled", False))
+        status_text = (
+            "Modo replay ativo: nuvem e imagens pesadas ficam para o pos-processamento."
+            if replay_mode
+            else "Modo online ativo: estas configuracoes afetam a captura imediata."
+        )
+        self._replay_config_status_text = status_text
+
+        with ui.ScrollingFrame():
+            with ui.VStack(spacing=8, height=0):
+                ui.Label("Configuracao de Replay / PointCloud")
+                ui.Label(status_text)
+                with ui.HStack():
+                    ui.Label("Gerar PointCloud (LiDAR)", width=170)
+                    ui.CheckBox(model=self._record_pointcloud_toggle_model, width=22)
+                ui.Label(
+                    "Nota: Sonar de imagem usa pipeline de camera (RGB), nao este.",
+                    word_wrap=True,
+                )
+                with ui.HStack():
+                    ui.Label("Formato", width=170)
+                    try:
+                        items = self._pc_format_items
+                    except Exception:
+                        self._ensure_pointcloud_format_models()
+                        items = self._pc_format_items
+                    combo = ui.ComboBox(self._pc_format_index, *items)
+                    try:
+                        combo.model.add_value_changed_fn(
+                            lambda *_args: setattr(
+                                self,
+                                "_pc_format_index",
+                                combo.model.get_item_value_model().get_value_as_int(),
+                            )
+                        )
+                    except Exception:
+                        pass
+                with ui.HStack():
+                    ui.Label("Intervalo PC (1 = todos)", width=170)
+                    ui.IntField(model=self._record_pointcloud_interval_model, height=20, width=72)
+                with ui.HStack():
+                    ui.Label("Salvar Metadata de Pose", width=170)
+                    ui.CheckBox(model=self._record_pointcloud_metadata_model, width=22)
+                ui.Label(
+                    "Para dados pareados RGB+PC use intervalo=1. "
+                    "Execute scripts/replay.py para gerar os arquivos.",
+                    word_wrap=True,
+                )
+                ui.Spacer(height=4)
+                ui.Label("Configuracao do Replay")
+                with ui.HStack():
+                    ui.Label("Render Interval", width=170)
+                    if not hasattr(self, "_replay_render_interval_model"):
+                        self._replay_render_interval_model = ui.SimpleIntModel(20)
+                    ui.IntField(model=self._replay_render_interval_model, height=20, width=72)
+                ui.Label(
+                    "Quantos steps de gravacao pular entre cada render. "
+                    "Menor = mais frames, maior = mais rapido.",
+                    word_wrap=True,
+                )
 
     def _set_sensor_preview_enabled(self, enabled: bool):
         enabled = bool(enabled)
@@ -1100,16 +1421,18 @@ class PatoSimExtension(omni.ext.IExt):
 
     def _should_capture_pointcloud(self, step: int | None = None) -> bool:
         lidar_preview_enabled = bool(getattr(self, "_lidar_preview_enabled", False))
+        if lidar_preview_enabled:
+            return True
+        is_writing = self.writer is not None
         deferred_sensor_processing_enabled = bool(
             getattr(self, "deferred_sensor_processing_enabled", False)
         )
-        is_writing = self.writer is not None
-        if is_writing and bool(getattr(self, "disable_pointcloud_during_recording", True)):
+        if not is_writing:
             return False
-        return lidar_preview_enabled or (
-            is_writing
-            and bool(getattr(self, "_record_pointcloud_enabled", False))
-            and not deferred_sensor_processing_enabled
+        if deferred_sensor_processing_enabled:
+            return False
+        return (
+            bool(getattr(self, "_record_pointcloud_enabled", False))
             and self._pointcloud_record_due(step)
         )
 
@@ -1175,17 +1498,12 @@ class PatoSimExtension(omni.ext.IExt):
         self._set_scenario_pointcloud_requirement()
 
     def _on_deferred_sensor_processing_changed(self, model):
+        # Deferred mode is fixed; ignore changes from UI
         try:
-            enabled = bool(model.as_bool)
+            if not bool(model.as_bool):
+                model.set_value(True)
         except Exception:
-            try:
-                enabled = bool(model.get_value_as_bool())
-            except Exception:
-                enabled = True
-        self.deferred_sensor_processing_enabled = enabled
-        if enabled and self.writer is not None:
-            self._force_disable_pointcloud_for_recording()
-        self._set_scenario_pointcloud_requirement()
+            pass
 
     def _on_disable_previews_during_recording_changed(self, model):
         try:
@@ -1227,6 +1545,7 @@ class PatoSimExtension(omni.ext.IExt):
                     self.scene_usd_field_string_model.set_value(dev_scene_path)
         except Exception:
             pass
+        self._rebuild_dynamic_ui_sections()
 
     def _on_lidar_preview_params_changed(self, *_args):
         try:
@@ -1976,7 +2295,11 @@ class PatoSimExtension(omni.ext.IExt):
 
     def update_recording_count(self):
         num_recordings = len(glob.glob(os.path.join(RECORDINGS_DIR, "*")))
-        self.recording_count_label.text = f"Number of recordings: {num_recordings}"
+        try:
+            if hasattr(self, "recording_count_label") and self.recording_count_label is not None:
+                self.recording_count_label.text = f"Number of recordings: {num_recordings}"
+        except Exception:
+            pass
 
     # ------- UI -> Config helper -------
     def create_config(self):
@@ -2001,6 +2324,7 @@ class PatoSimExtension(omni.ext.IExt):
             dataset_object_enabled=bool(self._dataset_object_enabled_model.as_bool) and bool(dataset_object_path),
             dataset_object_usd=dataset_object_path,
             dataset_object_reflectivity=float(self._dataset_object_reflectivity_model.as_float),
+            dataset_object_position=(0.0, 0.0, 0.0),
             water_profile_path=self._oceansim_water_profile_model.as_string,
             waypoint_path=self._oceansim_waypoint_path_model.as_string,
             apply_sonar_reflectivity_to_world=bool(self._oceansim_apply_sonar_reflectivity_model.as_bool),
@@ -2060,16 +2384,20 @@ class PatoSimExtension(omni.ext.IExt):
         writer.copy_stage(self.cached_stage_path)
         self.step = 0
         self.recording_time = 0.
-        self.recording_name_label.text = f"Current recording name: {recording_name}"
-        self.recording_step_label.text = f"Current recording duration: {self.recording_time:.2f}s"
+        if self.recording_name_label is not None:
+            self.recording_name_label.text = f"Current recording name: {recording_name}"
+        if self.recording_step_label is not None:
+            self.recording_step_label.text = f"Current recording duration: {self.recording_time:.2f}s"
         self.writer = writer
         self._set_scenario_pointcloud_requirement()
         self.update_recording_count()
     
     def clear_recording(self):
         self.writer = None
-        self.recording_name_label.text = "Current recording name: "
-        self.recording_step_label.text = "Current recording duration: "
+        if self.recording_name_label is not None:
+            self.recording_name_label.text = "Current recording name: "
+        if self.recording_step_label is not None:
+            self.recording_step_label.text = "Current recording duration: 0.00s"
         self._set_scenario_pointcloud_requirement()
 
     def clear_scenario(self):
@@ -2860,44 +3188,42 @@ class PatoSimExtension(omni.ext.IExt):
             pass
 
     def _open_dataset_object_window(self):
-        try:
-            self._dataset_object_window.visible = not bool(self._dataset_object_window.visible)
-        except Exception:
-            pass
+        self._set_simple_window_visible("_dataset_object_window", "_dataset_object_window_toggle_model", True)
         self._refresh_dataset_object_assets()
 
     def _build_dataset_object_frame(self):
         self._update_dataset_object_status()
-        with ui.VStack(spacing=8):
-            with ui.HStack(height=24):
-                ui.Label("Enable On Build", width=120)
-                ui.CheckBox(model=self._dataset_object_enabled_model, width=22)
-                try:
-                    self._dataset_object_enabled_model.add_value_changed_fn(
-                        self._on_dataset_object_toggle_changed
+        with ui.ScrollingFrame():
+            with ui.VStack(spacing=8, height=0):
+                with ui.HStack(height=24):
+                    ui.Label("Enable On Build", width=120)
+                    ui.CheckBox(model=self._dataset_object_enabled_model, width=22)
+                    try:
+                        self._dataset_object_enabled_model.add_value_changed_fn(
+                            self._on_dataset_object_toggle_changed
+                        )
+                    except Exception:
+                        pass
+                    ui.Spacer(width=10)
+                    ui.Button("Refresh", clicked_fn=self._refresh_dataset_object_assets)
+                with ui.HStack(height=26):
+                    ui.Label("Object Asset", width=120)
+                    self._dataset_object_combo = ui.ComboBox(
+                        int(getattr(self, "_dataset_object_selected_index", 0)),
+                        *self._dataset_object_labels(),
+                        width=260,
                     )
-                except Exception:
-                    pass
-                ui.Spacer(width=10)
-                ui.Button("Refresh", clicked_fn=self._refresh_dataset_object_assets)
-            with ui.HStack(height=26):
-                ui.Label("Object Asset", width=120)
-                self._dataset_object_combo = ui.ComboBox(
-                    int(getattr(self, "_dataset_object_selected_index", 0)),
-                    *self._dataset_object_labels(),
-                    width=260,
-                )
-                try:
-                    self._dataset_object_combo.model.get_item_value_model().add_value_changed_fn(
-                        self._on_dataset_object_selection_changed
-                    )
-                except Exception:
-                    pass
-            with ui.HStack(height=26):
-                ui.Label("Reflectivity", width=120)
-                ui.FloatDrag(model=self._dataset_object_reflectivity_model, min=0.05, max=10.0)
-            ui.Label("Only assets inside plataforms/platforms, statues_temples and scenario are listed when those folders exist.")
-            ui.Label(self._dataset_object_status_text)
+                    try:
+                        self._dataset_object_combo.model.get_item_value_model().add_value_changed_fn(
+                            self._on_dataset_object_selection_changed
+                        )
+                    except Exception:
+                        pass
+                with ui.HStack(height=26):
+                    ui.Label("Reflectivity", width=120)
+                    ui.FloatDrag(model=self._dataset_object_reflectivity_model, min=0.05, max=10.0)
+                ui.Label("Only assets inside plataforms/platforms, statues_temples and scenario are listed when those folders exist.")
+                ui.Label(self._dataset_object_status_text)
 
     def _scan_worlds(self):
         """Search common locations for USD/world files to populate the Worlds combo.
