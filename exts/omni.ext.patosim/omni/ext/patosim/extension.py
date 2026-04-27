@@ -198,7 +198,35 @@ class PatoSimExtension(omni.ext.IExt):
             )
         except Exception:
             pass
+        # Sonar dedicated preview window
+        self._sonar_preview_window_provider = omni.ui.ByteImageProvider()
+        self._sonar_preview_enabled = False
+        self._sonar_preview_mode = "polar"   # "polar" | "planar"
+        self._sonar_preview_size = 400
+        self._sonar_preview_window_obj = omni.ui.Window(
+            "PatoSim - Sonar Preview", width=440, height=560
+        )
+        try:
+            self._sonar_preview_window_obj.visible = False
+        except Exception:
+            pass
+        with self._sonar_preview_window_obj.frame:
+            self._sonar_preview_frame_obj = ui.Frame()
+            self._sonar_preview_frame_obj.set_build_fn(self._build_sonar_preview_frame)
+        try:
+            blank_sonar = np.zeros(
+                (self._sonar_preview_size, self._sonar_preview_size, 4), dtype=np.uint8
+            )
+            blank_sonar[:, :, 3] = 255
+            self._sonar_preview_window_provider.set_bytes_data(
+                list(blank_sonar.tobytes()),
+                [self._sonar_preview_size, self._sonar_preview_size],
+            )
+        except Exception:
+            pass
+
         self._lidar_preview_toggle_model = ui.SimpleBoolModel(self._lidar_preview_enabled)
+        self._sonar_preview_toggle_model = ui.SimpleBoolModel(self._sonar_preview_enabled)
         self._sensor_preview_toggle_model = ui.SimpleBoolModel(self._sensor_preview_enabled)
         self._sensor_preview_mode_model = ui.SimpleIntModel(0)
         self._lidar_preview_mode_model = ui.SimpleIntModel(0)
@@ -209,6 +237,9 @@ class PatoSimExtension(omni.ext.IExt):
         self._lidar_preview_flip_x_model = ui.SimpleBoolModel(self._lidar_preview_flip_x)
         self._lidar_preview_flip_y_model = ui.SimpleBoolModel(self._lidar_preview_flip_y)
         self._lidar_preview_swap_xy_model = ui.SimpleBoolModel(self._lidar_preview_swap_xy)
+        self._sonar_gau_noise_model = ui.SimpleFloatModel(0.05)
+        self._sonar_ray_noise_model = ui.SimpleFloatModel(0.05)
+        self._sonar_attenuation_model = ui.SimpleFloatModel(0.3)
         self._deferred_sensor_processing_model = ui.SimpleBoolModel(self.deferred_sensor_processing_enabled)
         self._disable_previews_during_recording_model = ui.SimpleBoolModel(self.disable_previews_during_recording)
         self._record_pointcloud_toggle_model = ui.SimpleBoolModel(self._record_pointcloud_enabled)
@@ -221,6 +252,18 @@ class PatoSimExtension(omni.ext.IExt):
             )
             self._lidar_preview_toggle_model.add_value_changed_fn(
                 self._on_lidar_preview_toggle_changed
+            )
+            self._sonar_preview_toggle_model.add_value_changed_fn(
+                self._on_sonar_preview_toggle_changed
+            )
+            self._sonar_gau_noise_model.add_value_changed_fn(
+                self._on_sonar_noise_params_changed
+            )
+            self._sonar_ray_noise_model.add_value_changed_fn(
+                self._on_sonar_noise_params_changed
+            )
+            self._sonar_attenuation_model.add_value_changed_fn(
+                self._on_sonar_noise_params_changed
             )
             self._deferred_sensor_processing_model.add_value_changed_fn(
                 self._on_deferred_sensor_processing_changed
@@ -265,6 +308,7 @@ class PatoSimExtension(omni.ext.IExt):
         self._oceansim_apply_sonar_reflectivity_model = ui.SimpleBoolModel(True)
         self._oceansim_linear_speed_model = ui.SimpleFloatModel(0.75)
         self._oceansim_angular_speed_model = ui.SimpleFloatModel(0.90)
+        self._oceansim_operating_depth_model = ui.SimpleFloatModel(-2.0)
         self._oceansim_dvl_debug_model = ui.SimpleBoolModel(False)
         self._oceansim_front_camera_model = ui.SimpleBoolModel(True)
         self._oceansim_stereo_camera_model = ui.SimpleBoolModel(False)
@@ -301,7 +345,7 @@ class PatoSimExtension(omni.ext.IExt):
             self._robot_setup_frame = ui.Frame()
             self._robot_setup_frame.set_build_fn(self._build_robot_setup_frame)
 
-        self._recording_settings_window = omni.ui.Window("PatoSim - Recording Settings", width=440, height=280)
+        self._recording_settings_window = omni.ui.Window("PatoSim - Recording Settings", width=460, height=340)
         try:
             self._recording_settings_window.visible = False
         except Exception:
@@ -434,10 +478,13 @@ class PatoSimExtension(omni.ext.IExt):
             ui.Label("Camera Preview")
             ui.CheckBox(model=self._sensor_preview_toggle_model, width=22)
 
-        with ui.HStack(height=26):
-            ui.Button("Build", clicked_fn=self.build_scenario)
-            ui.Button("Start Recording", clicked_fn=self.enable_recording)
-            ui.Button("Stop Recording", clicked_fn=self.disable_recording)
+        with ui.VStack(spacing=6, height=0):
+            with ui.HStack(height=26):
+                ui.Button("Build", clicked_fn=self.build_scenario)
+                ui.Button("Reset", clicked_fn=self.reset)
+            with ui.HStack(height=26):
+                ui.Button("Start Recording", clicked_fn=self.enable_recording)
+                ui.Button("Stop Recording", clicked_fn=self.disable_recording)
 
     def _build_tool_launcher_section(self):
         with ui.HStack(height=26):
@@ -474,6 +521,9 @@ class PatoSimExtension(omni.ext.IExt):
                     ui.Spacer(width=12)
                     ui.Label("Ang Speed", width=92)
                     ui.FloatDrag(model=self._oceansim_angular_speed_model, min=0.05, max=5.0)
+                with ui.HStack():
+                    ui.Label("Depth (m)", width=92)
+                    ui.FloatDrag(model=self._oceansim_operating_depth_model, min=-50.0, max=-0.1)
                 with ui.HStack(height=22):
                     ui.Label("DVL Debug", width=92)
                     ui.CheckBox(model=self._oceansim_dvl_debug_model, width=22)
@@ -519,24 +569,30 @@ class PatoSimExtension(omni.ext.IExt):
     def _build_quick_params_section(self):
         self._ensure_pointcloud_format_models()
 
-        with ui.VStack(spacing=4, height=0):
-            ui.Label("Gravacao")
-            with ui.VStack(spacing=6):
-                with ui.VStack(spacing=2, height=0):
-                    ui.Label("Modo: Gravacao leve (apenas pose e controle)")
-                    ui.Label(
-                        "Imagens, depth, segmentacao e nuvem de pontos sao gerados no replay offline.",
-                        word_wrap=True,
-                    )
-                with ui.HStack():
-                    ui.Label("Pause Previews While Recording", width=170)
-                    ui.CheckBox(model=self._disable_previews_during_recording_model, width=22)
-                with ui.HStack():
-                    ui.Label("Common Interval", width=170)
+        with ui.VStack(spacing=8, height=0):
+            with ui.VStack(spacing=2, height=0):
+                ui.Label("Behavior")
+                ui.Label("Lightweight recording mode: only pose, control, and common state are stored.")
+                ui.Label(
+                    "Camera previews are automatically paused while recording to reduce render cost.",
+                    word_wrap=True,
+                )
+
+            with ui.VStack(spacing=4, height=0):
+                ui.Label("Sampling")
+                with ui.HStack(height=22):
+                    ui.Label("Common Interval", width=150)
                     ui.IntField(model=self._record_common_interval_model, height=20, width=72)
                     ui.Label("frames")
-                ui.Label("Configuracoes de pointcloud agora ficam em Replay Config.")
-                ui.Label("Bounding-box annotations stay enabled during recording.")
+
+            with ui.VStack(spacing=2, height=0):
+                ui.Label("Replay")
+                ui.Label(
+                    "RGB, depth, segmentation, normals, and pointcloud outputs are generated in offline replay.",
+                    word_wrap=True,
+                )
+                ui.Label("Pointcloud settings are configured in Replay Config.")
+                ui.Label("Bounding-box annotations remain enabled during recording.")
 
     def _build_window_toggles_section(self):
         with ui.VStack(spacing=4, height=0):
@@ -557,6 +613,9 @@ class PatoSimExtension(omni.ext.IExt):
                 with ui.HStack():
                     ui.CheckBox(model=self._lidar_preview_toggle_model, width=22)
                     ui.Label("Preview LiDAR")
+                with ui.HStack():
+                    ui.CheckBox(model=self._sonar_preview_toggle_model, width=22)
+                    ui.Label("Preview Sonar (polar/planar)")
                 with ui.HStack():
                     ui.CheckBox(model=self._path_planning_window_toggle_model, width=22)
                     ui.Label("Planejamento de Rota")
@@ -581,9 +640,9 @@ class PatoSimExtension(omni.ext.IExt):
                 self._quick_params_frame.set_build_fn(self._build_quick_params_section)
                 with ui.Frame():
                     with ui.VStack(spacing=6):
+                        ui.Label("Status")
                         self.recording_count_label = ui.Label("")
                         self.recording_dir_label = ui.Label(f"Output directory: {RECORDINGS_DIR}")
-                        ui.Button("Reset", clicked_fn=self.reset)
                 self.update_recording_count()
 
     def _build_recording_status_section(self):
@@ -1277,6 +1336,139 @@ class PatoSimExtension(omni.ext.IExt):
                             ui.FloatField(model=model, width=90, height=20)
                 self._path_planning_info_label = ui.Label("Select path planning and click Load From Robot.")
 
+    def _get_active_sonar(self):
+        scenario = getattr(self, "scenario", None)
+        robot = getattr(scenario, "robot", None)
+        return getattr(robot, "sonar", None)
+
+    def _apply_sonar_noise_params(self):
+        sonar = self._get_active_sonar()
+        if sonar is None:
+            return
+        try:
+            gau_noise = float(self._sonar_gau_noise_model.as_float)
+            ray_noise = float(self._sonar_ray_noise_model.as_float)
+            attenuation = float(self._sonar_attenuation_model.as_float)
+        except Exception:
+            return
+        try:
+            sonar.set_render_model_params(
+                gau_noise_param=gau_noise,
+                ray_noise_param=ray_noise,
+                attenuation=attenuation,
+            )
+            return
+        except Exception:
+            pass
+        sensor = getattr(sonar, "_sensor", None)
+        if sensor is None:
+            return
+        try:
+            sensor.gau_noise_param = gau_noise
+            sensor.ray_noise_param = ray_noise
+            sensor.attenuation = attenuation
+        except Exception:
+            pass
+
+    def _build_sonar_noise_controls(self):
+        with ui.VStack(spacing=4, height=0):
+            for label, model, min_value, max_value in (
+                ("Gau Noise", self._sonar_gau_noise_model, 0.0, 1.0),
+                ("Ray Noise", self._sonar_ray_noise_model, 0.0, 1.0),
+                ("Attenuation", self._sonar_attenuation_model, 0.0, 2.0),
+            ):
+                with ui.HStack(height=22):
+                    ui.Label(label, width=90)
+                    ui.FloatDrag(model=model, min=min_value, max=max_value)
+
+    def _build_sonar_preview_frame(self):
+        """Janela flutuante de preview do sonar com modo polar e planar."""
+        sz = self._sonar_preview_size
+        with ui.ScrollingFrame():
+            with ui.VStack(spacing=6, height=0):
+                with ui.HStack(height=24):
+                    ui.Label("Sonar Preview", width=120)
+                    ui.Spacer()
+                    ui.Label("Modo", width=40)
+                    mode_items = ["polar", "planar"]
+                    try:
+                        cur_idx = mode_items.index(self._sonar_preview_mode)
+                    except ValueError:
+                        cur_idx = 0
+                    mode_combo = ui.ComboBox(cur_idx, *mode_items, width=90)
+                    try:
+                        def _on_mode_changed(m):
+                            try:
+                                self._sonar_preview_mode = mode_items[int(m.get_item_value_model().get_value_as_int())]
+                            except Exception:
+                                pass
+                        mode_combo.model.get_item_value_model().add_value_changed_fn(_on_mode_changed)
+                    except Exception:
+                        pass
+                ui.Label(
+                    "Polar: visao fan (x=frente, y=lateral) | Planar: grid r×azi bruto",
+                    word_wrap=True,
+                )
+                ui.ImageWithProvider(
+                    self._sonar_preview_window_provider,
+                    width=sz,
+                    height=sz,
+                )
+                with ui.HStack(height=22):
+                    ui.Label("Tamanho px", width=80)
+                    size_model = ui.SimpleIntModel(sz)
+                    ui.IntField(model=size_model, width=80, height=20)
+                    def _apply_size():
+                        try:
+                            self._sonar_preview_size = int(size_model.as_int)
+                            self._sonar_preview_frame_obj.rebuild()
+                        except Exception:
+                            pass
+                    ui.Button("Aplicar", clicked_fn=_apply_size, width=70, height=20)
+                collapsable_frame_cls = getattr(ui, "CollapsableFrame", None)
+                if collapsable_frame_cls is None:
+                    collapsable_frame_cls = getattr(ui, "CollapsibleFrame", None)
+                if collapsable_frame_cls is not None:
+                    with collapsable_frame_cls("Advanced", collapsed=True):
+                        self._build_sonar_noise_controls()
+                else:
+                    ui.Spacer(height=6)
+                    ui.Label("Advanced")
+                    self._build_sonar_noise_controls()
+
+    def _refresh_sonar_preview_window(self):
+        """Atualiza o provider da janela de preview do sonar com a renderização atual."""
+        if not self._sonar_preview_enabled:
+            return
+        try:
+            scenario = getattr(self, "scenario", None)
+            robot = getattr(scenario, "robot", None)
+            sonar = getattr(robot, "sonar", None)
+            if sonar is None:
+                return
+
+            sz = self._sonar_preview_size
+            if self._sonar_preview_mode == "polar":
+                img = sonar.render_polar_preview(size=sz)
+            else:
+                img = sonar.render_planar_preview(width=sz, height=sz)
+
+            if img is not None:
+                img_rgba = np.asarray(img, dtype=np.uint8)
+                if img_rgba.shape == (sz, sz, 4):
+                    h, w = sz, sz
+                else:
+                    h, w = img_rgba.shape[0], img_rgba.shape[1]
+                    if img_rgba.ndim == 3 and img_rgba.shape[2] == 4:
+                        pass
+                    else:
+                        return
+                self._sonar_preview_window_provider.set_bytes_data(
+                    list(img_rgba.tobytes()), [w, h]
+                )
+        except Exception:
+            pass
+
     def _build_replay_config_frame(self):
         replay_mode = bool(getattr(self, "deferred_sensor_processing_enabled", False))
         status_text = (
@@ -1440,9 +1632,7 @@ class PatoSimExtension(omni.ext.IExt):
         return not bool(getattr(self, "deferred_sensor_processing_enabled", False))
 
     def _should_pause_previews_while_recording(self) -> bool:
-        return bool(self.writer is not None) and bool(
-            getattr(self, "disable_previews_during_recording", True)
-        )
+        return bool(self.writer is not None)
 
     def _force_disable_pointcloud_for_recording(self):
         self._record_pointcloud_enabled = False
@@ -1476,6 +1666,33 @@ class PatoSimExtension(omni.ext.IExt):
                 enabled = False
         self._set_lidar_preview_enabled(enabled)
 
+    def _on_sonar_preview_toggle_changed(self, model):
+        try:
+            enabled = bool(model.as_bool)
+        except Exception:
+            try:
+                enabled = bool(model.get_value_as_bool())
+            except Exception:
+                enabled = False
+        self._sonar_preview_enabled = enabled
+        try:
+            self._sonar_preview_window_obj.visible = enabled
+        except Exception:
+            pass
+        if enabled:
+            try:
+                scenario = getattr(self, "scenario", None)
+                robot = getattr(scenario, "robot", None)
+                sonar = getattr(robot, "sonar", None)
+                if sonar is not None:
+                    sonar.enable_rgb_rendering()
+                    self._apply_sonar_noise_params()
+            except Exception:
+                pass
+
+    def _on_sonar_noise_params_changed(self, _model):
+        self._apply_sonar_noise_params()
+
     def _on_sensor_preview_toggle_changed(self, model):
         try:
             enabled = bool(model.as_bool)
@@ -1506,14 +1723,12 @@ class PatoSimExtension(omni.ext.IExt):
             pass
 
     def _on_disable_previews_during_recording_changed(self, model):
+        self.disable_previews_during_recording = True
         try:
-            enabled = bool(model.as_bool)
+            if not bool(model.as_bool):
+                model.set_value(True)
         except Exception:
-            try:
-                enabled = bool(model.get_value_as_bool())
-            except Exception:
-                enabled = True
-        self.disable_previews_during_recording = enabled
+            pass
 
     def _on_record_common_interval_changed(self, *_args):
         try:
@@ -2337,6 +2552,7 @@ class PatoSimExtension(omni.ext.IExt):
             enable_rov_sonar=bool(self._oceansim_sonar_model.as_bool),
             enable_rov_dvl=bool(self._oceansim_dvl_model.as_bool),
             enable_rov_barometer=bool(self._oceansim_barometer_model.as_bool),
+            rov_operating_depth=float(self._oceansim_operating_depth_model.as_float),
         )
         return config
     
@@ -2609,6 +2825,11 @@ class PatoSimExtension(omni.ext.IExt):
                             else self._sensor_preview_latest_pointcloud
                         )
                         self._refresh_lidar_preview(lidar_input)
+                    except Exception:
+                        pass
+                if getattr(self, "_sonar_preview_enabled", False):
+                    try:
+                        self._refresh_sonar_preview_window()
                     except Exception:
                         pass
             elif should_update_preview:

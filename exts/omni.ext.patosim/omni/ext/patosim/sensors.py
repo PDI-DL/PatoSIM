@@ -152,6 +152,49 @@ def _sanitize_pointcloud_array(array: Optional[np.ndarray]) -> Optional[np.ndarr
     return np.ascontiguousarray(pts)
 
 
+def _build_sonar_acoustic_lut() -> np.ndarray:
+    anchors = np.asarray([0, 76, 178, 229, 255], dtype=np.float32)
+    colors = np.asarray(
+        [
+            [0, 8, 24],
+            [0, 64, 144],
+            [0, 220, 170],
+            [255, 220, 0],
+            [255, 255, 255],
+        ],
+        dtype=np.float32,
+    )
+    lut = np.empty((256, 3), dtype=np.uint8)
+    xs = np.arange(256, dtype=np.float32)
+    for channel in range(3):
+        lut[:, channel] = np.clip(
+            np.interp(xs, anchors, colors[:, channel]),
+            0,
+            255,
+        ).astype(np.uint8)
+    return lut
+
+
+_SONAR_ACOUSTIC_LUT = _build_sonar_acoustic_lut()
+
+
+def _apply_sonar_acoustic_colormap(gray: np.ndarray) -> np.ndarray:
+    gray_u8 = np.asarray(gray, dtype=np.uint8)
+    return _SONAR_ACOUSTIC_LUT[gray_u8]
+
+
+def _blend_overlay_rgba(base_rgba: np.ndarray, overlay_rgb: np.ndarray, overlay_alpha: np.ndarray) -> np.ndarray:
+    alpha = np.clip(np.asarray(overlay_alpha, dtype=np.float32), 0.0, 255.0) / 255.0
+    if not np.any(alpha > 0.0):
+        return base_rgba
+    base_rgb = np.asarray(base_rgba[..., :3], dtype=np.float32)
+    overlay_rgb_f = np.asarray(overlay_rgb, dtype=np.float32)
+    blended = base_rgb * (1.0 - alpha[..., None]) + overlay_rgb_f * alpha[..., None]
+    out = np.array(base_rgba, copy=True)
+    out[..., :3] = np.clip(blended, 0.0, 255.0).astype(np.uint8)
+    return out
+
+
 def _normalize_asset_path(asset_path: str) -> str:
     text = str(asset_path or "").strip()
     if "://" in text:
@@ -1130,6 +1173,9 @@ class OceanSimImagingSonar(Sensor):
         self._initialized = False
         self._rgb_enabled = False
         self._pointcloud_enabled = False
+        self._gau_noise_param = 0.05
+        self._ray_noise_param = 0.05
+        self._attenuation = 0.3
 
         # rgb_image stores the processed acoustic image produced by the sonar
         # model. pointcloud stores the raw scan pointcloud used internally by the
@@ -1139,6 +1185,7 @@ class OceanSimImagingSonar(Sensor):
         self.position = Buffer()
         self.orientation = Buffer()
         self.status = Buffer("idle")
+        self._sync_sensor_render_params()
 
     @classmethod
     def build(
@@ -1188,6 +1235,9 @@ class OceanSimImagingSonar(Sensor):
         self._rgb_enabled = True
         self._ensure_initialized()
 
+    def disable_rendering(self):
+        self._rgb_enabled = False
+
     def set_pointcloud_enabled(self, enabled: bool):
         self._pointcloud_enabled = bool(enabled)
         if self._pointcloud_enabled:
@@ -1195,12 +1245,42 @@ class OceanSimImagingSonar(Sensor):
         else:
             self.pointcloud.set_value(None)
 
+    def _sync_sensor_render_params(self):
+        if self._sensor is None:
+            return
+        try:
+            self._sensor.gau_noise_param = float(self._gau_noise_param)
+            self._sensor.ray_noise_param = float(self._ray_noise_param)
+            self._sensor.attenuation = float(self._attenuation)
+        except Exception:
+            pass
+
+    def set_render_model_params(
+        self,
+        *,
+        gau_noise_param: Optional[float] = None,
+        ray_noise_param: Optional[float] = None,
+        attenuation: Optional[float] = None,
+    ) -> None:
+        if gau_noise_param is not None:
+            self._gau_noise_param = float(gau_noise_param)
+        if ray_noise_param is not None:
+            self._ray_noise_param = float(ray_noise_param)
+        if attenuation is not None:
+            self._attenuation = float(attenuation)
+        self._sync_sensor_render_params()
+
     def update_state(self):
         if self._initialized:
             try:
                 # make_sonar_data() computes the acoustic response map from raw
                 # pointcloud, normals and semantic reflectivity.
-                self._sensor.make_sonar_data()
+                self._sync_sensor_render_params()
+                self._sensor.make_sonar_data(
+                    attenuation=float(self._attenuation),
+                    gau_noise_param=float(self._gau_noise_param),
+                    ray_noise_param=float(self._ray_noise_param),
+                )
                 self.status.set_value("sonar_frame")
             except Exception as exc:
                 self.status.set_value(f"sonar_error:{type(exc).__name__}")
@@ -1234,6 +1314,225 @@ class OceanSimImagingSonar(Sensor):
             self.orientation.set_value(None)
 
         super().update_state()
+
+    # ------------------------------------------------------------------
+    # Preview rendering helpers
+    # ------------------------------------------------------------------
+
+    def render_polar_preview(self, size: int = 400) -> Optional[np.ndarray]:
+        """Converte a imagem de sonar (grade r×azi) para uma imagem Cartesiana (setor fan).
+
+        O sonar OceanSim armazena os dados num grid 2D (N_range × N_azi) onde
+        cada célula [i, j] representa (range_i, azimute_j). Exibir esse grid
+        diretamente como imagem retangular produz distorção porque o espaço polar
+        não é linear em X,Y.
+
+        Este método projeta cada pixel do grid polar nas coordenadas Cartesianas
+        correspondentes, gerando uma imagem em visão de cima (bird's-eye) no
+        formato RGBA numpy compatível com ``omni.ui.ByteImageProvider``.
+
+        Args:
+            size: Lado em pixels da imagem de saída quadrada (padrão 400).
+
+        Returns:
+            np.ndarray RGBA (size, size, 4) uint8, ou None se não houver dados.
+        """
+        raw = self.rgb_image.get_value()
+        if raw is None:
+            return None
+        try:
+            src = np.asarray(raw, dtype=np.uint8)
+            if src.ndim == 3 and src.shape[2] >= 3:
+                gray = src[..., 0]  # sonar é grayscale nos 3 canais iguais
+            elif src.ndim == 2:
+                gray = src
+            else:
+                return None
+
+            n_range, n_azi = gray.shape
+            # Reconstrução dos vetores r e azi a partir dos parâmetros do sensor
+            try:
+                min_r = float(self._sensor.min_range)
+                max_r = float(self._sensor.max_range)
+                range_res = float(self._sensor.range_res)
+                hori_fov = float(self._sensor.hori_fov)
+                ang_res = float(self._sensor.angular_res)
+            except Exception:
+                # Fallback genérico se o sensor não estiver disponível
+                min_r, max_r, range_res = 0.2, 10.0, (10.0 - 0.2) / max(n_range, 1)
+                hori_fov, ang_res = 130.0, hori_fov / max(n_azi, 1)
+
+            # Grade de ranges em metros
+            r_vals = np.linspace(min_r, max_r, n_range, dtype=np.float32)
+            # Azimutes em radianos (convenção do sonar: centrado em 90° = frente)
+            azi_deg_min = 90.0 - hori_fov / 2.0
+            azi_deg_max = 90.0 + hori_fov / 2.0
+            azi_vals = np.deg2rad(
+                np.linspace(azi_deg_min, azi_deg_max, n_azi, dtype=np.float32)
+            )
+
+            # Converte cada ponto polar → Cartesiano (x=frente, y=lateral)
+            # Convenção: azi=90° → frente (+X), azi<90° → direita, azi>90° → esquerda
+            r_grid, azi_grid = np.meshgrid(r_vals, azi_vals, indexing='ij')
+            x_cart = r_grid * np.cos(azi_grid)   # profundidade (frente)
+            y_cart = r_grid * np.sin(azi_grid)   # lateral
+
+            # Mapeia para pixels na imagem de saída
+            # X (frente) mapeado para V (linha), Y (lateral) para U (coluna)
+            x_min, x_max = 0.0, float(max_r)
+            y_min = -float(max_r) * np.sin(np.deg2rad(hori_fov / 2.0))
+            y_max = float(max_r) * np.sin(np.deg2rad(hori_fov / 2.0))
+
+            col_f = (y_cart - y_min) / max(y_max - y_min, 1e-6) * (size - 1)
+            row_f = (1.0 - (x_cart - x_min) / max(x_max - x_min, 1e-6)) * (size - 1)
+            col_i = np.clip(col_f.astype(np.int32), 0, size - 1)
+            row_i = np.clip(row_f.astype(np.int32), 0, size - 1)
+
+            out = np.zeros((size, size, 4), dtype=np.uint8)
+            out[:, :, 3] = 255
+            out_intensity = np.zeros((size, size), dtype=np.uint8)
+            intensity = gray.ravel()
+            colored = _apply_sonar_acoustic_colormap(gray).reshape(-1, 3)
+            rows = row_i.ravel()
+            cols = col_i.ravel()
+            # Pintar mais claro sobre mais escuro para preservar retornos fortes
+            current = out_intensity[rows, cols]
+            mask = intensity > current
+            out_intensity[rows[mask], cols[mask]] = intensity[mask]
+            out[rows[mask], cols[mask], :3] = colored[mask]
+
+            try:
+                import cv2
+
+                overlay_rgb = np.zeros((size, size, 3), dtype=np.uint8)
+                overlay_alpha = np.zeros((size, size), dtype=np.uint8)
+                overlay_color = (255, 255, 255)
+                overlay_alpha_value = 100
+                fan_angles_deg = np.linspace(azi_deg_min, azi_deg_max, 256, dtype=np.float32)
+
+                def _to_cv_points(radius_m: float, angles_deg: np.ndarray) -> np.ndarray:
+                    angles_rad = np.deg2rad(angles_deg)
+                    x_vals = radius_m * np.cos(angles_rad)
+                    y_vals = radius_m * np.sin(angles_rad)
+                    cols_local = np.clip(
+                        ((y_vals - y_min) / max(y_max - y_min, 1e-6) * (size - 1)).round().astype(np.int32),
+                        0,
+                        size - 1,
+                    )
+                    rows_local = np.clip(
+                        ((1.0 - (x_vals - x_min) / max(x_max - x_min, 1e-6)) * (size - 1)).round().astype(np.int32),
+                        0,
+                        size - 1,
+                    )
+                    return np.stack([cols_local, rows_local], axis=1).reshape(-1, 1, 2)
+
+                max_range_mark = float(max_r)
+                default_marks = [2.0, 4.0, 6.0, 8.0, 10.0]
+                arc_ranges = [mark for mark in default_marks if mark < max_range_mark]
+                if not arc_ranges and max_range_mark > 0.0:
+                    arc_ranges = list(np.linspace(max_range_mark * 0.2, max_range_mark, 5, dtype=np.float32))
+                elif max_range_mark > 0.0 and max_range_mark not in arc_ranges:
+                    arc_ranges.append(max_range_mark)
+
+                for radius_m in arc_ranges:
+                    pts = _to_cv_points(float(radius_m), fan_angles_deg)
+                    if pts.shape[0] < 2:
+                        continue
+                    cv2.polylines(overlay_rgb, [pts], False, overlay_color, 1, lineType=cv2.LINE_AA)
+                    cv2.polylines(overlay_alpha, [pts], False, overlay_alpha_value, 1, lineType=cv2.LINE_AA)
+                    label_idx = int(np.argmin(pts[:, 0, 1]))
+                    label_x = int(np.clip(pts[label_idx, 0, 0] + 4, 0, size - 24))
+                    label_y = int(np.clip(pts[label_idx, 0, 1] - 4, 10, size - 4))
+                    label = f"{int(round(float(radius_m)))}m"
+                    cv2.putText(
+                        overlay_rgb,
+                        label,
+                        (label_x, label_y),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.35,
+                        overlay_color,
+                        1,
+                        lineType=cv2.LINE_AA,
+                    )
+                    cv2.putText(
+                        overlay_alpha,
+                        label,
+                        (label_x, label_y),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.35,
+                        overlay_alpha_value,
+                        1,
+                        lineType=cv2.LINE_AA,
+                    )
+
+                center_angle_deg = 90.0
+                for offset_deg in (15.0, 30.0, 45.0, 60.0):
+                    for sign in (-1.0, 1.0):
+                        angle_deg = center_angle_deg + sign * offset_deg
+                        if angle_deg < azi_deg_min or angle_deg > azi_deg_max:
+                            continue
+                        angle_rad = math.radians(angle_deg)
+                        start_x = 0.0
+                        start_y = 0.0
+                        end_x = float(max_r) * math.cos(angle_rad)
+                        end_y = float(max_r) * math.sin(angle_rad)
+                        start_xy = (
+                            int(np.clip(round((start_y - y_min) / max(y_max - y_min, 1e-6) * (size - 1)), 0, size - 1)),
+                            int(np.clip(round((1.0 - (start_x - x_min) / max(x_max - x_min, 1e-6)) * (size - 1)), 0, size - 1)),
+                        )
+                        end_xy = (
+                            int(np.clip(round((end_y - y_min) / max(y_max - y_min, 1e-6) * (size - 1)), 0, size - 1)),
+                            int(np.clip(round((1.0 - (end_x - x_min) / max(x_max - x_min, 1e-6)) * (size - 1)), 0, size - 1)),
+                        )
+                        cv2.line(overlay_rgb, start_xy, end_xy, overlay_color, 1, lineType=cv2.LINE_AA)
+                        cv2.line(
+                            overlay_alpha,
+                            start_xy,
+                            end_xy,
+                            overlay_alpha_value,
+                            1,
+                            lineType=cv2.LINE_AA,
+                        )
+
+                out = _blend_overlay_rgba(out, overlay_rgb, overlay_alpha)
+            except Exception:
+                pass
+            return out
+        except Exception:
+            return None
+
+    def render_planar_preview(self, width: int = 400, height: int = 300) -> Optional[np.ndarray]:
+        """Retorna a imagem polar retangular (r×azi) redimensionada como RGBA.
+
+        Esta é a representação direta do buffer do sonar — útil para depuração
+        e para ver o conteúdo bruto da saída do ``make_sonar_image()``.
+
+        Args:
+            width: Largura da imagem de saída em pixels.
+            height: Altura da imagem de saída em pixels.
+
+        Returns:
+            np.ndarray RGBA (height, width, 4) uint8, ou None se não houver dados.
+        """
+        raw = self.rgb_image.get_value()
+        if raw is None:
+            return None
+        try:
+            import cv2
+            src = np.asarray(raw, dtype=np.uint8)
+            if src.ndim == 3:
+                gray = src[..., 0]
+            else:
+                gray = src
+            resized = cv2.resize(gray, (width, height), interpolation=cv2.INTER_LINEAR)
+            colored = _apply_sonar_acoustic_colormap(resized)
+            out = np.concatenate(
+                [colored, np.full((height, width, 1), 255, dtype=np.uint8)],
+                axis=-1,
+            )
+            return out
+        except Exception:
+            return None
 
 
 class OceanSimDVL(Sensor):

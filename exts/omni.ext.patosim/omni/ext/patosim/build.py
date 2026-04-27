@@ -84,6 +84,33 @@ def _make_underwater_placeholder_occupancy_map() -> OccupancyMap:
     )
 
 
+async def _make_underwater_occupancy_map_async(
+    scene_prim_path: str,
+    z_nominal: float = -2.0,
+    slice_half: float = 0.5,
+    cell_size: float = 0.25,
+) -> OccupancyMap:
+    try:
+        from omni.ext.patosim.utils.stage_utils import occupancy_map_generate_from_prim_async as _gen
+        omap = await _gen(
+            scene_prim_path,
+            cell_size=cell_size,
+            z_min=z_nominal - slice_half,
+            z_max=z_nominal + slice_half,
+        )
+        if getattr(omap, "data", None) is not None and omap.data.size > 0:
+            return omap
+    except Exception as exc:
+        import warnings
+        warnings.warn(
+            f"_make_underwater_occupancy_map_async: failed to generate scene occupancy map "
+            f"(z={z_nominal:.1f}m) — falling back to empty map. Reason: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    return _make_underwater_placeholder_occupancy_map()
+
+
 def _enable_scene_collisions(scene_root_path: str) -> int:
     stage = get_stage()
     root_prim = stage_get_prim(stage, scene_root_path)
@@ -469,7 +496,12 @@ async def build_scenario_from_config(config: Config):
             robot.set_pose_3d(safe_spawn, robot_type._initial_orientation())
         except Exception:
             pass
-        occupancy_map = _make_underwater_placeholder_occupancy_map()
+        z_nominal = float(getattr(config, "rov_operating_depth", -2.0))
+        occupancy_map = await _make_underwater_occupancy_map_async(
+            "/World/scene",
+            z_nominal=z_nominal,
+            cell_size=float(getattr(robot, "occupancy_map_cell_size", 0.25)),
+        )
     else:
         occupancy_map = await occupancy_map_generate_from_prim_async(
             "/World/scene",

@@ -49,15 +49,43 @@ class Writer:
         state_dict_path = os.path.join(dict_folder, f"{step:08d}.npy")
         np.save(state_dict_path, state_dict)
 
-    def write_state_dict_rgb(self, state_rgb: dict, step: int):
+    def write_state_dict_rgb(self, state_rgb: dict, step: int, sonar_ref=None):
+        has_sonar_rgb = False
         for name, value in state_rgb.items():
             if value is not None:
+                if "sonar" in str(name).lower():
+                    has_sonar_rgb = True
                 image_folder = os.path.join(self.path, "state", "rgb", name)
                 if not os.path.exists(image_folder):
                     os.makedirs(image_folder)
                 image_path = os.path.join(image_folder, f"{step:08d}.jpg")
                 image = PIL.Image.fromarray(value)
                 image.save(image_path)
+        if sonar_ref is None or not has_sonar_rgb:
+            return
+        try:
+            preview = sonar_ref.render_polar_preview(size=512)
+        except Exception:
+            preview = None
+        if preview is None:
+            return
+        preview_np = np.asarray(preview, dtype=np.uint8)
+        output_folder = os.path.join(self.path, "state", "rgb", "sonar_polar")
+        if not os.path.exists(output_folder):
+            os.makedirs(output_folder)
+        output_path = os.path.join(output_folder, f"{step:08d}.jpg")
+        try:
+            import cv2
+
+            preview_bgr = cv2.cvtColor(preview_np, cv2.COLOR_RGBA2BGR)
+            ok, encoded = cv2.imencode(".jpg", preview_bgr)
+            if ok:
+                with open(output_path, "wb") as handle:
+                    handle.write(encoded.tobytes())
+                return
+        except Exception:
+            pass
+        PIL.Image.fromarray(preview_np[..., :3]).save(output_path)
 
     def write_state_dict_segmentation(self, state_segmentation: dict, step: int):
         for name, value in state_segmentation.items():
