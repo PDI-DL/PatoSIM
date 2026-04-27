@@ -481,7 +481,7 @@ class OceanSimROVRobot(Robot):
     teleop_velocity_assist_gain: float = 1.0
 
     usd_relative_path: str = "bluerov/BROV_low.usd"
-    fallback_assets_root: str = "/mnt/external/isaac/MOD_patosim/assets/models"
+    fallback_assets_root: str = "/home/bevlog/PatoSIM/assets/models"
 
     initial_translation: Tuple[float, float, float] = (-2.0, 0.0, -0.8)
     initial_orientation_euler_deg: Tuple[float, float, float] = (0.0, 0.0, 0.0)
@@ -496,7 +496,7 @@ class OceanSimROVRobot(Robot):
     max_angular_velocity: float = 720.0
 
     sonar_translation: Tuple[float, float, float] = (0.3, 0.0, 0.3)
-    sonar_orientation_euler_deg: Tuple[float, float, float] = (0.0, 45.0, 0.0)
+    sonar_orientation_euler_deg: Tuple[float, float, float] = (0.0, 0.0, 0.0)
     mono_camera_translation: Tuple[float, float, float] = (0.3, 0.0, 0.1)
     stereo_left_translation: Tuple[float, float, float] = (0.3, -0.05, 0.1)
     stereo_right_translation: Tuple[float, float, float] = (0.3, 0.05, 0.1)
