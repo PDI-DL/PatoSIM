@@ -38,7 +38,7 @@ from omni.ext.patosim.robots import ROBOTS
 from omni.ext.patosim.config import Config
 from omni.ext.patosim.build import build_scenario_from_config, list_dataset_object_assets
 
-dev_scene_path = "/home/bevlog/PatoSIM/assets/models/worlds/Prototipo1/world.usd"
+dev_scene_path = "/mnt/external/isaac/MOD_patosim/assets/models/worlds/Prototipo1/world.usd"
 
 if "PATOSIM_DATA" in os.environ:
     DATA_DIR = os.environ['PATOSIM_DATA']
@@ -47,6 +47,15 @@ else:
 
 RECORDINGS_DIR = os.path.join(DATA_DIR, "recordings")
 SCENARIOS_DIR = os.path.join(DATA_DIR, "scenarios")
+
+# (cam_width, cam_height, sonar_width, sonar_height)
+# sonar_height ~= sonar_width * 3.769 (proporcao natural N_range:N_azi do OceanSim)
+_CAMERA_PREVIEW_RESOLUTION_PRESETS = [
+    ("Pequeno  200x113 | sonar 80x302", 200, 113, 80, 302),
+    ("Medio    256x144 | sonar 100x377", 256, 144, 100, 377),
+    ("Grande   320x180 | sonar 130x490", 320, 180, 130, 490),
+    ("HD       426x240 | sonar 160x604", 426, 240, 160, 604),
+]
 
 
 class PatoSimExtension(omni.ext.IExt):
@@ -145,6 +154,12 @@ class PatoSimExtension(omni.ext.IExt):
         # Low-resolution live preview window for RGB camera sensors.
         self._sensor_preview_target_width = 256
         self._sensor_preview_target_height = 144
+        self._sensor_preview_resolution_index = 1
+        self._sensor_preview_sonar_width = 100
+        self._sensor_preview_sonar_height = 377
+        self._sensor_preview_resolution_model = ui.SimpleIntModel(
+            self._sensor_preview_resolution_index
+        )
         self._lidar_preview_target_size = 180
         self._sensor_preview_window = omni.ui.Window("PatoSim - Sensor Preview", width=900, height=580)
         try:
@@ -709,52 +724,71 @@ class PatoSimExtension(omni.ext.IExt):
         title_height = 34 if compact else 24
         section_height = 42 if compact else 36
         mode_combo_width = 130 if compact else 160
+        cam_w = int(self._sensor_preview_target_width)
+        cam_h = int(self._sensor_preview_target_height)
+        son_w = int(self._sensor_preview_sonar_width)
+        son_h = int(self._sensor_preview_sonar_height)
+        row_h = max(cam_h, son_h) + 32
         with ui.ScrollingFrame():
             with ui.VStack(spacing=8, height=0):
                 with ui.HStack(height=title_height):
                     ui.Label(self._sensor_preview_title_text("Camera Preview"))
                     ui.Spacer()
                 with ui.VStack(spacing=2, height=42 if compact else 36):
-                    ui.Label(self._sensor_preview_title_text("Mode"))
+                    ui.Label(self._sensor_preview_title_text("Resolucao"))
                     with ui.HStack(height=24):
-                        mode_combo = ui.ComboBox(
-                            self._preview_mode_items.index(self._sensor_preview_mode),
-                            *self._preview_mode_items,
+                        preset_labels = [p[0] for p in _CAMERA_PREVIEW_RESOLUTION_PRESETS]
+                        res_combo = ui.ComboBox(
+                            int(getattr(self, "_sensor_preview_resolution_index", 1)),
+                            *preset_labels,
                             width=mode_combo_width,
                         )
                         try:
-                            mode_combo.model.get_item_value_model().add_value_changed_fn(
-                                self._on_sensor_preview_mode_changed
-                            )
+                            def _on_resolution_item_changed(m, item):
+                                try:
+                                    idx = m.get_item_value_model(item).get_value_as_int()
+                                    self._sensor_preview_resolution_index = int(idx)
+                                    self._apply_sensor_preview_mode_settings()
+                                    self._sensor_preview_frame.rebuild()
+                                    self._refresh_sensor_preview(
+                                        getattr(self, "_sensor_preview_latest_camera_map", {})
+                                    )
+                                except Exception:
+                                    pass
+
+                            res_combo.model.add_item_changed_fn(_on_resolution_item_changed)
                         except Exception:
                             pass
                         ui.Spacer()
                 with ui.VStack(spacing=2, height=section_height):
                     ui.Label(self._sensor_preview_title_text("Resolution"))
                     with ui.HStack(height=20):
-                        ui.Label(f"{self._sensor_preview_target_width}x{self._sensor_preview_target_height}")
+                        ui.Label(
+                            f"Cam {cam_w}x{cam_h}"
+                            f"  |  Sonar {son_w}x{son_h}"
+                        )
                         ui.Spacer()
-                with ui.HStack(height=self._sensor_preview_target_height + 32, spacing=8):
-                    with ui.VStack(width=self._sensor_preview_target_width + 8, spacing=4):
+                with ui.HStack(height=row_h, spacing=8):
+                    with ui.VStack(width=cam_w + 8, spacing=4):
                         ui.Label("Front Camera")
                         ui.ImageWithProvider(
                             self._front_camera_preview_provider,
-                            width=self._sensor_preview_target_width,
-                            height=self._sensor_preview_target_height,
+                            width=cam_w,
+                            height=cam_h,
                         )
-                    with ui.VStack(width=self._sensor_preview_target_width + 8, spacing=4):
+                    with ui.VStack(width=cam_w + 8, spacing=4):
                         ui.Label("Underwater Camera")
                         ui.ImageWithProvider(
                             self._underwater_camera_preview_provider,
-                            width=self._sensor_preview_target_width,
-                            height=self._sensor_preview_target_height,
+                            width=cam_w,
+                            height=cam_h,
                         )
-                    with ui.VStack(width=self._sensor_preview_target_width + 8, spacing=4):
-                        ui.Label("Sonar")
+                    with ui.VStack(width=son_w + 8, spacing=4):
+                        ui.Label("Sonar (grid r x azi)")
                         ui.ImageWithProvider(
                             self._sonar_preview_provider,
-                            width=self._sensor_preview_target_width,
-                            height=self._sensor_preview_target_height,
+                            width=son_w,
+                            height=son_h,
                         )
                 ui.Spacer(height=4)
                 self._sensor_pose_header_label = ui.Label("Sensor Poses Relative To Robot")
@@ -909,6 +943,39 @@ class PatoSimExtension(omni.ext.IExt):
             list(rgba.tobytes()),
             [int(rgba.shape[1]), int(rgba.shape[0])],
         )
+
+    def _set_sonar_preview_slot_image(self, image) -> None:
+        """Envia a imagem do slot Sonar com as dimensoes especificas do sonar."""
+        sw = int(self._sensor_preview_sonar_width)
+        sh = int(self._sensor_preview_sonar_height)
+        if image is None:
+            blank = np.zeros((sh, sw, 4), dtype=np.uint8)
+            blank[:, :, 3] = 255
+            self._sonar_preview_provider.set_bytes_data(list(blank.tobytes()), [sw, sh])
+            return
+        try:
+            import cv2
+
+            arr = np.asarray(image, dtype=np.uint8)
+            if arr.ndim == 2:
+                arr = np.stack([arr, arr, arr, np.full_like(arr, 255)], axis=-1)
+            elif arr.shape[2] == 3:
+                arr = np.concatenate(
+                    [arr, np.full((*arr.shape[:2], 1), 255, dtype=np.uint8)],
+                    axis=-1,
+                )
+            if arr.shape[1] != sw or arr.shape[0] != sh:
+                rgb = arr[:, :, :3]
+                rgb_r = cv2.resize(rgb, (sw, sh), interpolation=cv2.INTER_LINEAR)
+                arr = np.concatenate(
+                    [rgb_r, np.full((sh, sw, 1), 255, dtype=np.uint8)],
+                    axis=-1,
+                )
+            self._sonar_preview_provider.set_bytes_data(list(arr.tobytes()), [sw, sh])
+        except Exception:
+            blank = np.zeros((sh, sw, 4), dtype=np.uint8)
+            blank[:, :, 3] = 255
+            self._sonar_preview_provider.set_bytes_data(list(blank.tobytes()), [sw, sh])
 
     def _sync_oceansim_sensor_models_from_source(self, source) -> None:
         if source is None:
@@ -1099,22 +1166,24 @@ class PatoSimExtension(omni.ext.IExt):
         pass
 
     def _apply_sensor_preview_mode_settings(self):
-        if self._sensor_preview_mode == "robust":
-            self._sensor_preview_target_width = 320
-            self._sensor_preview_target_height = 180
-            try:
-                self._sensor_preview_window.width = 1100
-                self._sensor_preview_window.height = 620
-            except Exception:
-                pass
-        else:
-            self._sensor_preview_target_width = 256
-            self._sensor_preview_target_height = 144
-            try:
-                self._sensor_preview_window.width = 900
-                self._sensor_preview_window.height = 580
-            except Exception:
-                pass
+        idx = int(getattr(self, "_sensor_preview_resolution_index", 1))
+        idx = max(0, min(idx, len(_CAMERA_PREVIEW_RESOLUTION_PRESETS) - 1))
+        _, cam_w, cam_h, son_w, son_h = _CAMERA_PREVIEW_RESOLUTION_PRESETS[idx]
+        self._sensor_preview_target_width = cam_w
+        self._sensor_preview_target_height = cam_h
+        self._sensor_preview_sonar_width = son_w
+        self._sensor_preview_sonar_height = son_h
+        try:
+            self._sensor_preview_resolution_model.set_value(idx)
+        except Exception:
+            pass
+        total_w = 2 * (cam_w + 8) + (son_w + 8) + 48
+        total_h = max(cam_h, son_h) + 340
+        try:
+            self._sensor_preview_window.width = max(total_w, 480)
+            self._sensor_preview_window.height = max(total_h, 480)
+        except Exception:
+            pass
 
     def _apply_lidar_preview_mode_settings(self):
         if self._lidar_preview_mode == "robust":
@@ -1397,12 +1466,13 @@ class PatoSimExtension(omni.ext.IExt):
                         cur_idx = 0
                     mode_combo = ui.ComboBox(cur_idx, *mode_items, width=90)
                     try:
-                        def _on_mode_changed(m):
+                        def _on_mode_item_changed(m, item):
                             try:
-                                self._sonar_preview_mode = mode_items[int(m.get_item_value_model().get_value_as_int())]
+                                idx = int(m.get_item_value_model(item).get_value_as_int())
+                                self._sonar_preview_mode = mode_items[idx]
                             except Exception:
                                 pass
-                        mode_combo.model.get_item_value_model().add_value_changed_fn(_on_mode_changed)
+                        mode_combo.model.add_item_changed_fn(_on_mode_item_changed)
                     except Exception:
                         pass
                 ui.Label(
@@ -1553,17 +1623,17 @@ class PatoSimExtension(omni.ext.IExt):
                 pass
         else:
             try:
-                blank = self._blank_sensor_preview_rgba()
+                blank_cam = self._blank_sensor_preview_rgba()
                 for provider in (
                     self._sensor_preview_image_provider,
                     self._front_camera_preview_provider,
                     self._underwater_camera_preview_provider,
-                    self._sonar_preview_provider,
                 ):
                     provider.set_bytes_data(
-                        list(blank.tobytes()),
+                        list(blank_cam.tobytes()),
                         [self._sensor_preview_target_width, self._sensor_preview_target_height],
                     )
+                self._set_sonar_preview_slot_image(None)
             except Exception:
                 pass
 
@@ -1954,9 +2024,19 @@ class PatoSimExtension(omni.ext.IExt):
                 _read_buffer(getattr(front_stereo, "left", None), "rgb_image"),
                 _read_buffer(getattr(front_stereo, "right", None), "rgb_image"),
             )
-            sonar_preview = _best_visible(
-                _read_buffer(sonar, "rgb_image"),
-            )
+            # Camera preview usa o grid bruto (projecao nativa OceanSim) para debug.
+            # render_planar_preview redimensiona o grid r×azi para o slot do painel
+            # preservando a estrutura de bins original.
+            if sonar is not None:
+                try:
+                    sonar_preview = sonar.render_planar_preview(
+                        width=int(getattr(self, "_sensor_preview_sonar_width", 100)),
+                        height=int(getattr(self, "_sensor_preview_sonar_height", 377)),
+                    )
+                except Exception:
+                    sonar_preview = _best_visible(_read_buffer(sonar, "rgb_image"))
+            else:
+                sonar_preview = None
 
             if _preview_score(front_raw) >= 2.0:
                 camera_map["Front Camera"] = front_raw
@@ -2036,10 +2116,7 @@ class PatoSimExtension(omni.ext.IExt):
             self._underwater_camera_preview_provider,
             camera_map.get("Underwater Camera"),
         )
-        self._set_sensor_preview_provider_image(
-            self._sonar_preview_provider,
-            camera_map.get("Sonar"),
-        )
+        self._set_sonar_preview_slot_image(camera_map.get("Sonar"))
         self._update_sensor_pose_preview_text()
 
     def _get_lidar_backend_status(self):

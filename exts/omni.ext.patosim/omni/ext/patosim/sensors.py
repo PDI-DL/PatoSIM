@@ -1364,27 +1364,27 @@ class OceanSimImagingSonar(Sensor):
 
             # Grade de ranges em metros
             r_vals = np.linspace(min_r, max_r, n_range, dtype=np.float32)
-            # Azimutes em radianos (convenção do sonar: centrado em 90° = frente)
+            # A imagem bruta tem o eixo de azimute invertido pelo kernel
+            # (sonar_image[i, width-j]). Coluna 0 = azimute máximo.
             azi_deg_min = 90.0 - hori_fov / 2.0
             azi_deg_max = 90.0 + hori_fov / 2.0
             azi_vals = np.deg2rad(
-                np.linspace(azi_deg_min, azi_deg_max, n_azi, dtype=np.float32)
+                np.linspace(azi_deg_max, azi_deg_min, n_azi, dtype=np.float32)
             )
 
-            # Converte cada ponto polar → Cartesiano (x=frente, y=lateral)
-            # Convenção: azi=90° → frente (+X), azi<90° → direita, azi>90° → esquerda
+            # Convenção interna do OceanSim:
+            # x_cart = lateral (cos), y_cart = frente (sin), com azi=90° = frente.
             r_grid, azi_grid = np.meshgrid(r_vals, azi_vals, indexing='ij')
-            x_cart = r_grid * np.cos(azi_grid)   # profundidade (frente)
-            y_cart = r_grid * np.sin(azi_grid)   # lateral
+            x_cart = r_grid * np.cos(azi_grid)
+            y_cart = r_grid * np.sin(azi_grid)
 
-            # Mapeia para pixels na imagem de saída
-            # X (frente) mapeado para V (linha), Y (lateral) para U (coluna)
-            x_min, x_max = 0.0, float(max_r)
-            y_min = -float(max_r) * np.sin(np.deg2rad(hori_fov / 2.0))
-            y_max = float(max_r) * np.sin(np.deg2rad(hori_fov / 2.0))
+            lat_half = float(max_r) * np.sin(np.deg2rad(hori_fov / 2.0))
+            lat_min = -lat_half
+            lat_max = lat_half
+            fwd_max = float(max_r)
 
-            col_f = (y_cart - y_min) / max(y_max - y_min, 1e-6) * (size - 1)
-            row_f = (1.0 - (x_cart - x_min) / max(x_max - x_min, 1e-6)) * (size - 1)
+            col_f = (x_cart - lat_min) / max(lat_max - lat_min, 1e-6) * (size - 1)
+            row_f = (1.0 - np.clip(y_cart, 0.0, fwd_max) / max(fwd_max, 1e-6)) * (size - 1)
             col_i = np.clip(col_f.astype(np.int32), 0, size - 1)
             row_i = np.clip(row_f.astype(np.int32), 0, size - 1)
 
@@ -1415,12 +1415,14 @@ class OceanSimImagingSonar(Sensor):
                     x_vals = radius_m * np.cos(angles_rad)
                     y_vals = radius_m * np.sin(angles_rad)
                     cols_local = np.clip(
-                        ((y_vals - y_min) / max(y_max - y_min, 1e-6) * (size - 1)).round().astype(np.int32),
+                        ((x_vals - lat_min) / max(lat_max - lat_min, 1e-6) * (size - 1))
+                        .round().astype(np.int32),
                         0,
                         size - 1,
                     )
                     rows_local = np.clip(
-                        ((1.0 - (x_vals - x_min) / max(x_max - x_min, 1e-6)) * (size - 1)).round().astype(np.int32),
+                        ((1.0 - np.clip(y_vals, 0.0, fwd_max) / max(fwd_max, 1e-6)) * (size - 1))
+                        .round().astype(np.int32),
                         0,
                         size - 1,
                     )
@@ -1476,14 +1478,36 @@ class OceanSimImagingSonar(Sensor):
                         start_y = 0.0
                         end_x = float(max_r) * math.cos(angle_rad)
                         end_y = float(max_r) * math.sin(angle_rad)
-                        start_xy = (
-                            int(np.clip(round((start_y - y_min) / max(y_max - y_min, 1e-6) * (size - 1)), 0, size - 1)),
-                            int(np.clip(round((1.0 - (start_x - x_min) / max(x_max - x_min, 1e-6)) * (size - 1)), 0, size - 1)),
+                        start_col = int(
+                            np.clip(
+                                round((start_x - lat_min) / max(lat_max - lat_min, 1e-6) * (size - 1)),
+                                0,
+                                size - 1,
+                            )
                         )
-                        end_xy = (
-                            int(np.clip(round((end_y - y_min) / max(y_max - y_min, 1e-6) * (size - 1)), 0, size - 1)),
-                            int(np.clip(round((1.0 - (end_x - x_min) / max(x_max - x_min, 1e-6)) * (size - 1)), 0, size - 1)),
+                        start_row = int(
+                            np.clip(
+                                round((1.0 - start_y / max(fwd_max, 1e-6)) * (size - 1)),
+                                0,
+                                size - 1,
+                            )
                         )
+                        end_col = int(
+                            np.clip(
+                                round((end_x - lat_min) / max(lat_max - lat_min, 1e-6) * (size - 1)),
+                                0,
+                                size - 1,
+                            )
+                        )
+                        end_row = int(
+                            np.clip(
+                                round((1.0 - end_y / max(fwd_max, 1e-6)) * (size - 1)),
+                                0,
+                                size - 1,
+                            )
+                        )
+                        start_xy = (start_col, start_row)
+                        end_xy = (end_col, end_row)
                         cv2.line(overlay_rgb, start_xy, end_xy, overlay_color, 1, lineType=cv2.LINE_AA)
                         cv2.line(
                             overlay_alpha,
