@@ -25,6 +25,10 @@ class Config:
     enable_rov_barometer: bool = True
     dataset_object_position: tuple = (0.0, 0.0, 0.0)
     rov_operating_depth: float = -2.0
+    sonar_save_raw_npy: bool = True
+    sonar_save_png16: bool = False
+    sonar_save_polar_png: bool = False
+    sonar_save_jpeg: bool = True
 
     def to_json(self):
         return json.dumps(asdict(self), indent=2)

@@ -193,27 +193,29 @@ class ImagingSonarSensor(Camera):
         self.writing = False
         self._viewport = viewport
         self._device = str(wp.get_preferred_device())
+        self._use_gpu_annotators = bool(viewport or output_dir is not None) and not bool(if_array_copy)
         self.scan_data = {}
         self.id = 0
+
+        annotator_kwargs = {"do_array_copy": if_array_copy}
+        if self._use_gpu_annotators:
+            annotator_kwargs["device"] = self._device
 
         self.pointcloud_annot = rep.AnnotatorRegistry.get_annotator(
             name="pointcloud",
             init_params={"includeUnlabelled": include_unlabelled},
-            do_array_copy=if_array_copy,
-            device=self._device
-            )
-        
+            **annotator_kwargs,
+        )
+
         self.cameraParams_annot = rep.AnnotatorRegistry.get_annotator(
             name="CameraParams",
-            do_array_copy=if_array_copy,
-            device=self._device
-            )
-        
+            **annotator_kwargs,
+        )
+
         self.semanticSeg_annot = rep.AnnotatorRegistry.get_annotator(
             name='semantic_segmentation',
             init_params={"colorize": False},
-            do_array_copy=if_array_copy,
-            device=self._device
+            **annotator_kwargs,
         )
 
         print(f'[{self._name}] Using {self._device}' )
@@ -239,7 +241,18 @@ class ImagingSonarSensor(Camera):
         self.range_dependent_ray_noise.zero_()
         self.gau_noise.zero_()
 
-        
+    def _ensure_warp_array(self, data, dtype):
+        if data is None:
+            return None
+        if hasattr(data, "ptr") and hasattr(data, "device"):
+            return data
+        try:
+            arr = np.asarray(data)
+        except Exception:
+            return None
+        if arr.size == 0:
+            return None
+        return wp.array(np.ascontiguousarray(arr), dtype=dtype, device=self._device)
 
     def scan(self):
 
@@ -256,15 +269,38 @@ class ImagingSonarSensor(Camera):
         # Due to the time to load annotator to cuda, the first few simulation tick gives no annotation in memory.
         # This would also reult error when no mesh within the sonar fov
         # NOTE: Isaac Sim annotator output has squeezed the first dimention after 5.0 update: (1,N,3) -> (N,3)   
-        if len(self.semanticSeg_annot.get_data()['info']['idToLabels']) !=0:
-            self.scan_data['pcl'] = self.pointcloud_annot.get_data(device=self._device)['data']  # shape :(N,3) <class 'warp.types.array'>
-            self.scan_data['normals'] = self.pointcloud_annot.get_data(device=self._device)['info']['pointNormals'] # shape :(N,4) <class 'warp.types.array'>
-            self.scan_data['semantics'] = self.pointcloud_annot.get_data(device=self._device)['info']['pointSemantic'] # shape: (N) <class 'warp.types.array'>
-            self.scan_data['viewTransform'] = self.cameraParams_annot.get_data()['cameraViewTransform'].reshape(4,4).T # 4 by 4 np.ndarray extrinsic matrix
-            self.scan_data['idToLabels'] = self.semanticSeg_annot.get_data()['info']['idToLabels'] # dict 
-            return True
-        else:
+        semantic_payload = self.semanticSeg_annot.get_data()
+        semantic_info = semantic_payload.get('info', {}) if isinstance(semantic_payload, dict) else {}
+        id_to_labels = semantic_info.get('idToLabels', {})
+        if len(id_to_labels) == 0:
             return False
+
+        if self._use_gpu_annotators:
+            pointcloud_payload = self.pointcloud_annot.get_data(device=self._device)
+        else:
+            pointcloud_payload = self.pointcloud_annot.get_data()
+        pcl = pointcloud_payload.get('data') if isinstance(pointcloud_payload, dict) else None
+        pointcloud_info = pointcloud_payload.get('info', {}) if isinstance(pointcloud_payload, dict) else {}
+        normals = pointcloud_info.get('pointNormals')
+        semantics = pointcloud_info.get('pointSemantic')
+        camera_payload = self.cameraParams_annot.get_data()
+        view_transform = camera_payload.get('cameraViewTransform') if isinstance(camera_payload, dict) else None
+
+        if pcl is None or normals is None or semantics is None or view_transform is None:
+            return False
+
+        try:
+            if int(pcl.shape[0]) <= 0 or int(normals.shape[0]) <= 0 or int(semantics.shape[0]) <= 0:
+                return False
+        except Exception:
+            return False
+
+        self.scan_data['pcl'] = pcl  # shape :(N,3) <class 'warp.types.array'>
+        self.scan_data['normals'] = normals  # shape :(N,4) <class 'warp.types.array'>
+        self.scan_data['semantics'] = semantics  # shape: (N) <class 'warp.types.array'>
+        self.scan_data['viewTransform'] = view_transform.reshape(4,4).T  # 4 by 4 np.ndarray extrinsic matrix
+        self.scan_data['idToLabels'] = id_to_labels  # dict
+        return True
 
 
     def make_sonar_data(self, 
@@ -316,16 +352,20 @@ class ImagingSonarSensor(Camera):
             return indexToProp_array
 
         if self.scan():
-            num_points = self.scan_data['pcl'].shape[0]
+            pcl = self._ensure_warp_array(self.scan_data['pcl'], wp.vec3)
+            normals = self._ensure_warp_array(self.scan_data['normals'], wp.vec4)
+            semantics = self._ensure_warp_array(self.scan_data['semantics'], wp.int32)
+            if pcl is None or normals is None or semantics is None:
+                return
+            num_points = pcl.shape[0]
+            if int(num_points) <= 0:
+                return
             # Load these small numpy arrays to cuda
             indexToRefl = wp.array(make_indexToProp_array(idToLabels=self.scan_data['idToLabels'],
                                                          query_property=query_prop),
-                                                         dtype=wp.float32)
+                                                         dtype=wp.float32,
+                                                         device=self._device)
             viewTransform=wp.mat44(self.scan_data['viewTransform'])
-            # directly use warp array loaded on cuda
-            pcl = self.scan_data['pcl']
-            normals = self.scan_data['normals']
-            semantics = self.scan_data['semantics']
         else:
             return
 

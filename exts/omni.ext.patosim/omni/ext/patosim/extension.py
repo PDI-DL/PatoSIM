@@ -56,6 +56,7 @@ _CAMERA_PREVIEW_RESOLUTION_PRESETS = [
     ("Grande   320x180 | sonar 130x490", 320, 180, 130, 490),
     ("HD       426x240 | sonar 160x604", 426, 240, 160, 604),
 ]
+_SONAR_GRID_ASPECT = 520 / 1960
 
 
 class PatoSimExtension(omni.ext.IExt):
@@ -115,12 +116,20 @@ class PatoSimExtension(omni.ext.IExt):
         self._sensor_preview_latest_pointcloud = {}
         self._sensor_pose_text = "Waiting for scenario..."
         self._sensor_pose_label = None
+        self._sensor_preview_backend_label = None
         self._sensor_preview_enabled = True
         self._sensor_preview_mode = "simplified"
         self._sensor_preview_compact_layout = False
         self._preview_mode_items = ["simplified", "robust"]
         self._preview_update_interval_frames = 8
         self._preview_frame_counter = 0
+        self._camera_frame_counter = 0
+        self._lidar_frame_counter = 0
+        self._sonar_frame_counter = 0
+        self._camera_frame_interval = 8
+        self._lidar_frame_interval = 10
+        self._sonar_frame_interval = 14
+        self._sonar_preview_last_generation = -1
         self._lidar_preview_enabled = False
         self._lidar_preview_mode = "simplified"
         self._lidar_preview_auto_range = True
@@ -199,7 +208,7 @@ class PatoSimExtension(omni.ext.IExt):
                 self._sonar_preview_provider,
             ):
                 provider.set_bytes_data(
-                    list(blank.tobytes()),
+                    bytearray(blank.tobytes()),
                     [self._sensor_preview_target_width, self._sensor_preview_target_height],
                 )
             blank_lidar = np.zeros(
@@ -208,18 +217,23 @@ class PatoSimExtension(omni.ext.IExt):
             )
             blank_lidar[:, :, 3] = 255
             self._lidar_preview_image_provider.set_bytes_data(
-                list(blank_lidar.tobytes()),
+                bytearray(blank_lidar.tobytes()),
                 [self._lidar_preview_target_size, self._lidar_preview_target_size],
             )
         except Exception:
             pass
         # Sonar dedicated preview window
         self._sonar_preview_window_provider = omni.ui.ByteImageProvider()
+        self._sonar_preview_planar_provider = omni.ui.ByteImageProvider()
         self._sonar_preview_enabled = False
-        self._sonar_preview_mode = "polar"   # "polar" | "planar"
         self._sonar_preview_size = 400
+        self._sonar_preview_backend_label = None
+        _init_sz = self._sonar_preview_size
+        _init_pw = max(1, round(_init_sz * _SONAR_GRID_ASPECT))
         self._sonar_preview_window_obj = omni.ui.Window(
-            "PatoSim - Sonar Preview", width=440, height=560
+            "PatoSim - Sonar Preview",
+            width=_init_sz + _init_pw + 80,
+            height=_init_sz + 140,
         )
         try:
             self._sonar_preview_window_obj.visible = False
@@ -234,8 +248,14 @@ class PatoSimExtension(omni.ext.IExt):
             )
             blank_sonar[:, :, 3] = 255
             self._sonar_preview_window_provider.set_bytes_data(
-                list(blank_sonar.tobytes()),
+                bytearray(blank_sonar.tobytes()),
                 [self._sonar_preview_size, self._sonar_preview_size],
+            )
+            blank_planar = np.zeros((self._sonar_preview_size, _init_pw, 4), dtype=np.uint8)
+            blank_planar[:, :, 3] = 255
+            self._sonar_preview_planar_provider.set_bytes_data(
+                bytearray(blank_planar.tobytes()),
+                [_init_pw, self._sonar_preview_size],
             )
         except Exception:
             pass
@@ -255,6 +275,14 @@ class PatoSimExtension(omni.ext.IExt):
         self._sonar_gau_noise_model = ui.SimpleFloatModel(0.05)
         self._sonar_ray_noise_model = ui.SimpleFloatModel(0.05)
         self._sonar_attenuation_model = ui.SimpleFloatModel(0.3)
+        self._sonar_intensity_offset_model = ui.SimpleFloatModel(0.0)
+        self._sonar_intensity_gain_model = ui.SimpleFloatModel(1.0)
+        self._sonar_central_peak_model = ui.SimpleFloatModel(2.0)
+        self._sonar_central_std_model = ui.SimpleFloatModel(0.001)
+        self._sonar_binning_method_model = ui.SimpleIntModel(0)
+        self._sonar_normalizing_method_model = ui.SimpleIntModel(1)
+        self._sonar_yaml_path_model = ui.SimpleStringModel("")
+        self._sonar_advanced_callbacks_bound = False
         self._deferred_sensor_processing_model = ui.SimpleBoolModel(self.deferred_sensor_processing_enabled)
         self._disable_previews_during_recording_model = ui.SimpleBoolModel(self.disable_previews_during_recording)
         self._record_pointcloud_toggle_model = ui.SimpleBoolModel(self._record_pointcloud_enabled)
@@ -270,15 +298,6 @@ class PatoSimExtension(omni.ext.IExt):
             )
             self._sonar_preview_toggle_model.add_value_changed_fn(
                 self._on_sonar_preview_toggle_changed
-            )
-            self._sonar_gau_noise_model.add_value_changed_fn(
-                self._on_sonar_noise_params_changed
-            )
-            self._sonar_ray_noise_model.add_value_changed_fn(
-                self._on_sonar_noise_params_changed
-            )
-            self._sonar_attenuation_model.add_value_changed_fn(
-                self._on_sonar_noise_params_changed
             )
             self._deferred_sensor_processing_model.add_value_changed_fn(
                 self._on_deferred_sensor_processing_changed
@@ -680,7 +699,7 @@ class PatoSimExtension(omni.ext.IExt):
     def draw_occ_map(self):
         if self.scenario is not None:
             image = self.scenario.occupancy_map.ros_image().copy().convert("RGBA")
-            data = list(image.tobytes())
+            data = bytearray(image.tobytes())
             self._occupancy_map_image_provider.set_bytes_data(data, [image.width, image.height])
             self._update_occ_map_goal_info_text()
             self._occ_map_frame.rebuild()
@@ -726,9 +745,6 @@ class PatoSimExtension(omni.ext.IExt):
         mode_combo_width = 130 if compact else 160
         cam_w = int(self._sensor_preview_target_width)
         cam_h = int(self._sensor_preview_target_height)
-        son_w = int(self._sensor_preview_sonar_width)
-        son_h = int(self._sensor_preview_sonar_height)
-        row_h = max(cam_h, son_h) + 32
         with ui.ScrollingFrame():
             with ui.VStack(spacing=8, height=0):
                 with ui.HStack(height=title_height):
@@ -763,12 +779,13 @@ class PatoSimExtension(omni.ext.IExt):
                 with ui.VStack(spacing=2, height=section_height):
                     ui.Label(self._sensor_preview_title_text("Resolution"))
                     with ui.HStack(height=20):
-                        ui.Label(
-                            f"Cam {cam_w}x{cam_h}"
-                            f"  |  Sonar {son_w}x{son_h}"
-                        )
+                        ui.Label(f"Cameras {cam_w}x{cam_h}")
                         ui.Spacer()
-                with ui.HStack(height=row_h, spacing=8):
+                self._sensor_preview_backend_label = ui.Label(
+                    f"UW backend: {self._get_camera_preview_backend_status()}",
+                    height=18,
+                )
+                with ui.HStack(height=cam_h + 32, spacing=8):
                     with ui.VStack(width=cam_w + 8, spacing=4):
                         ui.Label("Front Camera")
                         ui.ImageWithProvider(
@@ -782,13 +799,6 @@ class PatoSimExtension(omni.ext.IExt):
                             self._underwater_camera_preview_provider,
                             width=cam_w,
                             height=cam_h,
-                        )
-                    with ui.VStack(width=son_w + 8, spacing=4):
-                        ui.Label("Sonar (grid r x azi)")
-                        ui.ImageWithProvider(
-                            self._sonar_preview_provider,
-                            width=son_w,
-                            height=son_h,
                         )
                 ui.Spacer(height=4)
                 self._sensor_pose_header_label = ui.Label("Sensor Poses Relative To Robot")
@@ -940,42 +950,52 @@ class PatoSimExtension(omni.ext.IExt):
             canvas[y0:y1, x0:x1, :] = rgba[: y1 - y0, : x1 - x0, :]
             rgba = canvas
         provider.set_bytes_data(
-            list(rgba.tobytes()),
+            bytearray(rgba.tobytes()),
             [int(rgba.shape[1]), int(rgba.shape[0])],
         )
 
-    def _set_sonar_preview_slot_image(self, image) -> None:
-        """Envia a imagem do slot Sonar com as dimensoes especificas do sonar."""
-        sw = int(self._sensor_preview_sonar_width)
-        sh = int(self._sensor_preview_sonar_height)
-        if image is None:
-            blank = np.zeros((sh, sw, 4), dtype=np.uint8)
-            blank[:, :, 3] = 255
-            self._sonar_preview_provider.set_bytes_data(list(blank.tobytes()), [sw, sh])
-            return
+    def _configure_camera_preview_modules(self, enabled: bool) -> None:
         try:
-            import cv2
-
-            arr = np.asarray(image, dtype=np.uint8)
-            if arr.ndim == 2:
-                arr = np.stack([arr, arr, arr, np.full_like(arr, 255)], axis=-1)
-            elif arr.shape[2] == 3:
-                arr = np.concatenate(
-                    [arr, np.full((*arr.shape[:2], 1), 255, dtype=np.uint8)],
-                    axis=-1,
-                )
-            if arr.shape[1] != sw or arr.shape[0] != sh:
-                rgb = arr[:, :, :3]
-                rgb_r = cv2.resize(rgb, (sw, sh), interpolation=cv2.INTER_LINEAR)
-                arr = np.concatenate(
-                    [rgb_r, np.full((sh, sw, 1), 255, dtype=np.uint8)],
-                    axis=-1,
-                )
-            self._sonar_preview_provider.set_bytes_data(list(arr.tobytes()), [sw, sh])
+            scenario = getattr(self, "scenario", None)
+            robot = getattr(scenario, "robot", None)
         except Exception:
-            blank = np.zeros((sh, sw, 4), dtype=np.uint8)
-            blank[:, :, 3] = 255
-            self._sonar_preview_provider.set_bytes_data(list(blank.tobytes()), [sw, sh])
+            robot = None
+        if robot is None:
+            return
+
+        preview_resolution = (
+            int(getattr(self, "_sensor_preview_target_width", 256)),
+            int(getattr(self, "_sensor_preview_target_height", 144)),
+        )
+
+        for name in ("front_camera", "front_stereo", "fisheye_left", "fisheye_right"):
+            try:
+                mod = getattr(robot, name, None)
+                if mod is None:
+                    continue
+                if hasattr(mod, "set_preview_enabled"):
+                    mod.set_preview_enabled(
+                        enabled,
+                        resolution=preview_resolution,
+                        prefer_cuda=True,
+                    )
+                elif hasattr(mod, "left") or hasattr(mod, "right"):
+                    left = getattr(mod, "left", None)
+                    right = getattr(mod, "right", None)
+                    if hasattr(left, "set_preview_enabled"):
+                        left.set_preview_enabled(
+                            enabled,
+                            resolution=preview_resolution,
+                            prefer_cuda=True,
+                        )
+                    if hasattr(right, "set_preview_enabled"):
+                        right.set_preview_enabled(
+                            enabled,
+                            resolution=preview_resolution,
+                            prefer_cuda=True,
+                        )
+            except Exception:
+                pass
 
     def _sync_oceansim_sensor_models_from_source(self, source) -> None:
         if source is None:
@@ -1177,13 +1197,18 @@ class PatoSimExtension(omni.ext.IExt):
             self._sensor_preview_resolution_model.set_value(idx)
         except Exception:
             pass
-        total_w = 2 * (cam_w + 8) + (son_w + 8) + 48
-        total_h = max(cam_h, son_h) + 340
+        total_w = 2 * (cam_w + 8) + 48
+        total_h = cam_h + 340
         try:
             self._sensor_preview_window.width = max(total_w, 480)
             self._sensor_preview_window.height = max(total_h, 480)
         except Exception:
             pass
+        if bool(getattr(self, "_sensor_preview_enabled", False)):
+            try:
+                self._configure_camera_preview_modules(True)
+            except Exception:
+                pass
 
     def _apply_lidar_preview_mode_settings(self):
         if self._lidar_preview_mode == "robust":
@@ -1414,87 +1439,251 @@ class PatoSimExtension(omni.ext.IExt):
         sonar = self._get_active_sonar()
         if sonar is None:
             return
-        try:
-            gau_noise = float(self._sonar_gau_noise_model.as_float)
-            ray_noise = float(self._sonar_ray_noise_model.as_float)
-            attenuation = float(self._sonar_attenuation_model.as_float)
-        except Exception:
-            return
+        binning_items = ["sum", "mean"]
+        normalizing_items = ["all", "range"]
         try:
             sonar.set_render_model_params(
-                gau_noise_param=gau_noise,
-                ray_noise_param=ray_noise,
-                attenuation=attenuation,
+                gau_noise_param=float(self._sonar_gau_noise_model.as_float),
+                ray_noise_param=float(self._sonar_ray_noise_model.as_float),
+                attenuation=float(self._sonar_attenuation_model.as_float),
+                intensity_offset=float(self._sonar_intensity_offset_model.as_float),
+                intensity_gain=float(self._sonar_intensity_gain_model.as_float),
+                central_peak=float(self._sonar_central_peak_model.as_float),
+                central_std=float(self._sonar_central_std_model.as_float),
+                binning_method=binning_items[
+                    max(
+                        0,
+                        min(
+                            int(self._sonar_binning_method_model.as_int),
+                            len(binning_items) - 1,
+                        ),
+                    )
+                ],
+                normalizing_method=normalizing_items[
+                    max(
+                        0,
+                        min(
+                            int(self._sonar_normalizing_method_model.as_int),
+                            len(normalizing_items) - 1,
+                        ),
+                    )
+                ],
             )
-            return
         except Exception:
             pass
-        sensor = getattr(sonar, "_sensor", None)
-        if sensor is None:
+
+    def _sync_sonar_ui_from_sonar(self, sonar) -> None:
+        """Atualiza todos os modelos da UI com os valores atuais do sonar."""
+        if sonar is None:
             return
+        binning_items = ["sum", "mean"]
+        normalizing_items = ["all", "range"]
         try:
-            sensor.gau_noise_param = gau_noise
-            sensor.ray_noise_param = ray_noise
-            sensor.attenuation = attenuation
+            self._sonar_gau_noise_model.set_value(float(sonar._gau_noise_param))
+            self._sonar_ray_noise_model.set_value(float(sonar._ray_noise_param))
+            self._sonar_attenuation_model.set_value(float(sonar._attenuation))
+            self._sonar_intensity_offset_model.set_value(float(sonar._intensity_offset))
+            self._sonar_intensity_gain_model.set_value(float(sonar._intensity_gain))
+            self._sonar_central_peak_model.set_value(float(sonar._central_peak))
+            self._sonar_central_std_model.set_value(float(sonar._central_std))
+            bi = (
+                binning_items.index(sonar._binning_method)
+                if sonar._binning_method in binning_items
+                else 0
+            )
+            ni = (
+                normalizing_items.index(sonar._normalizing_method)
+                if sonar._normalizing_method in normalizing_items
+                else 1
+            )
+            self._sonar_binning_method_model.set_value(bi)
+            self._sonar_normalizing_method_model.set_value(ni)
         except Exception:
             pass
 
     def _build_sonar_noise_controls(self):
+        binning_items = ["sum", "mean"]
+        normalizing_items = ["all", "range"]
+        bind_callbacks = not bool(getattr(self, "_sonar_advanced_callbacks_bound", False))
+
+        def _changed(_m):
+            self._apply_sonar_noise_params()
+
         with ui.VStack(spacing=4, height=0):
-            for label, model, min_value, max_value in (
+            ui.Label("Ruido", height=16)
+            for label, model, lo, hi in (
                 ("Gau Noise", self._sonar_gau_noise_model, 0.0, 1.0),
                 ("Ray Noise", self._sonar_ray_noise_model, 0.0, 1.0),
                 ("Attenuation", self._sonar_attenuation_model, 0.0, 2.0),
             ):
                 with ui.HStack(height=22):
-                    ui.Label(label, width=90)
-                    ui.FloatDrag(model=model, min=min_value, max=max_value)
+                    ui.Label(label, width=100)
+                    ui.FloatDrag(model=model, min=lo, max=hi)
+                    if bind_callbacks:
+                        try:
+                            model.add_value_changed_fn(_changed)
+                        except Exception:
+                            pass
 
-    def _build_sonar_preview_frame(self):
-        """Janela flutuante de preview do sonar com modo polar e planar."""
-        sz = self._sonar_preview_size
-        with ui.ScrollingFrame():
-            with ui.VStack(spacing=6, height=0):
-                with ui.HStack(height=24):
-                    ui.Label("Sonar Preview", width=120)
-                    ui.Spacer()
-                    ui.Label("Modo", width=40)
-                    mode_items = ["polar", "planar"]
+            ui.Label("Streak central", height=16)
+            for label, model, lo, hi in (
+                ("Peak", self._sonar_central_peak_model, 0.0, 10.0),
+                ("Std", self._sonar_central_std_model, 0.0001, 0.05),
+            ):
+                with ui.HStack(height=22):
+                    ui.Label(label, width=100)
+                    ui.FloatDrag(model=model, min=lo, max=hi)
+                    if bind_callbacks:
+                        try:
+                            model.add_value_changed_fn(_changed)
+                        except Exception:
+                            pass
+
+            ui.Label("Intensidade", height=16)
+            for label, model, lo, hi in (
+                ("Offset", self._sonar_intensity_offset_model, -1.0, 1.0),
+                ("Gain", self._sonar_intensity_gain_model, 0.1, 5.0),
+            ):
+                with ui.HStack(height=22):
+                    ui.Label(label, width=100)
+                    ui.FloatDrag(model=model, min=lo, max=hi)
+                    if bind_callbacks:
+                        try:
+                            model.add_value_changed_fn(_changed)
+                        except Exception:
+                            pass
+
+            ui.Label("Metodos de binning/normalizacao", height=16)
+            with ui.HStack(height=22):
+                ui.Label("Binning", width=100)
+                bin_combo = ui.ComboBox(
+                    int(self._sonar_binning_method_model.as_int),
+                    *binning_items,
+                    width=90,
+                )
+                try:
+                    def _on_bin(m, item):
+                        try:
+                            self._sonar_binning_method_model.set_value(
+                                m.get_item_value_model(item).get_value_as_int()
+                            )
+                            self._apply_sonar_noise_params()
+                        except Exception:
+                            pass
+
+                    bin_combo.model.add_item_changed_fn(_on_bin)
+                except Exception:
+                    pass
+
+            with ui.HStack(height=22):
+                ui.Label("Normalize", width=100)
+                norm_combo = ui.ComboBox(
+                    int(self._sonar_normalizing_method_model.as_int),
+                    *normalizing_items,
+                    width=90,
+                )
+                try:
+                    def _on_norm(m, item):
+                        try:
+                            self._sonar_normalizing_method_model.set_value(
+                                m.get_item_value_model(item).get_value_as_int()
+                            )
+                            self._apply_sonar_noise_params()
+                        except Exception:
+                            pass
+
+                    norm_combo.model.add_item_changed_fn(_on_norm)
+                except Exception:
+                    pass
+
+            ui.Spacer(height=4)
+            ui.Label("YAML", height=16)
+            with ui.HStack(height=22):
+                ui.Label("Path", width=40)
+                ui.StringField(model=self._sonar_yaml_path_model, height=22)
+
+            with ui.HStack(height=24, spacing=6):
+                def _load_yaml():
+                    path = str(self._sonar_yaml_path_model.as_string).strip()
+                    if not path:
+                        return
+                    sonar = self._get_active_sonar()
+                    if sonar is None:
+                        return
                     try:
-                        cur_idx = mode_items.index(self._sonar_preview_mode)
-                    except ValueError:
-                        cur_idx = 0
-                    mode_combo = ui.ComboBox(cur_idx, *mode_items, width=90)
-                    try:
-                        def _on_mode_item_changed(m, item):
-                            try:
-                                idx = int(m.get_item_value_model(item).get_value_as_int())
-                                self._sonar_preview_mode = mode_items[idx]
-                            except Exception:
-                                pass
-                        mode_combo.model.add_item_changed_fn(_on_mode_item_changed)
+                        ok = sonar.load_params_from_yaml(path)
+                        if ok:
+                            self._sync_sonar_ui_from_sonar(sonar)
                     except Exception:
                         pass
-                ui.Label(
-                    "Polar: visao fan (x=frente, y=lateral) | Planar: grid r×azi bruto",
-                    word_wrap=True,
+
+                def _save_yaml():
+                    path = str(self._sonar_yaml_path_model.as_string).strip()
+                    if not path:
+                        return
+                    sonar = self._get_active_sonar()
+                    if sonar is None:
+                        return
+                    try:
+                        self._apply_sonar_noise_params()
+                        sonar.save_params_to_yaml(path)
+                    except Exception:
+                        pass
+
+                ui.Button("Load", clicked_fn=_load_yaml, width=60, height=22)
+                ui.Button("Save", clicked_fn=_save_yaml, width=60, height=22)
+        if bind_callbacks:
+            self._sonar_advanced_callbacks_bound = True
+
+    def _build_sonar_preview_frame(self):
+        """Janela flutuante com fan polar e grid r x azi lado a lado."""
+        sz = self._sonar_preview_size
+        pw = max(1, round(sz * _SONAR_GRID_ASPECT))
+        with ui.ScrollingFrame():
+            with ui.VStack(spacing=6, height=0):
+                with ui.HStack(height=20):
+                    ui.Label("Sonar Preview - Fan + Grid", width=220)
+                    ui.Spacer()
+                self._sonar_preview_backend_label = ui.Label(
+                    f"Backend: {self._get_sonar_preview_backend_status()}",
+                    height=18,
                 )
-                ui.ImageWithProvider(
-                    self._sonar_preview_window_provider,
-                    width=sz,
-                    height=sz,
-                )
+                with ui.HStack(spacing=8, height=18):
+                    ui.Label("Fan polar (Cartesiano)", width=sz)
+                    ui.Spacer(width=8)
+                    ui.Label(f"Grid r x azi OceanSim ({pw}x{sz})", width=pw)
+                with ui.HStack(spacing=8, height=sz + 4):
+                    ui.ImageWithProvider(
+                        self._sonar_preview_window_provider,
+                        width=sz,
+                        height=sz,
+                    )
+                    ui.ImageWithProvider(
+                        self._sonar_preview_planar_provider,
+                        width=pw,
+                        height=sz,
+                    )
                 with ui.HStack(height=22):
-                    ui.Label("Tamanho px", width=80)
+                    ui.Label("Altura px", width=70)
                     size_model = ui.SimpleIntModel(sz)
-                    ui.IntField(model=size_model, width=80, height=20)
+                    ui.IntField(model=size_model, width=70, height=20)
+
                     def _apply_size():
                         try:
-                            self._sonar_preview_size = int(size_model.as_int)
+                            new_sz = max(100, int(size_model.as_int))
+                            self._sonar_preview_size = new_sz
+                            new_pw = max(1, round(new_sz * _SONAR_GRID_ASPECT))
+                            try:
+                                self._sonar_preview_window_obj.width = new_sz + new_pw + 80
+                                self._sonar_preview_window_obj.height = new_sz + 140
+                            except Exception:
+                                pass
                             self._sonar_preview_frame_obj.rebuild()
                         except Exception:
                             pass
+
                     ui.Button("Aplicar", clicked_fn=_apply_size, width=70, height=20)
+                    ui.Spacer()
                 collapsable_frame_cls = getattr(ui, "CollapsableFrame", None)
                 if collapsable_frame_cls is None:
                     collapsable_frame_cls = getattr(ui, "CollapsibleFrame", None)
@@ -1507,7 +1696,7 @@ class PatoSimExtension(omni.ext.IExt):
                     self._build_sonar_noise_controls()
 
     def _refresh_sonar_preview_window(self):
-        """Atualiza o provider da janela de preview do sonar com a renderização atual."""
+        """Atualiza ambos os providers da janela dual de sonar."""
         if not self._sonar_preview_enabled:
             return
         try:
@@ -1516,26 +1705,36 @@ class PatoSimExtension(omni.ext.IExt):
             sonar = getattr(robot, "sonar", None)
             if sonar is None:
                 return
+            try:
+                if self._sonar_preview_backend_label is not None:
+                    self._sonar_preview_backend_label.text = (
+                        f"Backend: {self._get_sonar_preview_backend_status()}"
+                    )
+            except Exception:
+                pass
 
-            sz = self._sonar_preview_size
-            if self._sonar_preview_mode == "polar":
-                img = sonar.render_polar_preview(size=sz)
-            else:
-                img = sonar.render_planar_preview(width=sz, height=sz)
+            sz = int(self._sonar_preview_size)
+            pw = max(1, round(sz * _SONAR_GRID_ASPECT))
 
-            if img is not None:
-                img_rgba = np.asarray(img, dtype=np.uint8)
-                if img_rgba.shape == (sz, sz, 4):
-                    h, w = sz, sz
-                else:
-                    h, w = img_rgba.shape[0], img_rgba.shape[1]
-                    if img_rgba.ndim == 3 and img_rgba.shape[2] == 4:
-                        pass
-                    else:
-                        return
-                self._sonar_preview_window_provider.set_bytes_data(
-                    list(img_rgba.tobytes()), [w, h]
-                )
+            try:
+                polar_img = sonar.render_polar_preview(size=sz)
+                if polar_img is not None:
+                    arr = np.asarray(polar_img, dtype=np.uint8)
+                    self._sonar_preview_window_provider.set_bytes_data(
+                        bytearray(arr.tobytes()), [sz, sz]
+                    )
+            except Exception:
+                pass
+
+            try:
+                planar_img = sonar.render_planar_preview(width=pw, height=sz)
+                if planar_img is not None:
+                    arr = np.asarray(planar_img, dtype=np.uint8)
+                    self._sonar_preview_planar_provider.set_bytes_data(
+                        bytearray(arr.tobytes()), [pw, sz]
+                    )
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -1616,12 +1815,18 @@ class PatoSimExtension(omni.ext.IExt):
             pass
         if enabled:
             try:
-                scenario = getattr(self, "scenario", None)
-                if scenario is not None:
-                    scenario.enable_rgb_rendering()
+                self._configure_camera_preview_modules(True)
+            except Exception:
+                pass
+            try:
+                self._enable_all_cameras()
             except Exception:
                 pass
         else:
+            try:
+                self._configure_camera_preview_modules(False)
+            except Exception:
+                pass
             try:
                 blank_cam = self._blank_sensor_preview_rgba()
                 for provider in (
@@ -1630,10 +1835,9 @@ class PatoSimExtension(omni.ext.IExt):
                     self._underwater_camera_preview_provider,
                 ):
                     provider.set_bytes_data(
-                        list(blank_cam.tobytes()),
+                        bytearray(blank_cam.tobytes()),
                         [self._sensor_preview_target_width, self._sensor_preview_target_height],
                     )
-                self._set_sonar_preview_slot_image(None)
             except Exception:
                 pass
 
@@ -1661,7 +1865,7 @@ class PatoSimExtension(omni.ext.IExt):
                 )
                 blank_lidar[:, :, 3] = 255
                 self._lidar_preview_image_provider.set_bytes_data(
-                    list(blank_lidar.tobytes()),
+                    bytearray(blank_lidar.tobytes()),
                     [self._lidar_preview_target_size, self._lidar_preview_target_size],
                 )
             except Exception:
@@ -1755,8 +1959,21 @@ class PatoSimExtension(omni.ext.IExt):
                 robot = getattr(scenario, "robot", None)
                 sonar = getattr(robot, "sonar", None)
                 if sonar is not None:
-                    sonar.enable_rgb_rendering()
+                    if hasattr(sonar, "set_preview_enabled"):
+                        sonar.set_preview_enabled(True)
+                    else:
+                        sonar.enable_rgb_rendering()
+                    self._sync_sonar_ui_from_sonar(sonar)
                     self._apply_sonar_noise_params()
+            except Exception:
+                pass
+        else:
+            try:
+                scenario = getattr(self, "scenario", None)
+                robot = getattr(scenario, "robot", None)
+                sonar = getattr(robot, "sonar", None)
+                if sonar is not None and hasattr(sonar, "set_preview_enabled"):
+                    sonar.set_preview_enabled(False)
             except Exception:
                 pass
 
@@ -2012,7 +2229,6 @@ class PatoSimExtension(omni.ext.IExt):
         if robot is not None:
             front_camera = getattr(robot, "front_camera", None)
             front_stereo = getattr(robot, "front_stereo", None)
-            sonar = getattr(robot, "sonar", None)
 
             front_raw = _best_visible(
                 _read_buffer(front_camera, "raw_rgb_image"),
@@ -2020,32 +2236,17 @@ class PatoSimExtension(omni.ext.IExt):
                 _read_buffer(getattr(front_stereo, "right", None), "raw_rgb_image"),
             )
             front_underwater = _best_visible(
-                _read_buffer(front_camera, "rgb_image"),
-                _read_buffer(getattr(front_stereo, "left", None), "rgb_image"),
-                _read_buffer(getattr(front_stereo, "right", None), "rgb_image"),
+                _read_buffer(front_camera, "preview_rgb_image", "rgb_image"),
+                _read_buffer(getattr(front_stereo, "left", None), "preview_rgb_image", "rgb_image"),
+                _read_buffer(getattr(front_stereo, "right", None), "preview_rgb_image", "rgb_image"),
             )
-            # Camera preview usa o grid bruto (projecao nativa OceanSim) para debug.
-            # render_planar_preview redimensiona o grid r×azi para o slot do painel
-            # preservando a estrutura de bins original.
-            if sonar is not None:
-                try:
-                    sonar_preview = sonar.render_planar_preview(
-                        width=int(getattr(self, "_sensor_preview_sonar_width", 100)),
-                        height=int(getattr(self, "_sensor_preview_sonar_height", 377)),
-                    )
-                except Exception:
-                    sonar_preview = _best_visible(_read_buffer(sonar, "rgb_image"))
-            else:
-                sonar_preview = None
 
             if _preview_score(front_raw) >= 2.0:
                 camera_map["Front Camera"] = front_raw
             if _preview_score(front_underwater) >= 2.0:
                 camera_map["Underwater Camera"] = front_underwater
-            if _preview_score(sonar_preview) >= 2.0:
-                camera_map["Sonar"] = sonar_preview
 
-            if len(camera_map) >= 3:
+            if len(camera_map) >= 2:
                 return camera_map
 
         valid_items = [(k, v) for k, v in rgb_state.items() if v is not None]
@@ -2080,14 +2281,11 @@ class PatoSimExtension(omni.ext.IExt):
             _find_camera(["underwater"]),
             _find_camera(["uw", "rgb"]),
         )
-        sonar_preview = _find_camera(["sonar"])
 
         if front_raw is not None:
             camera_map["Front Camera"] = front_raw
         if front_underwater is not None:
             camera_map["Underwater Camera"] = front_underwater
-        if sonar_preview is not None:
-            camera_map["Sonar"] = sonar_preview
 
         if len(camera_map) == 0:
             for key, value in sorted(valid_items, key=lambda kv: kv[0]):
@@ -2116,8 +2314,64 @@ class PatoSimExtension(omni.ext.IExt):
             self._underwater_camera_preview_provider,
             camera_map.get("Underwater Camera"),
         )
-        self._set_sonar_preview_slot_image(camera_map.get("Sonar"))
+        try:
+            if self._sensor_preview_backend_label is not None:
+                self._sensor_preview_backend_label.text = (
+                    f"UW backend: {self._get_camera_preview_backend_status()}"
+                )
+        except Exception:
+            pass
         self._update_sensor_pose_preview_text()
+
+    def _get_camera_preview_backend_status(self) -> str:
+        try:
+            scenario = getattr(self, "scenario", None)
+            robot = getattr(scenario, "robot", None)
+        except Exception:
+            robot = None
+        if robot is None:
+            return "no_robot"
+
+        labels = []
+        sensor_candidates = (
+            ("front", getattr(robot, "front_camera", None)),
+            ("stereo_left", getattr(getattr(robot, "front_stereo", None), "left", None)),
+            ("stereo_right", getattr(getattr(robot, "front_stereo", None), "right", None)),
+        )
+        for name, sensor_obj in sensor_candidates:
+            if sensor_obj is None or not hasattr(sensor_obj, "get_preview_backend_status"):
+                continue
+            try:
+                status = sensor_obj.get_preview_backend_status()
+            except Exception:
+                status = "unknown"
+            labels.append(f"{name}:{status}")
+
+        return " | ".join(labels) if labels else "unavailable"
+
+    def _get_sonar_preview_backend_status(self) -> str:
+        try:
+            scenario = getattr(self, "scenario", None)
+            robot = getattr(scenario, "robot", None)
+            sonar = getattr(robot, "sonar", None)
+        except Exception:
+            sonar = None
+        if sonar is None:
+            return "no_sonar"
+
+        parts = []
+        if hasattr(sonar, "get_preview_backend_status"):
+            try:
+                parts.append(f"preview:{sonar.get_preview_backend_status()}")
+            except Exception:
+                parts.append("preview:unknown")
+        status_buf = getattr(sonar, "status", None)
+        if status_buf is not None:
+            try:
+                parts.append(f"sensor:{status_buf.get_value()}")
+            except Exception:
+                pass
+        return " | ".join(parts) if parts else "unknown"
 
     def _get_lidar_backend_status(self):
         try:
@@ -2338,7 +2592,7 @@ class PatoSimExtension(omni.ext.IExt):
                     self._lidar_preview_history = self._lidar_preview_history[-keep:]
             rgba = self._build_lidar_preview_rgba(pointcloud_state)
             self._lidar_preview_image_provider.set_bytes_data(
-                list(rgba.tobytes()),
+                bytearray(rgba.tobytes()),
                 [int(rgba.shape[1]), int(rgba.shape[0])],
             )
             if self._lidar_preview_stats_label is not None:
@@ -2857,23 +3111,34 @@ class PatoSimExtension(omni.ext.IExt):
             if not is_alive:
                 self.reset()
 
-            self._preview_frame_counter += 1
-            preview_interval = max(1, int(getattr(self, "_preview_update_interval_frames", 2)))
-            should_update_preview = (self._preview_frame_counter % preview_interval) == 0
+            self._camera_frame_counter += 1
+            self._lidar_frame_counter += 1
+            self._sonar_frame_counter += 1
+
+            camera_interval = max(1, int(getattr(self, "_camera_frame_interval", 8)))
+            lidar_interval = max(1, int(getattr(self, "_lidar_frame_interval", 10)))
+            sonar_interval = max(1, int(getattr(self, "_sonar_frame_interval", 14)))
+
+            should_update_camera = (self._camera_frame_counter % camera_interval) == 0
+            should_update_lidar = (self._lidar_frame_counter % lidar_interval) == 0
+            should_update_sonar = (self._sonar_frame_counter % sonar_interval) == 0
             full_sensor_recording_enabled = bool(
                 (self.writer is not None) and self._should_record_full_sensor_payload()
             )
 
             rgb_state_for_preview = {}
             pointcloud_state_for_preview = None
-            need_rgb_state = ((should_update_preview and sensor_preview_enabled) or full_sensor_recording_enabled)
+            need_rgb_state = (
+                (should_update_camera and sensor_preview_enabled)
+                or full_sensor_recording_enabled
+            )
             if need_rgb_state:
                 try:
                     rgb_state_for_preview = scenario.state_dict_rgb()
                 except Exception:
                     rgb_state_for_preview = {}
 
-            if should_update_preview and lidar_preview_enabled:
+            if should_update_lidar and lidar_preview_enabled:
                 try:
                     pointcloud_state_for_preview = scenario.state_dict_pointcloud_preview()
                     if isinstance(pointcloud_state_for_preview, dict) and len(pointcloud_state_for_preview) > 0:
@@ -2881,7 +3146,9 @@ class PatoSimExtension(omni.ext.IExt):
                 except Exception:
                     pointcloud_state_for_preview = None
 
-            if should_update_preview and sensor_preview_enabled:
+            _cam_win = getattr(self, "_sensor_preview_window", None)
+            _cam_win_visible = bool(getattr(_cam_win, "visible", False))
+            if should_update_camera and sensor_preview_enabled and _cam_win_visible:
                 if isinstance(rgb_state_for_preview, dict) and len(rgb_state_for_preview) > 0:
                     self._sensor_preview_latest_rgb = rgb_state_for_preview
                 camera_input = (
@@ -2894,36 +3161,51 @@ class PatoSimExtension(omni.ext.IExt):
                     self._refresh_sensor_preview(self._sensor_preview_latest_camera_map)
                 except Exception:
                     pass
-                if lidar_preview_enabled:
-                    try:
-                        lidar_input = (
-                            pointcloud_state_for_preview
-                            if isinstance(pointcloud_state_for_preview, dict) and len(pointcloud_state_for_preview) > 0
-                            else self._sensor_preview_latest_pointcloud
-                        )
-                        self._refresh_lidar_preview(lidar_input)
-                    except Exception:
-                        pass
-                if getattr(self, "_sonar_preview_enabled", False):
-                    try:
-                        self._refresh_sonar_preview_window()
-                    except Exception:
-                        pass
-            elif should_update_preview:
-                if lidar_preview_enabled:
-                    try:
-                        lidar_input = (
-                            pointcloud_state_for_preview
-                            if isinstance(pointcloud_state_for_preview, dict) and len(pointcloud_state_for_preview) > 0
-                            else self._sensor_preview_latest_pointcloud
-                        )
-                        self._refresh_lidar_preview(lidar_input)
-                    except Exception:
-                        pass
             else:
                 try:
                     if sensor_preview_enabled:
                         self._update_sensor_pose_preview_text()
+                except Exception:
+                    pass
+
+            _lidar_win_visible = True
+            try:
+                _lidar_win = getattr(self, "_lidar_preview_window", None)
+                if _lidar_win is not None:
+                    _lidar_win_visible = bool(getattr(_lidar_win, "visible", True))
+            except Exception:
+                pass
+            if should_update_lidar and lidar_preview_enabled and _lidar_win_visible:
+                try:
+                    lidar_input = (
+                        pointcloud_state_for_preview
+                        if isinstance(pointcloud_state_for_preview, dict) and len(pointcloud_state_for_preview) > 0
+                        else self._sensor_preview_latest_pointcloud
+                    )
+                    self._refresh_lidar_preview(lidar_input)
+                except Exception:
+                    pass
+
+            _sonar_win = getattr(self, "_sonar_preview_window_obj", None)
+            _sonar_win_visible = bool(getattr(_sonar_win, "visible", False))
+
+            _sonar_obj = getattr(
+                getattr(getattr(scenario, "robot", None), "sonar", None),
+                "_data_generation",
+                None,
+            )
+            _sonar_gen = _sonar_obj if isinstance(_sonar_obj, int) else -2
+            _sonar_data_new = (_sonar_gen != getattr(self, "_sonar_preview_last_generation", -1))
+
+            if (
+                should_update_sonar
+                and getattr(self, "_sonar_preview_enabled", False)
+                and _sonar_win_visible
+                and _sonar_data_new
+            ):
+                self._sonar_preview_last_generation = _sonar_gen
+                try:
+                    self._refresh_sonar_preview_window()
                 except Exception:
                     pass
             
@@ -3609,7 +3891,7 @@ class PatoSimExtension(omni.ext.IExt):
             robot = getattr(self.scenario, 'robot', None)
             if robot is None:
                 return
-            for name in ('front_stereo', 'fisheye_left', 'fisheye_right'):
+            for name in ('front_camera', 'front_stereo', 'fisheye_left', 'fisheye_right'):
                 try:
                     mod = getattr(robot, name, None)
                     if mod is None:
@@ -3634,7 +3916,7 @@ class PatoSimExtension(omni.ext.IExt):
             robot = getattr(self.scenario, 'robot', None)
             if robot is None:
                 return
-            for name in ('front_stereo', 'fisheye_left', 'fisheye_right'):
+            for name in ('front_camera', 'front_stereo', 'fisheye_left', 'fisheye_right'):
                 try:
                     mod = getattr(robot, name, None)
                     if mod is None:

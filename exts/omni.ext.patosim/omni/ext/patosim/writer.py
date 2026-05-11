@@ -19,6 +19,7 @@ import PIL.Image
 import numpy as np
 import shutil
 import json
+from typing import Optional
 
 try:
     import open3d as o3d
@@ -86,6 +87,77 @@ class Writer:
         except Exception:
             pass
         PIL.Image.fromarray(preview_np[..., :3]).save(output_path)
+
+    def write_sonar_data_package(
+        self,
+        intensity: Optional[np.ndarray],
+        metadata: dict,
+        step: int,
+        *,
+        save_npy: bool = True,
+        save_png16: bool = True,
+        save_polar_png: bool = False,
+        sonar_ref=None,
+        polar_size: int = 512,
+    ) -> None:
+        """Grava pacote de dados do sonar em múltiplos formatos."""
+        base = os.path.join(self.path, "state", "sonar")
+
+        if intensity is not None:
+            arr = np.asarray(intensity, dtype=np.float32)
+
+            if save_npy:
+                try:
+                    folder = os.path.join(base, "raw")
+                    os.makedirs(folder, exist_ok=True)
+                    np.save(os.path.join(folder, f"{step:08d}.npy"), arr)
+                except Exception:
+                    pass
+
+            if save_png16:
+                try:
+                    folder = os.path.join(base, "png16")
+                    os.makedirs(folder, exist_ok=True)
+                    u16 = np.clip(arr * 65535.0, 0, 65535).astype(np.uint16)
+                    img = PIL.Image.fromarray(u16, mode="I;16")
+                    img.save(os.path.join(folder, f"{step:08d}.png"))
+                except Exception:
+                    pass
+
+        if save_polar_png and sonar_ref is not None:
+            try:
+                polar_rgba = sonar_ref.render_polar_preview(size=polar_size)
+                if polar_rgba is not None:
+                    folder = os.path.join(base, "polar_png")
+                    os.makedirs(folder, exist_ok=True)
+                    polar_arr = np.asarray(polar_rgba, dtype=np.uint8)
+                    img = PIL.Image.fromarray(polar_arr, mode="RGBA")
+                    img.save(os.path.join(folder, f"{step:08d}.png"))
+            except Exception:
+                pass
+
+        if metadata:
+            try:
+                folder = os.path.join(base, "meta")
+                os.makedirs(folder, exist_ok=True)
+                meta_path = os.path.join(folder, f"{step:08d}.json")
+
+                def _to_serializable(value):
+                    if isinstance(value, np.ndarray):
+                        return value.tolist()
+                    if isinstance(value, dict):
+                        return {str(k): _to_serializable(v) for k, v in value.items()}
+                    if isinstance(value, (list, tuple)):
+                        return [_to_serializable(v) for v in value]
+                    if isinstance(value, (np.integer, np.floating)):
+                        return value.item()
+                    return value
+
+                safe_meta = {k: _to_serializable(v) for k, v in metadata.items()}
+                with open(meta_path, "w", encoding="utf-8") as f:
+                    json.dump(safe_meta, f, indent=2)
+            except Exception:
+                pass
 
     def write_state_dict_segmentation(self, state_segmentation: dict, step: int):
         for name, value in state_segmentation.items():

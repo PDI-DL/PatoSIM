@@ -91,7 +91,7 @@ async def _make_underwater_occupancy_map_async(
     cell_size: float = 0.25,
 ) -> OccupancyMap:
     try:
-        from omni.ext.patosim.utils.stage_utils import occupancy_map_generate_from_prim_async as _gen
+        from omni.ext.patosim.utils.occupancy_map_utils import occupancy_map_generate_from_prim_async as _gen
         omap = await _gen(
             scene_prim_path,
             cell_size=cell_size,

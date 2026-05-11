@@ -4,9 +4,12 @@ import warp as wp
 @wp.func
 def cartesian_to_spherical(cart: wp.vec3) -> wp.vec3:
     r = wp.sqrt(cart[0]*cart[0] + cart[1]*cart[1] + cart[2]*cart[2])
+    if r <= wp.float32(1.0e-6):
+        return wp.vec3(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+    cos_theta = wp.clamp(cart[2] / r, wp.float32(-1.0), wp.float32(1.0))
     return wp.vec3(r,
                 wp.atan2(cart[1], cart[0]),
-                wp.acos(cart[2] / r)
+                wp.acos(cos_theta)
                 )
                                     
 
@@ -30,9 +33,15 @@ def compute_intensity(pcl: wp.array(ndim=2, dtype=wp.float32),
     incidence = pcl_vec - sensor_loc
     # Will use warp.math.norm_l2() in future release
     dist = wp.sqrt(incidence[0]*incidence[0] + incidence[1]*incidence[1] + incidence[2]*incidence[2])
+    if dist <= wp.float32(1.0e-6):
+        intensity[tid] = wp.float32(0.0)
+        return
     unit_directs = wp.normalize(pcl_vec - sensor_loc)
     cos_theta = wp.dot(-unit_directs, normal_vec)
-    reflectivity = indexToRefl[semantics[tid]]
+    reflectivity = wp.float32(1.0)
+    semantic_id = wp.int32(semantics[tid])
+    if semantic_id >= 0 and semantic_id < indexToRefl.shape[0]:
+        reflectivity = indexToRefl[semantic_id]
     intensity[tid] = reflectivity * cos_theta * wp.exp(-attenuation * dist)
 
 @wp.kernel
@@ -71,8 +80,12 @@ def bin_intensity(pcl: wp.array(dtype=wp.vec3),
     # Calculate the bin indices for range and azimuth
     x_bin_idx = wp.int32((x - x_offset) / x_res)
     y_bin_idx = wp.int32((y - y_offset) / y_res)
-    wp.atomic_add(bin_sum, x_bin_idx, y_bin_idx, intensity[tid])
-    wp.atomic_add(bin_count, x_bin_idx, y_bin_idx, 1)
+    if (
+        x_bin_idx >= 0 and x_bin_idx < bin_sum.shape[0] and
+        y_bin_idx >= 0 and y_bin_idx < bin_sum.shape[1]
+    ):
+        wp.atomic_add(bin_sum, x_bin_idx, y_bin_idx, intensity[tid])
+        wp.atomic_add(bin_count, x_bin_idx, y_bin_idx, 1)
 
 @wp.kernel 
 def average(sum: wp.array(ndim=2, dtype=wp.float32),
@@ -148,7 +161,10 @@ def make_sonar_map_all(r: wp.array(ndim=2, dtype=wp.float32),
                        gain: wp.float32,
                        result: wp.array(ndim=2, dtype=wp.vec3)):
     i, j = wp.tid()
-    intensity[i,j] = intensity[i,j]/max_intensity[0]
+    if max_intensity[0] != 0:
+        intensity[i,j] = intensity[i,j]/max_intensity[0]
+    else:
+        intensity[i,j] = wp.float32(0.0)
     intensity[i,j] += offset
     intensity[i,j] *= gain
     intensity[i,j] *= (0.5 + gau_noise[i,j])
@@ -189,8 +205,9 @@ def make_sonar_image(sonar_data: wp.array(ndim=2, dtype=wp.vec3),
                      sonar_image: wp.array(ndim=3, dtype=wp.uint8)):
     i, j = wp.tid()
     width = sonar_data.shape[1]
+    dst_j = width - 1 - j
     sonar_rgb = wp.uint8(sonar_data[i,j][2] * wp.float32(255))
-    sonar_image[i,width-j,0] = sonar_rgb
-    sonar_image[i,width-j,1] = sonar_rgb
-    sonar_image[i,width-j,2] = sonar_rgb
-    sonar_image[i,width-j,3] = wp.uint8(255)
+    sonar_image[i,dst_j,0] = sonar_rgb
+    sonar_image[i,dst_j,1] = sonar_rgb
+    sonar_image[i,dst_j,2] = sonar_rgb
+    sonar_image[i,dst_j,3] = wp.uint8(255)

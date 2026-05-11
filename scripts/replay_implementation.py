@@ -76,6 +76,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pc_require_spread", type=parse_bool, default=True)
     parser.add_argument("--pc_fallback_to_recording", type=parse_bool, default=True)
     parser.add_argument("--no-sonar", action="store_true")
+    parser.add_argument("--sonar-raw", action="store_true", help="Export float32 raw sonar .npy")
+    parser.add_argument("--sonar-png16", action="store_true", help="Export PNG 16-bit grayscale sonar")
+    parser.add_argument("--sonar-polar-png", action="store_true", help="Export fan projection PNG sonar")
+    parser.add_argument("--no-sonar-jpeg", action="store_true", help="Disable legacy JPEG sonar export")
     parser.add_argument("--overwrite", type=parse_bool, default=False)
     parser.add_argument("--verbose", type=parse_bool, default=False)
     args, unknown = parser.parse_known_args()
@@ -91,6 +95,10 @@ def normalize_args(args: argparse.Namespace) -> None:
     args.pc_min_extent = max(0.0, float(getattr(args, "pc_min_extent", 0.0)))
     args.camera_names = str(getattr(args, "camera_names", "") or "").strip()
     args.no_sonar = bool(getattr(args, "no_sonar", False))
+    args.sonar_raw = bool(getattr(args, "sonar_raw", False))
+    args.sonar_png16 = bool(getattr(args, "sonar_png16", False))
+    args.sonar_polar_png = bool(getattr(args, "sonar_polar_png", False))
+    args.no_sonar_jpeg = bool(getattr(args, "no_sonar_jpeg", False))
 
 
 def log(message: str) -> None:
@@ -300,7 +308,10 @@ def disable_all_camera_rendering(scenario: Any, include_sonar: bool = True) -> N
 
 def enable_camera_modalities(camera_module: Any, args: argparse.Namespace) -> None:
     if _is_sonar_module(camera_module):
-        if not getattr(args, "no_sonar", False) and args.rgb_enabled:
+        if (
+            not getattr(args, "no_sonar", False)
+            and (args.rgb_enabled or _sonar_ml_export_enabled(args))
+        ):
             camera_module.enable_rgb_rendering()
         return
     if args.rgb_enabled:
@@ -327,6 +338,60 @@ def _get_sonar_from_scenario(scenario: Any) -> Any:
     except Exception:
         pass
     return None
+
+
+def _build_sonar_metadata(sonar: Any, step: int) -> dict:
+    meta = {"step": step}
+    try:
+        meta["sensor"] = sonar.get_sensor_metadata()
+    except Exception:
+        meta["sensor"] = {}
+    try:
+        meta["render_params"] = sonar.get_params_as_dict()
+    except Exception:
+        meta["render_params"] = {}
+    try:
+        pos = sonar.position.get_value()
+        ori = sonar.orientation.get_value()
+        meta["pose"] = {
+            "position": pos.tolist() if pos is not None else None,
+            "orientation_wxyz": ori.tolist() if ori is not None else None,
+        }
+    except Exception:
+        meta["pose"] = {}
+    return meta
+
+
+def _sonar_ml_export_enabled(args: argparse.Namespace) -> bool:
+    return bool(
+        getattr(args, "sonar_raw", False)
+        or getattr(args, "sonar_png16", False)
+        or getattr(args, "sonar_polar_png", False)
+    )
+
+
+def _write_sonar_ml_outputs(
+    writer: Any,
+    sonar_ref: Any,
+    step: int,
+    args: argparse.Namespace,
+) -> None:
+    if sonar_ref is None or not _sonar_ml_export_enabled(args):
+        return
+    try:
+        intensity = sonar_ref.get_raw_intensity_map()
+        metadata = _build_sonar_metadata(sonar_ref, step)
+        writer.write_sonar_data_package(
+            intensity=intensity,
+            metadata=metadata,
+            step=step,
+            save_npy=getattr(args, "sonar_raw", False),
+            save_png16=getattr(args, "sonar_png16", False),
+            save_polar_png=getattr(args, "sonar_polar_png", False),
+            sonar_ref=sonar_ref,
+        )
+    except Exception:
+        pass
 
 
 def _get_module_name_for_instance(scenario: Any, target: Any) -> str:
@@ -1040,6 +1105,11 @@ def run_legacy_replay(
     if args.rgb_enabled:
         scenario.enable_rgb_rendering()
     sonar_ref = _get_sonar_from_scenario(scenario)
+    if sonar_ref is not None and _sonar_ml_export_enabled(args):
+        try:
+            sonar_ref.enable_rgb_rendering()
+        except Exception:
+            pass
     if args.no_sonar and sonar_ref is not None:
         try:
             sonar_ref.disable_rendering()
@@ -1094,9 +1164,10 @@ def run_legacy_replay(
 
         if args.rgb_enabled:
             rgb_state = scenario.state_dict_rgb()
-            if args.no_sonar:
+            if args.no_sonar or args.no_sonar_jpeg:
                 rgb_state = _filter_state_dict_excluding_module_prefix(rgb_state, sonar_module_name)
             writer.write_state_dict_rgb(rgb_state, step, sonar_ref=sonar_ref)
+        _write_sonar_ml_outputs(writer, sonar_ref, step, args)
         if args.segmentation_enabled:
             writer.write_state_dict_segmentation(scenario.state_dict_segmentation(), step)
         if args.instance_id_segmentation_enabled:
@@ -1195,6 +1266,19 @@ def run_staged_replay(
         requested_names=args.camera_names,
         include_sonar=not args.no_sonar,
     )
+    optical_modalities_enabled = any(
+        [
+            args.rgb_enabled,
+            args.segmentation_enabled,
+            args.instance_id_segmentation_enabled,
+            args.depth_enabled,
+            args.normals_enabled,
+        ]
+    )
+    if _sonar_ml_export_enabled(args) and not optical_modalities_enabled:
+        camera_modules = OrderedDict(
+            (name, module) for name, module in camera_modules.items() if _is_sonar_module(module)
+        )
     if args.camera_names and not camera_modules:
         raise RuntimeError("No requested cameras were found for staged replay.")
 
@@ -1225,15 +1309,7 @@ def run_staged_replay(
         "invalid_reasons": OrderedDict(),
     }
 
-    camera_modalities_enabled = any(
-        [
-            args.rgb_enabled,
-            args.segmentation_enabled,
-            args.instance_id_segmentation_enabled,
-            args.depth_enabled,
-            args.normals_enabled,
-        ]
-    )
+    camera_modalities_enabled = bool(optical_modalities_enabled or _sonar_ml_export_enabled(args))
     sonar_ref = None if args.no_sonar else _get_sonar_from_scenario(scenario)
     sonar_module_name = _get_module_name_for_instance(scenario, sonar_ref)
 
@@ -1263,11 +1339,21 @@ def run_staged_replay(
                         written_common_steps.add(step)
                     if args.rgb_enabled:
                         module_sonar_ref = module if _is_sonar_module(module) else None
+                        module_rgb_state = filter_state_dict_for_module_prefix(
+                            scenario.state_dict_rgb(), module_name
+                        )
+                        if module_sonar_ref is not None and args.no_sonar_jpeg:
+                            module_rgb_state = _filter_state_dict_excluding_module_prefix(
+                                module_rgb_state,
+                                module_name,
+                            )
                         writer.write_state_dict_rgb(
-                            filter_state_dict_for_module_prefix(scenario.state_dict_rgb(), module_name),
+                            module_rgb_state,
                             step,
                             sonar_ref=module_sonar_ref,
                         )
+                    module_sonar_ref = module if _is_sonar_module(module) else None
+                    _write_sonar_ml_outputs(writer, module_sonar_ref, step, args)
                     if args.segmentation_enabled:
                         writer.write_state_dict_segmentation(
                             filter_state_dict_for_module_prefix(scenario.state_dict_segmentation(), module_name),
@@ -1314,9 +1400,10 @@ def run_staged_replay(
                     written_common_steps.add(step)
                 if args.rgb_enabled:
                     rgb_state = scenario.state_dict_rgb()
-                    if args.no_sonar:
+                    if args.no_sonar or args.no_sonar_jpeg:
                         rgb_state = _filter_state_dict_excluding_module_prefix(rgb_state, sonar_module_name)
                     writer.write_state_dict_rgb(rgb_state, step, sonar_ref=sonar_ref)
+                _write_sonar_ml_outputs(writer, sonar_ref, step, args)
                 if args.segmentation_enabled:
                     writer.write_state_dict_segmentation(scenario.state_dict_segmentation(), step)
                 if args.instance_id_segmentation_enabled:
