@@ -24,7 +24,7 @@ import isaacsim.core.api.objects as objects
 from isaacsim.core.prims import SingleGeometryPrim
 from isaacsim.core.utils.stage import add_reference_to_stage
 from isaacsim.core.utils.semantics import add_update_semantics
-from pxr import Usd, UsdGeom
+from pxr import Gf, Usd, UsdGeom
 
 
 from omni.ext.patosim.occupancy_map import OccupancyMap
@@ -87,7 +87,7 @@ def _make_underwater_placeholder_occupancy_map() -> OccupancyMap:
 async def _make_underwater_occupancy_map_async(
     scene_prim_path: str,
     z_nominal: float = -2.0,
-    slice_half: float = 0.5,
+    slice_half: float = 3.0,
     cell_size: float = 0.25,
 ) -> OccupancyMap:
     try:
@@ -378,12 +378,36 @@ def _insert_dataset_object_into_scene(
         and hasattr(cfg_pos, "__len__")
         and len(cfg_pos) == 3
         and all(math.isfinite(float(v)) for v in cfg_pos)
+        and any(float(v) != 0.0 for v in cfg_pos)
     ):
         position = np.array([float(v) for v in cfg_pos], dtype=np.float32)
     else:
-        position = center
+        # Use XY from scene center; Z from operating depth so the object
+        # is placed at the ROV's working level, not at scene bbox center.
+        z_op = float(getattr(config, "rov_operating_depth", float(center[2])))
+        position = np.array([center[0], center[1], z_op], dtype=np.float32)
 
-    _set_prim_world_translation(prim_path, position)
+    scale = float(getattr(config, "dataset_object_scale", 1.0))
+    rot_cfg = getattr(config, "dataset_object_rotation_euler_deg", None)
+    if rot_cfg is not None and hasattr(rot_cfg, "__len__") and len(rot_cfg) == 3:
+        rotation_deg = tuple(float(v) for v in rot_cfg)
+    else:
+        rotation_deg = (0.0, 0.0, 0.0)
+
+    # Apply a full transform: translate + rotate (XYZ Euler, degrees) + uniform scale.
+    stage = get_stage()
+    prim = stage_get_prim(stage, prim_path)
+    if prim is not None and prim.IsValid():
+        xformable = UsdGeom.Xformable(prim)
+        xformable.ClearXformOpOrder()
+        xformable.AddTranslateOp().Set(
+            Gf.Vec3d(float(position[0]), float(position[1]), float(position[2]))
+        )
+        xformable.AddRotateXYZOp().Set(
+            Gf.Vec3f(rotation_deg[0], rotation_deg[1], rotation_deg[2])
+        )
+        xformable.AddScaleOp().Set(Gf.Vec3f(scale, scale, scale))
+
     _enable_collisions_for_subtree(prim_path)
     _mark_dataset_object_for_annotations(prim_path, asset_entry, reflectivity=float(reflectivity))
     return prim_path
@@ -500,6 +524,7 @@ async def build_scenario_from_config(config: Config):
         occupancy_map = await _make_underwater_occupancy_map_async(
             "/World/scene",
             z_nominal=z_nominal,
+            slice_half=float(getattr(config, "occupancy_map_z_half", 3.0)),
             cell_size=float(getattr(robot, "occupancy_map_cell_size", 0.25)),
         )
     else:

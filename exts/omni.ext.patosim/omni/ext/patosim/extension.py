@@ -281,6 +281,8 @@ class PatoSimExtension(omni.ext.IExt):
         self._sonar_central_std_model = ui.SimpleFloatModel(0.001)
         self._sonar_binning_method_model = ui.SimpleIntModel(0)
         self._sonar_normalizing_method_model = ui.SimpleIntModel(1)
+        self._sonar_min_range_model = ui.SimpleFloatModel(0.2)
+        self._sonar_max_range_model = ui.SimpleFloatModel(10.0)
         self._sonar_yaml_path_model = ui.SimpleStringModel("")
         self._sonar_advanced_callbacks_bound = False
         self._deferred_sensor_processing_model = ui.SimpleBoolModel(self.deferred_sensor_processing_enabled)
@@ -785,6 +787,56 @@ class PatoSimExtension(omni.ext.IExt):
                     f"UW backend: {self._get_camera_preview_backend_status()}",
                     height=18,
                 )
+                with ui.HStack(height=28):
+                    ui.Button(
+                        "Nav Mode",
+                        width=90,
+                        clicked_fn=self._set_preview_nav_mode,
+                        tooltip="High intervals: cam=30 lidar=40 sonar=50",
+                    )
+                    ui.Spacer(width=6)
+                    ui.Button(
+                        "Inspect Mode",
+                        width=90,
+                        clicked_fn=self._set_preview_inspect_mode,
+                        tooltip="Default intervals: cam=8 lidar=10 sonar=14",
+                    )
+                with ui.HStack(height=24):
+                    ui.Label("Cam Interval", width=100)
+                    self._cam_interval_drag = ui.IntDrag(
+                        min=1, max=60, step=1,
+                        width=60,
+                    )
+                    self._cam_interval_drag.model.set_value(
+                        int(getattr(self, "_camera_frame_interval", 8))
+                    )
+                    self._cam_interval_drag.model.add_value_changed_fn(
+                        lambda m: setattr(self, "_camera_frame_interval", max(1, m.as_int))
+                    )
+                with ui.HStack(height=24):
+                    ui.Label("Lidar Interval", width=100)
+                    self._lidar_interval_drag = ui.IntDrag(
+                        min=1, max=60, step=1,
+                        width=60,
+                    )
+                    self._lidar_interval_drag.model.set_value(
+                        int(getattr(self, "_lidar_frame_interval", 10))
+                    )
+                    self._lidar_interval_drag.model.add_value_changed_fn(
+                        lambda m: setattr(self, "_lidar_frame_interval", max(1, m.as_int))
+                    )
+                with ui.HStack(height=24):
+                    ui.Label("Sonar Interval", width=100)
+                    self._sonar_interval_drag = ui.IntDrag(
+                        min=1, max=60, step=1,
+                        width=60,
+                    )
+                    self._sonar_interval_drag.model.set_value(
+                        int(getattr(self, "_sonar_frame_interval", 14))
+                    )
+                    self._sonar_interval_drag.model.add_value_changed_fn(
+                        lambda m: setattr(self, "_sonar_frame_interval", max(1, m.as_int))
+                    )
                 with ui.HStack(height=cam_h + 32, spacing=8):
                     with ui.VStack(width=cam_w + 8, spacing=4):
                         ui.Label("Front Camera")
@@ -898,6 +950,7 @@ class PatoSimExtension(omni.ext.IExt):
                     )
                     ui.Spacer()
                 self._lidar_preview_stats_label = ui.Label(self._lidar_preview_stats_text)
+                self._lidar_status_label = ui.Label("Lidar: --", height=18)
 
     def _get_sensor_preview_window_width(self) -> int:
         try:
@@ -1472,6 +1525,18 @@ class PatoSimExtension(omni.ext.IExt):
         except Exception:
             pass
 
+    def _apply_sonar_range(self):
+        sonar = self._get_active_sonar()
+        if sonar is None:
+            return
+        try:
+            sonar.set_range(
+                float(self._sonar_min_range_model.as_float),
+                float(self._sonar_max_range_model.as_float),
+            )
+        except Exception:
+            pass
+
     def _sync_sonar_ui_from_sonar(self, sonar) -> None:
         """Atualiza todos os modelos da UI com os valores atuais do sonar."""
         if sonar is None:
@@ -1498,6 +1563,8 @@ class PatoSimExtension(omni.ext.IExt):
             )
             self._sonar_binning_method_model.set_value(bi)
             self._sonar_normalizing_method_model.set_value(ni)
+            self._sonar_min_range_model.set_value(float(sonar.min_range))
+            self._sonar_max_range_model.set_value(float(sonar.max_range))
         except Exception:
             pass
 
@@ -1684,6 +1751,26 @@ class PatoSimExtension(omni.ext.IExt):
 
                     ui.Button("Aplicar", clicked_fn=_apply_size, width=70, height=20)
                     ui.Spacer()
+                with ui.HStack(height=24):
+                    ui.Label("Min Range (m)", width=110)
+                    ui.FloatDrag(
+                        model=self._sonar_min_range_model,
+                        min=0.01, max=50.0, step=0.1,
+                        width=80,
+                    )
+                    ui.Spacer(width=10)
+                    ui.Label("Max Range (m)", width=110)
+                    ui.FloatDrag(
+                        model=self._sonar_max_range_model,
+                        min=0.1, max=200.0, step=0.5,
+                        width=80,
+                    )
+                    ui.Button(
+                        "Aplicar Range",
+                        clicked_fn=self._apply_sonar_range,
+                        width=100,
+                        height=20,
+                    )
                 collapsable_frame_cls = getattr(ui, "CollapsableFrame", None)
                 if collapsable_frame_cls is None:
                     collapsable_frame_cls = getattr(ui, "CollapsibleFrame", None)
@@ -2322,6 +2409,28 @@ class PatoSimExtension(omni.ext.IExt):
         except Exception:
             pass
         self._update_sensor_pose_preview_text()
+
+    def _set_preview_nav_mode(self):
+        self._camera_frame_interval = 30
+        self._lidar_frame_interval = 40
+        self._sonar_frame_interval = 50
+        try:
+            self._cam_interval_drag.model.set_value(30)
+            self._lidar_interval_drag.model.set_value(40)
+            self._sonar_interval_drag.model.set_value(50)
+        except Exception:
+            pass
+
+    def _set_preview_inspect_mode(self):
+        self._camera_frame_interval = 8
+        self._lidar_frame_interval = 10
+        self._sonar_frame_interval = 14
+        try:
+            self._cam_interval_drag.model.set_value(8)
+            self._lidar_interval_drag.model.set_value(10)
+            self._sonar_interval_drag.model.set_value(14)
+        except Exception:
+            pass
 
     def _get_camera_preview_backend_status(self) -> str:
         try:
@@ -3185,6 +3294,17 @@ class PatoSimExtension(omni.ext.IExt):
                     self._refresh_lidar_preview(lidar_input)
                 except Exception:
                     pass
+            try:
+                robot = getattr(getattr(self, "scenario", None), "robot", None)
+                lidar_obj = getattr(robot, "lidar", None) if robot is not None else None
+                if lidar_obj is not None:
+                    lidar_status = str(
+                        getattr(getattr(lidar_obj, "status", None), "get_value", lambda: "")()
+                    )
+                    if hasattr(self, "_lidar_status_label") and self._lidar_status_label is not None:
+                        self._lidar_status_label.text = f"Lidar: {lidar_status}"
+            except Exception:
+                pass
 
             _sonar_win = getattr(self, "_sonar_preview_window_obj", None)
             _sonar_win_visible = bool(getattr(_sonar_win, "visible", False))

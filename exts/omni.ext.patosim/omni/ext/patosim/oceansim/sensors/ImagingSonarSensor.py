@@ -658,19 +658,25 @@ class ImagingSonarSensor(Camera):
     
     def close(self):
         """Clean up resources by detaching annotators and clearing caches.
-    
+
         Note:
             - Required for proper shutdown when done using the sensor
             - Also closes viewport window if one was created
+            - Idempotent: safe to call multiple times
         """
-        self.pointcloud_annot.detach(self._render_product_path)
-        self.cameraParams_annot.detach(self._render_product_path)
-        self.semanticSeg_annot.detach(self._render_product_path)
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
 
-        rep.AnnotatorCache.clear(self.pointcloud_annot)
-        rep.AnnotatorCache.clear(self.cameraParams_annot)
-        rep.AnnotatorCache.clear(self.semanticSeg_annot)
-
+        for annot in (self.pointcloud_annot, self.cameraParams_annot, self.semanticSeg_annot):
+            try:
+                annot.detach(self._render_product_path)
+            except Exception:
+                pass
+            try:
+                rep.AnnotatorCache.clear(annot)
+            except Exception:
+                pass
 
         print(f'[{self._name}] Annotator detached. AnnotatorCache cleaned.')
 

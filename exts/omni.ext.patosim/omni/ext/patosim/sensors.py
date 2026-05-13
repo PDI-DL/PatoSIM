@@ -1482,10 +1482,12 @@ class OceanSimImagingSonar(Sensor):
             return
         if not self._initialized:
             return
-        try:
-            self._sensor.close()
-        except Exception:
-            pass
+        # Pause data fetching without destroying the sensor. Setting
+        # _initialized = False stops update_state() from calling make_sonar_data().
+        # The underlying ImagingSonarSensor (self._sensor) is kept alive so that
+        # enable_rgb_rendering() → _ensure_initialized() can resume it later.
+        # close() must NOT be called here — it is reserved for permanent teardown
+        # at scenario destruction, where OmniGraph is no longer evaluating.
         self._initialized = False
         self.status.set_value("sonar_disabled")
         self.rgb_image.set_value(None)
@@ -1513,12 +1515,38 @@ class OceanSimImagingSonar(Sensor):
         else:
             self.pointcloud.set_value(None)
             if not self._rgb_enabled and self._initialized:
-                try:
-                    self._sensor.close()
-                except Exception:
-                    pass
+                # Same pause-only pattern as disable_rendering(): keep self._sensor
+                # alive so that re-enabling pointcloud can resume without re-creating
+                # the annotators.
                 self._initialized = False
                 self.status.set_value("sonar_disabled")
+
+    @property
+    def min_range(self) -> float:
+        try:
+            return float(self._sensor.min_range)
+        except Exception:
+            return 0.2
+
+    @property
+    def max_range(self) -> float:
+        try:
+            return float(self._sensor.max_range)
+        except Exception:
+            return 10.0
+
+    def set_range(self, min_range: float, max_range: float) -> None:
+        """Change sonar range at runtime. The polar projection cache is cleared
+        so the next preview render recomputes the fan geometry and arc labels."""
+        min_range = max(0.01, float(min_range))
+        max_range = max(min_range + 0.1, float(max_range))
+        try:
+            self._sensor.min_range = min_range
+            self._sensor.max_range = max_range
+        except Exception:
+            pass
+        self._polar_proj_cache.clear()
+        self._overlay_cache.clear()
 
     def _sync_sensor_render_params(self):
         if self._sensor is None:
