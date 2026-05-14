@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import os
+import typing as tp
 import numpy as np
 import math
 from pathlib import Path
@@ -87,9 +88,19 @@ def _make_underwater_placeholder_occupancy_map() -> OccupancyMap:
 async def _make_underwater_occupancy_map_async(
     scene_prim_path: str,
     z_nominal: float = -2.0,
-    slice_half: float = 3.0,
+    slice_half: float = 0.5,
     cell_size: float = 0.25,
-) -> OccupancyMap:
+) -> tp.Tuple[OccupancyMap, tp.Optional[str]]:
+    """Generate underwater occupancy map. Returns (occupancy_map, error_message).
+    
+    For underwater scenes, uses a horizontal 'slice' around z_nominal depth.
+    - z_nominal: nominal depth where ROV operates (default -2.0m, i.e., 2m below surface)
+    - slice_half: height of slice in each direction (default 0.5m → 1m total height)
+    - cell_size: grid resolution (default 0.25m)
+    
+    If generation succeeds, error_message is None.
+    If generation fails, returns placeholder map and a descriptive error message.
+    """
     try:
         from omni.ext.patosim.utils.occupancy_map_utils import occupancy_map_generate_from_prim_async as _gen
         omap = await _gen(
@@ -99,16 +110,21 @@ async def _make_underwater_occupancy_map_async(
             z_max=z_nominal + slice_half,
         )
         if getattr(omap, "data", None) is not None and omap.data.size > 0:
-            return omap
+            return omap, None
     except Exception as exc:
+        import traceback
+        error_msg = (
+            f"Occupancy map generation failed (z={z_nominal:.1f}m): {exc}\n"
+            f"Traceback: {traceback.format_exc()}"
+        )
         import warnings
         warnings.warn(
-            f"_make_underwater_occupancy_map_async: failed to generate scene occupancy map "
-            f"(z={z_nominal:.1f}m) — falling back to empty map. Reason: {exc}",
+            f"_make_underwater_occupancy_map_async: {error_msg}",
             RuntimeWarning,
             stacklevel=2,
         )
-    return _make_underwater_placeholder_occupancy_map()
+        return _make_underwater_placeholder_occupancy_map(), error_msg
+    return _make_underwater_placeholder_occupancy_map(), "Unknown occupancy-map generation error"
 
 
 def _enable_scene_collisions(scene_root_path: str) -> int:
@@ -177,24 +193,84 @@ def _compute_world_bbox(scene_root_path: str):
         bbox = bbox_cache.ComputeWorldBound(root_prim).ComputeAlignedBox()
         if bbox.IsEmpty():
             return None
-        return bbox
-    except Exception:
+        
+        import warnings
+        stage_scale = UsdGeom.GetStageMetersPerUnit(stage)
+        min_v_stage = np.asarray(bbox.GetMin())
+        max_v_stage = np.asarray(bbox.GetMax())
+        
+        warnings.warn(
+            f"[bbox] stage_scale={stage_scale}, bbox in stage units: min={min_v_stage}, max={max_v_stage}",
+            stacklevel=2
+        )
+        
+        # IMPORTANT: bbox is in stage units, not meters. Convert to meters.
+        min_v = min_v_stage * stage_scale
+        max_v = max_v_stage * stage_scale
+        
+        warnings.warn(
+            f"[bbox] bbox in meters: min={min_v}, max={max_v}",
+            stacklevel=2
+        )
+        
+        # Return a simple object with GetMin/GetMax methods
+        class BBoxMeters:
+            def __init__(self, min_v, max_v):
+                self._min = min_v
+                self._max = max_v
+            def GetMin(self):
+                return self._min
+            def GetMax(self):
+                return self._max
+        return BBoxMeters(min_v, max_v)
+    except Exception as e:
+        import warnings, traceback
+        warnings.warn(
+            f"[bbox] Exception: {e}\n{traceback.format_exc()}",
+            stacklevel=2
+        )
         return None
 
 
 def _compute_safe_underwater_spawn(scene_root_path: str, desired_position: np.ndarray) -> np.ndarray:
+    import warnings
     desired_position = np.asarray(desired_position, dtype=np.float32).reshape(3)
     bbox = _compute_world_bbox(scene_root_path)
+    
+    warnings.warn(
+        f"[spawn] Computing safe spawn: desired={desired_position}",
+        stacklevel=2
+    )
+    
     if bbox is None:
+        warnings.warn(
+            f"[spawn] bbox is None, using desired_position as-is",
+            stacklevel=2
+        )
         return desired_position
 
     min_v = np.asarray(bbox.GetMin(), dtype=np.float32)
     max_v = np.asarray(bbox.GetMax(), dtype=np.float32)
+    
+    warnings.warn(
+        f"[spawn] bbox in meters: min={min_v}, max={max_v}",
+        stacklevel=2
+    )
+    
     safe_position = desired_position.copy()
     inside = bool(np.all(desired_position >= min_v) and np.all(desired_position <= max_v))
     below_world = bool(desired_position[2] <= (min_v[2] + 0.25))
 
+    warnings.warn(
+        f"[spawn] inside={inside}, below_world={below_world}",
+        stacklevel=2
+    )
+
     if not inside and not below_world:
+        warnings.warn(
+            f"[spawn] Position OK, not inside and not below",
+            stacklevel=2
+        )
         return desired_position
 
     # If the requested spawn is below the world or intersects the scene bounds,
@@ -210,6 +286,10 @@ def _compute_safe_underwater_spawn(scene_root_path: str, desired_position: np.nd
             safe_position[0] = float((min_v[0] + max_v[0]) * 0.5)
             safe_position[1] = float((min_v[1] + max_v[1]) * 0.5)
 
+    warnings.warn(
+        f"[spawn] Final safe_position={safe_position}",
+        stacklevel=2
+    )
     return safe_position
 
 
@@ -508,38 +588,95 @@ async def build_scenario_from_config(config: Config):
         )
     if not is_underwater_robot:
         objects.GroundPlane("/World/ground_plane", visible=False)
+    
+    import warnings
+    warnings.warn(
+        f"[spawn] Building robot at /World/robot, is_underwater_robot={is_underwater_robot}",
+        stacklevel=2
+    )
     robot = robot_type.build("/World/robot")
+    warnings.warn(
+        f"[spawn] Robot built, current pose: translation={getattr(robot, 'spawn_translation', 'unknown')}",
+        stacklevel=2
+    )
+    build_error = None
     if is_underwater_robot:
+        import warnings
+        initial_translation = np.asarray(getattr(robot_type, "initial_translation", (-2.0, 0.0, -0.8)), dtype=np.float32)
+        warnings.warn(
+            f"[spawn] initial_translation from robot_type: {initial_translation}",
+            stacklevel=2
+        )
         safe_spawn = _compute_safe_underwater_spawn(
             "/World/scene",
-            np.asarray(getattr(robot_type, "initial_translation", (-2.0, 0.0, -0.8)), dtype=np.float32),
+            initial_translation,
         )
         try:
+            import warnings
+            warnings.warn(
+                f"[spawn] Setting robot pose with safe_spawn={safe_spawn}",
+                stacklevel=2
+            )
             robot.spawn_translation = safe_spawn.astype(np.float32)
             robot.initial_translation = tuple(float(v) for v in safe_spawn)
             robot.set_pose_3d(safe_spawn, robot_type._initial_orientation())
-        except Exception:
-            pass
+            warnings.warn(
+                f"[spawn] Robot pose set successfully",
+                stacklevel=2
+            )
+        except Exception as e:
+            import warnings, traceback
+            warnings.warn(
+                f"[spawn] ERROR setting robot pose: {e}\n{traceback.format_exc()}",
+                stacklevel=2
+            )
         z_nominal = float(getattr(config, "rov_operating_depth", -2.0))
-        occupancy_map = await _make_underwater_occupancy_map_async(
+        occupancy_map, build_error = await _make_underwater_occupancy_map_async(
             "/World/scene",
             z_nominal=z_nominal,
             slice_half=float(getattr(config, "occupancy_map_z_half", 3.0)),
             cell_size=float(getattr(robot, "occupancy_map_cell_size", 0.25)),
         )
     else:
-        occupancy_map = await occupancy_map_generate_from_prim_async(
-            "/World/scene",
-            cell_size=robot.occupancy_map_cell_size,
-            z_min=robot.occupancy_map_z_min,
-            z_max=robot.occupancy_map_z_max
-        )
-        if getattr(occupancy_map, "data", None) is None or occupancy_map.data.size == 0:
-            raise RuntimeError(
-                "build_scenario_from_config: occupancy map generation returned an empty map. "
-                f"Scene asset='{scene_usd}'. Check whether the USD loaded successfully and "
-                "whether the referenced stage contains visible geometry under /World/scene."
+        try:
+            occupancy_map = await occupancy_map_generate_from_prim_async(
+                "/World/scene",
+                cell_size=robot.occupancy_map_cell_size,
+                z_min=robot.occupancy_map_z_min,
+                z_max=robot.occupancy_map_z_max
             )
+            if getattr(occupancy_map, "data", None) is None or occupancy_map.data.size == 0:
+                build_error = (
+                    f"Occupancy map generation returned an empty map. "
+                    f"Scene asset='{scene_usd}'. Check whether the USD loaded successfully and "
+                    f"whether the referenced stage contains visible geometry under /World/scene."
+                )
+                occupancy_map = None
+        except Exception as exc:
+            import traceback
+            build_error = (
+                f"Occupancy map generation failed: {exc}\n"
+                f"Scene asset='{scene_usd}'. Check whether the USD loaded successfully.\n"
+                f"Traceback: {traceback.format_exc()}"
+            )
+            occupancy_map = None
+    
+    if occupancy_map is None:
+        from omni.ext.patosim.utils.occupancy_map_utils import (
+            OccupancyMap, OccupancyMapDataValue
+        )
+        size = 256
+        resolution = 0.25
+        freespace = np.ones((size, size), dtype=bool)
+        occupied = np.zeros((size, size), dtype=bool)
+        origin = (-(size * resolution) / 2.0, -(size * resolution) / 2.0, 0.0)
+        occupancy_map = OccupancyMap.from_masks(
+            freespace_mask=freespace,
+            occupied_mask=occupied,
+            resolution=resolution,
+            origin=origin,
+        )
+    
     chase_camera_path = robot.build_chase_camera()
     try:
         robot.chase_camera_path = chase_camera_path
@@ -547,6 +684,8 @@ async def build_scenario_from_config(config: Config):
         pass
     set_viewport_camera(chase_camera_path)
     scenario = scenario_type.from_robot_occupancy_map(robot, occupancy_map)
+    if build_error is not None:
+        scenario.build_error = build_error
     if is_underwater_robot:
         waypoint_path = str(getattr(config, "waypoint_path", "") or "").strip()
         if waypoint_path and hasattr(scenario, "_waypoint_path"):

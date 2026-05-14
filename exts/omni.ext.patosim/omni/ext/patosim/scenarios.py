@@ -116,6 +116,7 @@ class Scenario(Module):
         self.occupancy_map = occupancy_map
         self.buffered_occupancy_map = occupancy_map.buffered_meters(self.robot.occupancy_map_radius)
         self._pointcloud_enabled = False
+        self.build_error = None  # error message from occupancy map generation, if any
 
     @classmethod
     def from_robot_occupancy_map(cls, robot: Robot, occupancy_map: OccupancyMap):

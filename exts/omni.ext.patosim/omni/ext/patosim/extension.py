@@ -22,6 +22,7 @@ import tempfile
 import glob
 import math
 from collections import OrderedDict
+from pathlib import Path
 
 import omni.ext
 import omni.ui as ui
@@ -36,12 +37,17 @@ from omni.ext.patosim.utils.path_utils import PathHelper
 from pxr import UsdGeom, Usd, Gf
 from omni.ext.patosim.robots import ROBOTS
 from omni.ext.patosim.config import Config
-from omni.ext.patosim.build import build_scenario_from_config, list_dataset_object_assets
+from omni.ext.patosim.build import (
+    build_scenario_from_config,
+    list_dataset_object_assets,
+)
 
-dev_scene_path = "/mnt/external/isaac/MOD_patosim/assets/models/worlds/Prototipo1/world.usd"
+dev_scene_path = str(
+    Path(__file__).resolve().parents[5] / "assets" / "worlds" / "Prototipo1" / "world.usd"
+)
 
 if "PATOSIM_DATA" in os.environ:
-    DATA_DIR = os.environ['PATOSIM_DATA']
+    DATA_DIR = os.environ["PATOSIM_DATA"]
 else:
     DATA_DIR = os.path.expanduser("~/PatoSimData")
 
@@ -96,14 +102,25 @@ class PatoSimExtension(omni.ext.IExt):
         self.recording_dir_label = None
         self.recording_name_label = None
         self.recording_step_label = None
-        self.deferred_sensor_processing_enabled: bool = True  # Always on; replay handles sensor data
+        self.deferred_sensor_processing_enabled: bool = (
+            True  # Always on; replay handles sensor data
+        )
         self.disable_pointcloud_during_recording: bool = True
         self.disable_previews_during_recording: bool = True
         self.record_common_interval: int = 2
-        self.recording_time: float = 0.
+        self.recording_time: float = 0.0
 
         # Image provider for occupancy map preview
         self._occupancy_map_image_provider = omni.ui.ByteImageProvider()
+        # Initialize with placeholder gray image (256x256)
+        try:
+            import PIL.Image
+            placeholder_img = PIL.Image.new("RGBA", (256, 256), (64, 64, 64, 255))
+            placeholder_data = bytearray(placeholder_img.tobytes())
+            self._occupancy_map_image_provider.set_bytes_data(placeholder_data, [256, 256])
+        except Exception:
+            pass
+        
         self._sensor_preview_image_provider = omni.ui.ByteImageProvider()
         self._front_camera_preview_provider = omni.ui.ByteImageProvider()
         self._underwater_camera_preview_provider = omni.ui.ByteImageProvider()
@@ -151,7 +168,9 @@ class PatoSimExtension(omni.ext.IExt):
         self._record_pointcloud_metadata = True
 
         # Visualization window for occupancy map
-        self._visualize_window = omni.ui.Window("PatoSim - Occupancy Map", width=300, height=340)
+        self._visualize_window = omni.ui.Window(
+            "PatoSim - Occupancy Map", width=300, height=340
+        )
         try:
             self._visualize_window.visible = True
         except Exception:
@@ -170,7 +189,9 @@ class PatoSimExtension(omni.ext.IExt):
             self._sensor_preview_resolution_index
         )
         self._lidar_preview_target_size = 180
-        self._sensor_preview_window = omni.ui.Window("PatoSim - Sensor Preview", width=900, height=580)
+        self._sensor_preview_window = omni.ui.Window(
+            "PatoSim - Sensor Preview", width=900, height=580
+        )
         try:
             self._sensor_preview_window.visible = self._sensor_preview_enabled
         except Exception:
@@ -179,7 +200,9 @@ class PatoSimExtension(omni.ext.IExt):
             self._sensor_preview_frame = ui.Frame()
             self._sensor_preview_frame.set_build_fn(self._build_sensor_preview_frame)
 
-        self._lidar_preview_window = omni.ui.Window("PatoSim - LiDAR Preview", width=300, height=440)
+        self._lidar_preview_window = omni.ui.Window(
+            "PatoSim - LiDAR Preview", width=300, height=440
+        )
         try:
             self._lidar_preview_window.visible = False
         except Exception:
@@ -187,7 +210,9 @@ class PatoSimExtension(omni.ext.IExt):
         with self._lidar_preview_window.frame:
             self._lidar_preview_frame = ui.Frame()
             self._lidar_preview_frame.set_build_fn(self._build_lidar_preview_frame)
-        self._path_planning_window = omni.ui.Window("PatoSim - Path Planning", width=340, height=380)
+        self._path_planning_window = omni.ui.Window(
+            "PatoSim - Path Planning", width=340, height=380
+        )
         try:
             self._path_planning_window.visible = False
         except Exception:
@@ -197,7 +222,11 @@ class PatoSimExtension(omni.ext.IExt):
             self._path_planning_frame.set_build_fn(self._build_path_planning_frame)
         try:
             blank = np.zeros(
-                (self._sensor_preview_target_height, self._sensor_preview_target_width, 4),
+                (
+                    self._sensor_preview_target_height,
+                    self._sensor_preview_target_width,
+                    4,
+                ),
                 dtype=np.uint8,
             )
             blank[:, :, 3] = 255
@@ -209,7 +238,10 @@ class PatoSimExtension(omni.ext.IExt):
             ):
                 provider.set_bytes_data(
                     bytearray(blank.tobytes()),
-                    [self._sensor_preview_target_width, self._sensor_preview_target_height],
+                    [
+                        self._sensor_preview_target_width,
+                        self._sensor_preview_target_height,
+                    ],
                 )
             blank_lidar = np.zeros(
                 (self._lidar_preview_target_size, self._lidar_preview_target_size, 4),
@@ -251,7 +283,9 @@ class PatoSimExtension(omni.ext.IExt):
                 bytearray(blank_sonar.tobytes()),
                 [self._sonar_preview_size, self._sonar_preview_size],
             )
-            blank_planar = np.zeros((self._sonar_preview_size, _init_pw, 4), dtype=np.uint8)
+            blank_planar = np.zeros(
+                (self._sonar_preview_size, _init_pw, 4), dtype=np.uint8
+            )
             blank_planar[:, :, 3] = 255
             self._sonar_preview_planar_provider.set_bytes_data(
                 bytearray(blank_planar.tobytes()),
@@ -260,18 +294,38 @@ class PatoSimExtension(omni.ext.IExt):
         except Exception:
             pass
 
-        self._lidar_preview_toggle_model = ui.SimpleBoolModel(self._lidar_preview_enabled)
-        self._sonar_preview_toggle_model = ui.SimpleBoolModel(self._sonar_preview_enabled)
-        self._sensor_preview_toggle_model = ui.SimpleBoolModel(self._sensor_preview_enabled)
+        self._lidar_preview_toggle_model = ui.SimpleBoolModel(
+            self._lidar_preview_enabled
+        )
+        self._sonar_preview_toggle_model = ui.SimpleBoolModel(
+            self._sonar_preview_enabled
+        )
+        self._sensor_preview_toggle_model = ui.SimpleBoolModel(
+            self._sensor_preview_enabled
+        )
         self._sensor_preview_mode_model = ui.SimpleIntModel(0)
         self._lidar_preview_mode_model = ui.SimpleIntModel(0)
-        self._lidar_preview_auto_range_model = ui.SimpleBoolModel(self._lidar_preview_auto_range)
-        self._lidar_preview_range_model = ui.SimpleIntModel(self._lidar_preview_manual_range_m)
-        self._lidar_preview_point_size_model = ui.SimpleIntModel(self._lidar_preview_point_size)
-        self._lidar_preview_history_frames_model = ui.SimpleIntModel(self._lidar_preview_history_frames)
-        self._lidar_preview_flip_x_model = ui.SimpleBoolModel(self._lidar_preview_flip_x)
-        self._lidar_preview_flip_y_model = ui.SimpleBoolModel(self._lidar_preview_flip_y)
-        self._lidar_preview_swap_xy_model = ui.SimpleBoolModel(self._lidar_preview_swap_xy)
+        self._lidar_preview_auto_range_model = ui.SimpleBoolModel(
+            self._lidar_preview_auto_range
+        )
+        self._lidar_preview_range_model = ui.SimpleIntModel(
+            self._lidar_preview_manual_range_m
+        )
+        self._lidar_preview_point_size_model = ui.SimpleIntModel(
+            self._lidar_preview_point_size
+        )
+        self._lidar_preview_history_frames_model = ui.SimpleIntModel(
+            self._lidar_preview_history_frames
+        )
+        self._lidar_preview_flip_x_model = ui.SimpleBoolModel(
+            self._lidar_preview_flip_x
+        )
+        self._lidar_preview_flip_y_model = ui.SimpleBoolModel(
+            self._lidar_preview_flip_y
+        )
+        self._lidar_preview_swap_xy_model = ui.SimpleBoolModel(
+            self._lidar_preview_swap_xy
+        )
         self._sonar_gau_noise_model = ui.SimpleFloatModel(0.05)
         self._sonar_ray_noise_model = ui.SimpleFloatModel(0.05)
         self._sonar_attenuation_model = ui.SimpleFloatModel(0.3)
@@ -285,12 +339,24 @@ class PatoSimExtension(omni.ext.IExt):
         self._sonar_max_range_model = ui.SimpleFloatModel(10.0)
         self._sonar_yaml_path_model = ui.SimpleStringModel("")
         self._sonar_advanced_callbacks_bound = False
-        self._deferred_sensor_processing_model = ui.SimpleBoolModel(self.deferred_sensor_processing_enabled)
-        self._disable_previews_during_recording_model = ui.SimpleBoolModel(self.disable_previews_during_recording)
-        self._record_pointcloud_toggle_model = ui.SimpleBoolModel(self._record_pointcloud_enabled)
-        self._record_common_interval_model = ui.SimpleIntModel(self.record_common_interval)
-        self._record_pointcloud_interval_model = ui.SimpleIntModel(self._record_pointcloud_interval)
-        self._record_pointcloud_metadata_model = ui.SimpleBoolModel(self._record_pointcloud_metadata)
+        self._deferred_sensor_processing_model = ui.SimpleBoolModel(
+            self.deferred_sensor_processing_enabled
+        )
+        self._disable_previews_during_recording_model = ui.SimpleBoolModel(
+            self.disable_previews_during_recording
+        )
+        self._record_pointcloud_toggle_model = ui.SimpleBoolModel(
+            self._record_pointcloud_enabled
+        )
+        self._record_common_interval_model = ui.SimpleIntModel(
+            self.record_common_interval
+        )
+        self._record_pointcloud_interval_model = ui.SimpleIntModel(
+            self._record_pointcloud_interval
+        )
+        self._record_pointcloud_metadata_model = ui.SimpleBoolModel(
+            self._record_pointcloud_metadata
+        )
         try:
             self._sensor_preview_toggle_model.add_value_changed_fn(
                 self._on_sensor_preview_toggle_changed
@@ -363,7 +429,9 @@ class PatoSimExtension(omni.ext.IExt):
         except Exception:
             self._dataset_object_assets = []
 
-        self._dataset_object_window = omni.ui.Window("PatoSim - Dataset Object", width=440, height=220)
+        self._dataset_object_window = omni.ui.Window(
+            "PatoSim - Dataset Object", width=440, height=220
+        )
         try:
             self._dataset_object_window.visible = False
         except Exception:
@@ -372,7 +440,9 @@ class PatoSimExtension(omni.ext.IExt):
             self._dataset_object_frame = ui.Frame()
             self._dataset_object_frame.set_build_fn(self._build_dataset_object_frame)
 
-        self._robot_setup_window = omni.ui.Window("PatoSim - Robot Setup", width=400, height=420)
+        self._robot_setup_window = omni.ui.Window(
+            "PatoSim - Robot Setup", width=400, height=420
+        )
         try:
             self._robot_setup_window.visible = False
         except Exception:
@@ -381,16 +451,22 @@ class PatoSimExtension(omni.ext.IExt):
             self._robot_setup_frame = ui.Frame()
             self._robot_setup_frame.set_build_fn(self._build_robot_setup_frame)
 
-        self._recording_settings_window = omni.ui.Window("PatoSim - Recording Settings", width=460, height=340)
+        self._recording_settings_window = omni.ui.Window(
+            "PatoSim - Recording Settings", width=460, height=340
+        )
         try:
             self._recording_settings_window.visible = False
         except Exception:
             pass
         with self._recording_settings_window.frame:
             self._recording_settings_frame = ui.Frame()
-            self._recording_settings_frame.set_build_fn(self._build_recording_settings_frame)
+            self._recording_settings_frame.set_build_fn(
+                self._build_recording_settings_frame
+            )
 
-        self._replay_config_window = omni.ui.Window("PatoSim - Replay Config", width=420, height=240)
+        self._replay_config_window = omni.ui.Window(
+            "PatoSim - Replay Config", width=420, height=240
+        )
         try:
             self._replay_config_window.visible = False
         except Exception:
@@ -399,7 +475,9 @@ class PatoSimExtension(omni.ext.IExt):
             self._replay_config_frame = ui.Frame()
             self._replay_config_frame.set_build_fn(self._build_replay_config_frame)
 
-        self._window_manager_window = omni.ui.Window("PatoSim - Window Manager", width=360, height=280)
+        self._window_manager_window = omni.ui.Window(
+            "PatoSim - Window Manager", width=360, height=280
+        )
         try:
             self._window_manager_window.visible = False
         except Exception:
@@ -416,13 +494,27 @@ class PatoSimExtension(omni.ext.IExt):
         self._replay_config_window_toggle_model = ui.SimpleBoolModel(False)
         self._window_manager_window_toggle_model = ui.SimpleBoolModel(False)
         try:
-            self._occ_map_window_toggle_model.add_value_changed_fn(self._on_occ_map_window_toggle_changed)
-            self._robot_setup_window_toggle_model.add_value_changed_fn(self._on_robot_setup_window_toggle_changed)
-            self._recording_settings_window_toggle_model.add_value_changed_fn(self._on_recording_settings_window_toggle_changed)
-            self._path_planning_window_toggle_model.add_value_changed_fn(self._on_path_planning_window_toggle_changed)
-            self._dataset_object_window_toggle_model.add_value_changed_fn(self._on_dataset_object_window_toggle_changed)
-            self._replay_config_window_toggle_model.add_value_changed_fn(self._on_replay_config_window_toggle_changed)
-            self._window_manager_window_toggle_model.add_value_changed_fn(self._on_window_manager_window_toggle_changed)
+            self._occ_map_window_toggle_model.add_value_changed_fn(
+                self._on_occ_map_window_toggle_changed
+            )
+            self._robot_setup_window_toggle_model.add_value_changed_fn(
+                self._on_robot_setup_window_toggle_changed
+            )
+            self._recording_settings_window_toggle_model.add_value_changed_fn(
+                self._on_recording_settings_window_toggle_changed
+            )
+            self._path_planning_window_toggle_model.add_value_changed_fn(
+                self._on_path_planning_window_toggle_changed
+            )
+            self._dataset_object_window_toggle_model.add_value_changed_fn(
+                self._on_dataset_object_window_toggle_changed
+            )
+            self._replay_config_window_toggle_model.add_value_changed_fn(
+                self._on_replay_config_window_toggle_changed
+            )
+            self._window_manager_window_toggle_model.add_value_changed_fn(
+                self._on_window_manager_window_toggle_changed
+            )
         except Exception:
             pass
 
@@ -442,7 +534,9 @@ class PatoSimExtension(omni.ext.IExt):
         try:
             robot_names = list(ROBOTS.names())
             if "OceanSimROVRobot" in robot_names:
-                self.robot_combo_box.model.get_item_value_model().set_value(robot_names.index("OceanSimROVRobot"))
+                self.robot_combo_box.model.get_item_value_model().set_value(
+                    robot_names.index("OceanSimROVRobot")
+                )
         except Exception:
             pass
         try:
@@ -459,7 +553,9 @@ class PatoSimExtension(omni.ext.IExt):
         except Exception:
             pass
         try:
-            self._sync_oceansim_sensor_models_from_source(self._get_selected_robot_type())
+            self._sync_oceansim_sensor_models_from_source(
+                self._get_selected_robot_type()
+            )
         except Exception:
             pass
         self.update_recording_count()
@@ -472,6 +568,8 @@ class PatoSimExtension(omni.ext.IExt):
                 ui.Spacer(height=4)
                 self._build_primary_controls_section()
                 ui.Spacer(height=4)
+                self._build_build_status_section()
+                ui.Spacer(height=4)
                 self._build_tool_launcher_section()
                 ui.Spacer(height=4)
                 self._build_recording_status_section()
@@ -480,13 +578,17 @@ class PatoSimExtension(omni.ext.IExt):
         with ui.HStack():
             ui.Label("USD Path / URL")
             self.scene_usd_field_string_model = ui.SimpleStringModel()
-            self.scene_usd_field = ui.StringField(model=self.scene_usd_field_string_model, height=25)
+            self.scene_usd_field = ui.StringField(
+                model=self.scene_usd_field_string_model, height=25
+            )
 
         with ui.HStack():
             ui.Spacer()
             ui.Button(
                 "Use MHL Scene",
-                clicked_fn=lambda: self.scene_usd_field_string_model.set_value(dev_scene_path),
+                clicked_fn=lambda: self.scene_usd_field_string_model.set_value(
+                    dev_scene_path
+                ),
             )
 
         with ui.HStack():
@@ -525,7 +627,9 @@ class PatoSimExtension(omni.ext.IExt):
     def _build_tool_launcher_section(self):
         with ui.HStack(height=26):
             ui.Button("Robot Setup", clicked_fn=self._open_robot_setup_window)
-            ui.Button("Recording Settings", clicked_fn=self._open_recording_settings_window)
+            ui.Button(
+                "Recording Settings", clicked_fn=self._open_recording_settings_window
+            )
             ui.Button("Window Manager", clicked_fn=self._open_window_manager_window)
         with ui.HStack(height=26):
             self._path_planning_button = ui.Button(
@@ -553,19 +657,27 @@ class PatoSimExtension(omni.ext.IExt):
                     ui.StringField(model=self._oceansim_waypoint_path_model, height=25)
                 with ui.HStack():
                     ui.Label("Lin Speed", width=92)
-                    ui.FloatDrag(model=self._oceansim_linear_speed_model, min=0.05, max=5.0)
+                    ui.FloatDrag(
+                        model=self._oceansim_linear_speed_model, min=0.05, max=5.0
+                    )
                     ui.Spacer(width=12)
                     ui.Label("Ang Speed", width=92)
-                    ui.FloatDrag(model=self._oceansim_angular_speed_model, min=0.05, max=5.0)
+                    ui.FloatDrag(
+                        model=self._oceansim_angular_speed_model, min=0.05, max=5.0
+                    )
                 with ui.HStack():
                     ui.Label("Depth (m)", width=92)
-                    ui.FloatDrag(model=self._oceansim_operating_depth_model, min=-50.0, max=-0.1)
+                    ui.FloatDrag(
+                        model=self._oceansim_operating_depth_model, min=-50.0, max=-0.1
+                    )
                 with ui.HStack(height=22):
                     ui.Label("DVL Debug", width=92)
                     ui.CheckBox(model=self._oceansim_dvl_debug_model, width=22)
                 with ui.HStack():
                     ui.Label("Sonar Refl.", width=92)
-                    ui.CheckBox(model=self._oceansim_apply_sonar_reflectivity_model, width=22)
+                    ui.CheckBox(
+                        model=self._oceansim_apply_sonar_reflectivity_model, width=22
+                    )
                     ui.Label("Apply reflectivity to world meshes on Build")
                 ui.Label("Sensors")
                 with ui.HStack():
@@ -608,7 +720,9 @@ class PatoSimExtension(omni.ext.IExt):
         with ui.VStack(spacing=8, height=0):
             with ui.VStack(spacing=2, height=0):
                 ui.Label("Behavior")
-                ui.Label("Lightweight recording mode: only pose, control, and common state are stored.")
+                ui.Label(
+                    "Lightweight recording mode: only pose, control, and common state are stored."
+                )
                 ui.Label(
                     "Camera previews are automatically paused while recording to reduce render cost.",
                     word_wrap=True,
@@ -618,7 +732,9 @@ class PatoSimExtension(omni.ext.IExt):
                 ui.Label("Sampling")
                 with ui.HStack(height=22):
                     ui.Label("Common Interval", width=150)
-                    ui.IntField(model=self._record_common_interval_model, height=20, width=72)
+                    ui.IntField(
+                        model=self._record_common_interval_model, height=20, width=72
+                    )
                     ui.Label("frames")
 
             with ui.VStack(spacing=2, height=0):
@@ -641,7 +757,9 @@ class PatoSimExtension(omni.ext.IExt):
                     ui.CheckBox(model=self._robot_setup_window_toggle_model, width=22)
                     ui.Label("Robot Setup")
                 with ui.HStack():
-                    ui.CheckBox(model=self._recording_settings_window_toggle_model, width=22)
+                    ui.CheckBox(
+                        model=self._recording_settings_window_toggle_model, width=22
+                    )
                     ui.Label("Recording Settings")
                 with ui.HStack():
                     ui.CheckBox(model=self._sensor_preview_toggle_model, width=22)
@@ -656,7 +774,9 @@ class PatoSimExtension(omni.ext.IExt):
                     ui.CheckBox(model=self._path_planning_window_toggle_model, width=22)
                     ui.Label("Planejamento de Rota")
                 with ui.HStack():
-                    ui.CheckBox(model=self._dataset_object_window_toggle_model, width=22)
+                    ui.CheckBox(
+                        model=self._dataset_object_window_toggle_model, width=22
+                    )
                     ui.Label("Objeto de Dataset")
                 with ui.HStack():
                     ui.CheckBox(model=self._replay_config_window_toggle_model, width=22)
@@ -678,12 +798,39 @@ class PatoSimExtension(omni.ext.IExt):
                     with ui.VStack(spacing=6):
                         ui.Label("Status")
                         self.recording_count_label = ui.Label("")
-                        self.recording_dir_label = ui.Label(f"Output directory: {RECORDINGS_DIR}")
+                        self.recording_dir_label = ui.Label(
+                            f"Output directory: {RECORDINGS_DIR}"
+                        )
                 self.update_recording_count()
 
     def _build_recording_status_section(self):
         self.recording_name_label = ui.Label("Current recording name: ")
         self.recording_step_label = ui.Label("Current recording duration: 0.00s")
+
+    def _build_build_status_section(self):
+        """Display occupancy-map build status and any errors that occurred."""
+        with ui.Frame():
+            with ui.VStack(spacing=4, height=0):
+                ui.Label("Build Status")
+                self.build_status_label = ui.Label("")
+                self.build_error_label = ui.Label("")
+                # Set initial state
+                self._update_build_status_display()
+
+    def _update_build_status_display(self):
+        """Update build status display with scenario error state."""
+        if self.scenario is None:
+            self.build_status_label.text = "Status: No scenario loaded"
+            self.build_error_label.text = ""
+        else:
+            self.build_status_label.text = "Status: Scenario loaded"
+            build_error = getattr(self.scenario, "build_error", None)
+            if build_error:
+                # Truncate long errors for display
+                truncated_error = str(build_error)[:500]
+                self.build_error_label.text = f"⚠️  Build Error:\n{truncated_error}"
+            else:
+                self.build_error_label.text = "✓ Occupancy map generated successfully"
 
     def build_occ_map_frame(self):
         if self.scenario is not None:
@@ -692,19 +839,49 @@ class PatoSimExtension(omni.ext.IExt):
                 with ui.VStack(spacing=6, height=0):
                     with ui.HStack(height=42):
                         ui.Label("Goal Info", width=72)
-                        self._occ_map_goal_info_label = ui.Label(self._occ_map_goal_info_text)
-                    with ui.HStack():
+                        self._occ_map_goal_info_label = ui.Label(
+                            self._occ_map_goal_info_text
+                        )
+                    with ui.HStack(height=256):
                         ui.ImageWithProvider(
-                            self._occupancy_map_image_provider
+                            self._occupancy_map_image_provider,
+                            width=256, 
+                            height=256
                         )
 
     def draw_occ_map(self):
         if self.scenario is not None:
-            image = self.scenario.occupancy_map.ros_image().copy().convert("RGBA")
-            data = bytearray(image.tobytes())
-            self._occupancy_map_image_provider.set_bytes_data(data, [image.width, image.height])
-            self._update_occ_map_goal_info_text()
-            self._occ_map_frame.rebuild()
+            try:
+                import warnings
+                warnings.warn(
+                    f"[draw_occ_map] Scenario found, occupancy_map={type(self.scenario.occupancy_map).__name__}",
+                    stacklevel=2
+                )
+                image = self.scenario.occupancy_map.ros_image().copy().convert("RGBA")
+                warnings.warn(
+                    f"[draw_occ_map] Image converted: size={image.size}, mode={image.mode}",
+                    stacklevel=2
+                )
+                data = bytearray(image.tobytes())
+                self._occupancy_map_image_provider.set_bytes_data(
+                    data, [image.width, image.height]
+                )
+                warnings.warn(
+                    f"[draw_occ_map] Provider updated with {len(data)} bytes at {image.width}x{image.height}",
+                    stacklevel=2
+                )
+                self._update_occ_map_goal_info_text()
+                self._occ_map_frame.rebuild()
+                warnings.warn(
+                    f"[draw_occ_map] Frame rebuilt successfully",
+                    stacklevel=2
+                )
+            except Exception as e:
+                import warnings, traceback
+                warnings.warn(
+                    f"[draw_occ_map] Error: {e}\n{traceback.format_exc()}",
+                    stacklevel=2
+                )
 
     def _update_occ_map_goal_info_text(self):
         scenario = getattr(self, "scenario", None)
@@ -723,7 +900,9 @@ class PatoSimExtension(omni.ext.IExt):
                     path_np = np.asarray(path, dtype=np.float32)
                     goal = path_np[-1]
                     prev = path_np[-2]
-                    heading = math.degrees(math.atan2(float(goal[1] - prev[1]), float(goal[0] - prev[0])))
+                    heading = math.degrees(
+                        math.atan2(float(goal[1] - prev[1]), float(goal[0] - prev[0]))
+                    )
                     text = (
                         f"Goal XY:\n({goal[0]:+.2f}, {goal[1]:+.2f})\n"
                         f"Heading:\n{heading:+.1f} deg\n"
@@ -755,26 +934,37 @@ class PatoSimExtension(omni.ext.IExt):
                 with ui.VStack(spacing=2, height=42 if compact else 36):
                     ui.Label(self._sensor_preview_title_text("Resolucao"))
                     with ui.HStack(height=24):
-                        preset_labels = [p[0] for p in _CAMERA_PREVIEW_RESOLUTION_PRESETS]
+                        preset_labels = [
+                            p[0] for p in _CAMERA_PREVIEW_RESOLUTION_PRESETS
+                        ]
                         res_combo = ui.ComboBox(
                             int(getattr(self, "_sensor_preview_resolution_index", 1)),
                             *preset_labels,
                             width=mode_combo_width,
                         )
                         try:
+
                             def _on_resolution_item_changed(m, item):
                                 try:
-                                    idx = m.get_item_value_model(item).get_value_as_int()
+                                    idx = m.get_item_value_model(
+                                        item
+                                    ).get_value_as_int()
                                     self._sensor_preview_resolution_index = int(idx)
                                     self._apply_sensor_preview_mode_settings()
                                     self._sensor_preview_frame.rebuild()
                                     self._refresh_sensor_preview(
-                                        getattr(self, "_sensor_preview_latest_camera_map", {})
+                                        getattr(
+                                            self,
+                                            "_sensor_preview_latest_camera_map",
+                                            {},
+                                        )
                                     )
                                 except Exception:
                                     pass
 
-                            res_combo.model.add_item_changed_fn(_on_resolution_item_changed)
+                            res_combo.model.add_item_changed_fn(
+                                _on_resolution_item_changed
+                            )
                         except Exception:
                             pass
                         ui.Spacer()
@@ -804,38 +994,50 @@ class PatoSimExtension(omni.ext.IExt):
                 with ui.HStack(height=24):
                     ui.Label("Cam Interval", width=100)
                     self._cam_interval_drag = ui.IntDrag(
-                        min=1, max=60, step=1,
+                        min=1,
+                        max=60,
+                        step=1,
                         width=60,
                     )
                     self._cam_interval_drag.model.set_value(
                         int(getattr(self, "_camera_frame_interval", 8))
                     )
                     self._cam_interval_drag.model.add_value_changed_fn(
-                        lambda m: setattr(self, "_camera_frame_interval", max(1, m.as_int))
+                        lambda m: setattr(
+                            self, "_camera_frame_interval", max(1, m.as_int)
+                        )
                     )
                 with ui.HStack(height=24):
                     ui.Label("Lidar Interval", width=100)
                     self._lidar_interval_drag = ui.IntDrag(
-                        min=1, max=60, step=1,
+                        min=1,
+                        max=60,
+                        step=1,
                         width=60,
                     )
                     self._lidar_interval_drag.model.set_value(
                         int(getattr(self, "_lidar_frame_interval", 10))
                     )
                     self._lidar_interval_drag.model.add_value_changed_fn(
-                        lambda m: setattr(self, "_lidar_frame_interval", max(1, m.as_int))
+                        lambda m: setattr(
+                            self, "_lidar_frame_interval", max(1, m.as_int)
+                        )
                     )
                 with ui.HStack(height=24):
                     ui.Label("Sonar Interval", width=100)
                     self._sonar_interval_drag = ui.IntDrag(
-                        min=1, max=60, step=1,
+                        min=1,
+                        max=60,
+                        step=1,
                         width=60,
                     )
                     self._sonar_interval_drag.model.set_value(
                         int(getattr(self, "_sonar_frame_interval", 14))
                     )
                     self._sonar_interval_drag.model.add_value_changed_fn(
-                        lambda m: setattr(self, "_sonar_frame_interval", max(1, m.as_int))
+                        lambda m: setattr(
+                            self, "_sonar_frame_interval", max(1, m.as_int)
+                        )
                     )
                 with ui.HStack(height=cam_h + 32, spacing=8):
                     with ui.VStack(width=cam_w + 8, spacing=4):
@@ -853,7 +1055,9 @@ class PatoSimExtension(omni.ext.IExt):
                             height=cam_h,
                         )
                 ui.Spacer(height=4)
-                self._sensor_pose_header_label = ui.Label("Sensor Poses Relative To Robot")
+                self._sensor_pose_header_label = ui.Label(
+                    "Sensor Poses Relative To Robot"
+                )
                 with ui.VStack(height=pose_panel_height):
                     self._sensor_pose_label = ui.Label(self._sensor_pose_text)
 
@@ -877,7 +1081,9 @@ class PatoSimExtension(omni.ext.IExt):
                         pass
                 with ui.HStack(height=20):
                     ui.Label("Resolution")
-                    ui.Label(f"{self._lidar_preview_target_size}x{self._lidar_preview_target_size}")
+                    ui.Label(
+                        f"{self._lidar_preview_target_size}x{self._lidar_preview_target_size}"
+                    )
                 with ui.HStack(height=22):
                     ui.Label("Auto Range")
                     ui.CheckBox(model=self._lidar_preview_auto_range_model, width=22)
@@ -889,7 +1095,9 @@ class PatoSimExtension(omni.ext.IExt):
                         pass
                     ui.Spacer(width=8)
                     ui.Label("Range (m)")
-                    ui.IntField(model=self._lidar_preview_range_model, height=20, width=56)
+                    ui.IntField(
+                        model=self._lidar_preview_range_model, height=20, width=56
+                    )
                     try:
                         self._lidar_preview_range_model.add_value_changed_fn(
                             self._on_lidar_preview_params_changed
@@ -898,7 +1106,9 @@ class PatoSimExtension(omni.ext.IExt):
                         pass
                 with ui.HStack(height=22):
                     ui.Label("Point Size")
-                    ui.IntField(model=self._lidar_preview_point_size_model, height=20, width=56)
+                    ui.IntField(
+                        model=self._lidar_preview_point_size_model, height=20, width=56
+                    )
                     try:
                         self._lidar_preview_point_size_model.add_value_changed_fn(
                             self._on_lidar_preview_params_changed
@@ -907,7 +1117,11 @@ class PatoSimExtension(omni.ext.IExt):
                         pass
                     ui.Spacer(width=8)
                     ui.Label("History")
-                    ui.IntField(model=self._lidar_preview_history_frames_model, height=20, width=56)
+                    ui.IntField(
+                        model=self._lidar_preview_history_frames_model,
+                        height=20,
+                        width=56,
+                    )
                     try:
                         self._lidar_preview_history_frames_model.add_value_changed_fn(
                             self._on_lidar_preview_params_changed
@@ -949,7 +1163,9 @@ class PatoSimExtension(omni.ext.IExt):
                         height=self._lidar_preview_target_size,
                     )
                     ui.Spacer()
-                self._lidar_preview_stats_label = ui.Label(self._lidar_preview_stats_text)
+                self._lidar_preview_stats_label = ui.Label(
+                    self._lidar_preview_stats_text
+                )
                 self._lidar_status_label = ui.Label("Lidar: --", height=18)
 
     def _get_sensor_preview_window_width(self) -> int:
@@ -990,10 +1206,9 @@ class PatoSimExtension(omni.ext.IExt):
         )
         if rgba is None:
             rgba = self._blank_sensor_preview_rgba()
-        elif (
-            int(rgba.shape[1]) != int(self._sensor_preview_target_width)
-            or int(rgba.shape[0]) != int(self._sensor_preview_target_height)
-        ):
+        elif int(rgba.shape[1]) != int(self._sensor_preview_target_width) or int(
+            rgba.shape[0]
+        ) != int(self._sensor_preview_target_height):
             canvas = self._blank_sensor_preview_rgba()
             h, w = rgba.shape[:2]
             x0 = max(0, (self._sensor_preview_target_width - w) // 2)
@@ -1054,27 +1269,39 @@ class PatoSimExtension(omni.ext.IExt):
         if source is None:
             return
         try:
-            self._oceansim_front_camera_model.set_value(bool(getattr(source, "enable_front_camera", True)))
+            self._oceansim_front_camera_model.set_value(
+                bool(getattr(source, "enable_front_camera", True))
+            )
         except Exception:
             pass
         try:
-            self._oceansim_stereo_camera_model.set_value(bool(getattr(source, "enable_stereo_camera", False)))
+            self._oceansim_stereo_camera_model.set_value(
+                bool(getattr(source, "enable_stereo_camera", False))
+            )
         except Exception:
             pass
         try:
-            self._oceansim_lidar_model.set_value(bool(getattr(source, "enable_lidar", False)))
+            self._oceansim_lidar_model.set_value(
+                bool(getattr(source, "enable_lidar", False))
+            )
         except Exception:
             pass
         try:
-            self._oceansim_sonar_model.set_value(bool(getattr(source, "enable_sonar", True)))
+            self._oceansim_sonar_model.set_value(
+                bool(getattr(source, "enable_sonar", True))
+            )
         except Exception:
             pass
         try:
-            self._oceansim_dvl_model.set_value(bool(getattr(source, "enable_dvl", True)))
+            self._oceansim_dvl_model.set_value(
+                bool(getattr(source, "enable_dvl", True))
+            )
         except Exception:
             pass
         try:
-            self._oceansim_barometer_model.set_value(bool(getattr(source, "enable_barometer", True)))
+            self._oceansim_barometer_model.set_value(
+                bool(getattr(source, "enable_barometer", True))
+            )
         except Exception:
             pass
 
@@ -1085,7 +1312,9 @@ class PatoSimExtension(omni.ext.IExt):
 
     def _get_selected_scenario_name(self) -> str:
         try:
-            index = self.scenario_combo_box.model.get_item_value_model().get_value_as_int()
+            index = (
+                self.scenario_combo_box.model.get_item_value_model().get_value_as_int()
+            )
             return list(SCENARIOS.names())[index]
         except Exception:
             return ""
@@ -1115,7 +1344,9 @@ class PatoSimExtension(omni.ext.IExt):
             except Exception:
                 pass
 
-    def _set_simple_window_visible(self, window_attr: str, model_attr: str, enabled: bool):
+    def _set_simple_window_visible(
+        self, window_attr: str, model_attr: str, enabled: bool
+    ):
         enabled = bool(enabled)
         window = getattr(self, window_attr, None)
         if window is not None:
@@ -1136,7 +1367,9 @@ class PatoSimExtension(omni.ext.IExt):
             enabled = bool(model.as_bool)
         except Exception:
             enabled = True
-        self._set_simple_window_visible("_visualize_window", "_occ_map_window_toggle_model", enabled)
+        self._set_simple_window_visible(
+            "_visualize_window", "_occ_map_window_toggle_model", enabled
+        )
 
     def _on_robot_setup_window_toggle_changed(self, model):
         try:
@@ -1232,7 +1465,9 @@ class PatoSimExtension(omni.ext.IExt):
                 pass
 
     def _is_path_planning_selected(self) -> bool:
-        return self._get_selected_scenario_name() == "RandomPathFollowingScenarioRearSteer"
+        return (
+            self._get_selected_scenario_name() == "RandomPathFollowingScenarioRearSteer"
+        )
 
     def _sync_path_planning_button_state(self):
         # Button always enabled; context shown inside the window
@@ -1266,10 +1501,14 @@ class PatoSimExtension(omni.ext.IExt):
     def _apply_lidar_preview_mode_settings(self):
         if self._lidar_preview_mode == "robust":
             self._lidar_preview_target_size = 300
-            self._lidar_preview_history_frames = max(6, int(self._lidar_preview_history_frames))
+            self._lidar_preview_history_frames = max(
+                6, int(self._lidar_preview_history_frames)
+            )
             self._lidar_preview_history_max_points_per_frame = 1800
             try:
-                self._lidar_preview_history_frames_model.set_value(self._lidar_preview_history_frames)
+                self._lidar_preview_history_frames_model.set_value(
+                    self._lidar_preview_history_frames
+                )
             except Exception:
                 pass
             try:
@@ -1279,10 +1518,14 @@ class PatoSimExtension(omni.ext.IExt):
                 pass
         else:
             self._lidar_preview_target_size = 180
-            self._lidar_preview_history_frames = min(int(self._lidar_preview_history_frames), 2)
+            self._lidar_preview_history_frames = min(
+                int(self._lidar_preview_history_frames), 2
+            )
             self._lidar_preview_history_max_points_per_frame = 600
             try:
-                self._lidar_preview_history_frames_model.set_value(self._lidar_preview_history_frames)
+                self._lidar_preview_history_frames_model.set_value(
+                    self._lidar_preview_history_frames
+                )
             except Exception:
                 pass
             try:
@@ -1290,7 +1533,9 @@ class PatoSimExtension(omni.ext.IExt):
                 self._lidar_preview_window.height = 440
             except Exception:
                 pass
-        self._lidar_preview_history = self._lidar_preview_history[-self._lidar_preview_history_frames:]
+        self._lidar_preview_history = self._lidar_preview_history[
+            -self._lidar_preview_history_frames :
+        ]
 
     def _on_sensor_preview_mode_changed(self, model):
         try:
@@ -1328,12 +1573,18 @@ class PatoSimExtension(omni.ext.IExt):
         except Exception:
             pass
         try:
-            self._refresh_lidar_preview(self._sensor_preview_latest_pointcloud, update_history=False)
+            self._refresh_lidar_preview(
+                self._sensor_preview_latest_pointcloud, update_history=False
+            )
         except Exception:
             pass
 
     def _load_path_planning_models_from_robot(self, robot=None):
-        robot = robot if robot is not None else getattr(getattr(self, "scenario", None), "robot", None)
+        robot = (
+            robot
+            if robot is not None
+            else getattr(getattr(self, "scenario", None), "robot", None)
+        )
         if robot is None:
             robot_type = self._get_selected_robot_type()
             robot = robot_type
@@ -1364,31 +1615,50 @@ class PatoSimExtension(omni.ext.IExt):
             except Exception:
                 continue
             setattr(robot, key, value)
-        if scenario is not None and type(scenario).__name__ == "RandomPathFollowingScenarioRearSteer":
+        if (
+            scenario is not None
+            and type(scenario).__name__ == "RandomPathFollowingScenarioRearSteer"
+        ):
             try:
                 scenario._v_nom = float(robot.path_following_speed)
                 scenario._k_ang = float(robot.path_following_angular_gain)
-                scenario._stop_dist = float(robot.path_following_stop_distance_threshold)
-                scenario._lookahead = float(robot.path_following_target_point_offset_meters)
+                scenario._stop_dist = float(
+                    robot.path_following_stop_distance_threshold
+                )
+                scenario._lookahead = float(
+                    robot.path_following_target_point_offset_meters
+                )
                 scenario._delta_cmd_lim = float(
                     np.clip(
                         getattr(robot, "path_following_max_steer_command", 0.45),
                         0.12,
-                        getattr(robot, "effective_steer_limit", getattr(robot, "max_steer_angle", 0.6)),
+                        getattr(
+                            robot,
+                            "effective_steer_limit",
+                            getattr(robot, "max_steer_angle", 0.6),
+                        ),
                     )
                 )
-                scenario._delta_rate_limit = float(robot.path_following_delta_rate_limit)
+                scenario._delta_rate_limit = float(
+                    robot.path_following_delta_rate_limit
+                )
                 scenario._lookahead_min = float(robot.path_following_lookahead_min)
                 scenario._lookahead_max = float(robot.path_following_lookahead_max)
                 scenario._safety_points = int(robot.path_following_safety_points)
                 scenario._safety_margin = float(robot.path_following_safety_margin)
                 scenario._min_v_cmd = float(robot.path_following_min_speed)
-                scenario._path_smoothing_iterations = int(robot.path_following_smoothing_iterations)
+                scenario._path_smoothing_iterations = int(
+                    robot.path_following_smoothing_iterations
+                )
             except Exception:
                 pass
-            self._update_path_planning_info("Applied to current path-planning scenario.")
+            self._update_path_planning_info(
+                "Applied to current path-planning scenario."
+            )
         else:
-            self._update_path_planning_info("Applied to robot defaults; rebuild to use in path planning.")
+            self._update_path_planning_info(
+                "Applied to robot defaults; rebuild to use in path planning."
+            )
 
     def _update_path_planning_info(self, text: str):
         try:
@@ -1404,14 +1674,18 @@ class PatoSimExtension(omni.ext.IExt):
     def _open_path_planning_window(self):
         self._load_path_planning_models_from_robot()
         self._update_path_planning_info("Adjust values and click Apply.")
-        self._set_simple_window_visible("_path_planning_window", "_path_planning_window_toggle_model", True)
+        self._set_simple_window_visible(
+            "_path_planning_window", "_path_planning_window_toggle_model", True
+        )
         try:
             self._path_planning_frame.rebuild()
         except Exception:
             pass
 
     def _open_robot_setup_window(self):
-        self._set_simple_window_visible("_robot_setup_window", "_robot_setup_window_toggle_model", True)
+        self._set_simple_window_visible(
+            "_robot_setup_window", "_robot_setup_window_toggle_model", True
+        )
         try:
             self._robot_setup_frame.rebuild()
         except Exception:
@@ -1429,7 +1703,9 @@ class PatoSimExtension(omni.ext.IExt):
             pass
 
     def _open_replay_config_window(self):
-        self._set_simple_window_visible("_replay_config_window", "_replay_config_window_toggle_model", True)
+        self._set_simple_window_visible(
+            "_replay_config_window", "_replay_config_window_toggle_model", True
+        )
         try:
             self._replay_config_frame.rebuild()
         except Exception:
@@ -1457,7 +1733,10 @@ class PatoSimExtension(omni.ext.IExt):
                         word_wrap=True,
                     )
                 with ui.HStack():
-                    ui.Button("Load From Robot", clicked_fn=lambda: self._load_path_planning_models_from_robot())
+                    ui.Button(
+                        "Load From Robot",
+                        clicked_fn=lambda: self._load_path_planning_models_from_robot(),
+                    )
                     ui.Button("Apply", clicked_fn=self._apply_path_planning_settings)
                 field_specs = [
                     ("Speed", "path_following_speed"),
@@ -1481,7 +1760,9 @@ class PatoSimExtension(omni.ext.IExt):
                             ui.IntField(model=model, width=90, height=20)
                         else:
                             ui.FloatField(model=model, width=90, height=20)
-                self._path_planning_info_label = ui.Label("Select path planning and click Load From Robot.")
+                self._path_planning_info_label = ui.Label(
+                    "Select path planning and click Load From Robot."
+                )
 
     def _get_active_sonar(self):
         scenario = getattr(self, "scenario", None)
@@ -1571,7 +1852,9 @@ class PatoSimExtension(omni.ext.IExt):
     def _build_sonar_noise_controls(self):
         binning_items = ["sum", "mean"]
         normalizing_items = ["all", "range"]
-        bind_callbacks = not bool(getattr(self, "_sonar_advanced_callbacks_bound", False))
+        bind_callbacks = not bool(
+            getattr(self, "_sonar_advanced_callbacks_bound", False)
+        )
 
         def _changed(_m):
             self._apply_sonar_noise_params()
@@ -1629,6 +1912,7 @@ class PatoSimExtension(omni.ext.IExt):
                     width=90,
                 )
                 try:
+
                     def _on_bin(m, item):
                         try:
                             self._sonar_binning_method_model.set_value(
@@ -1650,6 +1934,7 @@ class PatoSimExtension(omni.ext.IExt):
                     width=90,
                 )
                 try:
+
                     def _on_norm(m, item):
                         try:
                             self._sonar_normalizing_method_model.set_value(
@@ -1670,6 +1955,7 @@ class PatoSimExtension(omni.ext.IExt):
                 ui.StringField(model=self._sonar_yaml_path_model, height=22)
 
             with ui.HStack(height=24, spacing=6):
+
                 def _load_yaml():
                     path = str(self._sonar_yaml_path_model.as_string).strip()
                     if not path:
@@ -1741,7 +2027,9 @@ class PatoSimExtension(omni.ext.IExt):
                             self._sonar_preview_size = new_sz
                             new_pw = max(1, round(new_sz * _SONAR_GRID_ASPECT))
                             try:
-                                self._sonar_preview_window_obj.width = new_sz + new_pw + 80
+                                self._sonar_preview_window_obj.width = (
+                                    new_sz + new_pw + 80
+                                )
                                 self._sonar_preview_window_obj.height = new_sz + 140
                             except Exception:
                                 pass
@@ -1755,14 +2043,18 @@ class PatoSimExtension(omni.ext.IExt):
                     ui.Label("Min Range (m)", width=110)
                     ui.FloatDrag(
                         model=self._sonar_min_range_model,
-                        min=0.01, max=50.0, step=0.1,
+                        min=0.01,
+                        max=50.0,
+                        step=0.1,
                         width=80,
                     )
                     ui.Spacer(width=10)
                     ui.Label("Max Range (m)", width=110)
                     ui.FloatDrag(
                         model=self._sonar_max_range_model,
-                        min=0.1, max=200.0, step=0.5,
+                        min=0.1,
+                        max=200.0,
+                        step=0.5,
                         width=80,
                     )
                     ui.Button(
@@ -1865,7 +2157,11 @@ class PatoSimExtension(omni.ext.IExt):
                         pass
                 with ui.HStack():
                     ui.Label("Intervalo PC (1 = todos)", width=170)
-                    ui.IntField(model=self._record_pointcloud_interval_model, height=20, width=72)
+                    ui.IntField(
+                        model=self._record_pointcloud_interval_model,
+                        height=20,
+                        width=72,
+                    )
                 with ui.HStack():
                     ui.Label("Salvar Metadata de Pose", width=170)
                     ui.CheckBox(model=self._record_pointcloud_metadata_model, width=22)
@@ -1880,7 +2176,9 @@ class PatoSimExtension(omni.ext.IExt):
                     ui.Label("Render Interval", width=170)
                     if not hasattr(self, "_replay_render_interval_model"):
                         self._replay_render_interval_model = ui.SimpleIntModel(20)
-                    ui.IntField(model=self._replay_render_interval_model, height=20, width=72)
+                    ui.IntField(
+                        model=self._replay_render_interval_model, height=20, width=72
+                    )
                 ui.Label(
                     "Quantos steps de gravacao pular entre cada render. "
                     "Menor = mais frames, maior = mais rapido.",
@@ -1923,7 +2221,10 @@ class PatoSimExtension(omni.ext.IExt):
                 ):
                     provider.set_bytes_data(
                         bytearray(blank_cam.tobytes()),
-                        [self._sensor_preview_target_width, self._sensor_preview_target_height],
+                        [
+                            self._sensor_preview_target_width,
+                            self._sensor_preview_target_height,
+                        ],
                     )
             except Exception:
                 pass
@@ -1947,7 +2248,11 @@ class PatoSimExtension(omni.ext.IExt):
         if not enabled:
             try:
                 blank_lidar = np.zeros(
-                    (self._lidar_preview_target_size, self._lidar_preview_target_size, 4),
+                    (
+                        self._lidar_preview_target_size,
+                        self._lidar_preview_target_size,
+                        4,
+                    ),
                     dtype=np.uint8,
                 )
                 blank_lidar[:, :, 3] = 255
@@ -1965,7 +2270,9 @@ class PatoSimExtension(omni.ext.IExt):
             pass
 
     def _pointcloud_record_due(self, step: int | None = None) -> bool:
-        if self.writer is None or not bool(getattr(self, "_record_pointcloud_enabled", False)):
+        if self.writer is None or not bool(
+            getattr(self, "_record_pointcloud_enabled", False)
+        ):
             return False
         if step is None:
             step = int(getattr(self, "step", 0))
@@ -1984,10 +2291,9 @@ class PatoSimExtension(omni.ext.IExt):
             return False
         if deferred_sensor_processing_enabled:
             return False
-        return (
-            bool(getattr(self, "_record_pointcloud_enabled", False))
-            and self._pointcloud_record_due(step)
-        )
+        return bool(
+            getattr(self, "_record_pointcloud_enabled", False)
+        ) and self._pointcloud_record_due(step)
 
     def _should_record_full_sensor_payload(self) -> bool:
         return not bool(getattr(self, "deferred_sensor_processing_enabled", False))
@@ -2106,17 +2412,23 @@ class PatoSimExtension(omni.ext.IExt):
 
     def _on_record_common_interval_changed(self, *_args):
         try:
-            self.record_common_interval = max(1, int(self._record_common_interval_model.as_int))
+            self.record_common_interval = max(
+                1, int(self._record_common_interval_model.as_int)
+            )
         except Exception:
             pass
 
     def _on_record_pointcloud_params_changed(self, *_args):
         try:
-            self._record_pointcloud_interval = max(1, int(self._record_pointcloud_interval_model.as_int))
+            self._record_pointcloud_interval = max(
+                1, int(self._record_pointcloud_interval_model.as_int)
+            )
         except Exception:
             pass
         try:
-            self._record_pointcloud_metadata = bool(self._record_pointcloud_metadata_model.as_bool)
+            self._record_pointcloud_metadata = bool(
+                self._record_pointcloud_metadata_model.as_bool
+            )
         except Exception:
             pass
         self._set_scenario_pointcloud_requirement()
@@ -2138,7 +2450,9 @@ class PatoSimExtension(omni.ext.IExt):
 
     def _on_lidar_preview_params_changed(self, *_args):
         try:
-            self._lidar_preview_auto_range = bool(self._lidar_preview_auto_range_model.as_bool)
+            self._lidar_preview_auto_range = bool(
+                self._lidar_preview_auto_range_model.as_bool
+            )
         except Exception:
             pass
         try:
@@ -2157,7 +2471,9 @@ class PatoSimExtension(omni.ext.IExt):
             self._lidar_preview_history_frames = max(
                 1, int(self._lidar_preview_history_frames_model.as_int)
             )
-            self._lidar_preview_history = self._lidar_preview_history[-self._lidar_preview_history_frames:]
+            self._lidar_preview_history = self._lidar_preview_history[
+                -self._lidar_preview_history_frames :
+            ]
         except Exception:
             pass
         try:
@@ -2169,11 +2485,15 @@ class PatoSimExtension(omni.ext.IExt):
         except Exception:
             pass
         try:
-            self._lidar_preview_swap_xy = bool(self._lidar_preview_swap_xy_model.as_bool)
+            self._lidar_preview_swap_xy = bool(
+                self._lidar_preview_swap_xy_model.as_bool
+            )
         except Exception:
             pass
         try:
-            self._refresh_lidar_preview(self._sensor_preview_latest_pointcloud, update_history=False)
+            self._refresh_lidar_preview(
+                self._sensor_preview_latest_pointcloud, update_history=False
+            )
         except Exception:
             pass
 
@@ -2184,7 +2504,9 @@ class PatoSimExtension(omni.ext.IExt):
             pass
 
     @staticmethod
-    def _resize_rgb_for_preview(image: np.ndarray, max_width: int = 320, max_height: int = 200):
+    def _resize_rgb_for_preview(
+        image: np.ndarray, max_width: int = 320, max_height: int = 200
+    ):
         if image is None:
             return None
         arr = np.asarray(image)
@@ -2205,7 +2527,9 @@ class PatoSimExtension(omni.ext.IExt):
         if height <= 0 or width <= 0:
             return None
 
-        scale = min(float(max_width) / float(width), float(max_height) / float(height), 1.0)
+        scale = min(
+            float(max_width) / float(width), float(max_height) / float(height), 1.0
+        )
         if scale < 1.0:
             new_w = max(1, int(width * scale))
             new_h = max(1, int(height * scale))
@@ -2256,7 +2580,7 @@ class PatoSimExtension(omni.ext.IExt):
         split = half_w
         _paste(left_rgba, 0, split)
         _paste(right_rgba, split, target_w)
-        canvas[:, max(0, split - 1):min(target_w, split + 1), :3] = 80
+        canvas[:, max(0, split - 1) : min(target_w, split + 1), :3] = 80
         return canvas
 
     def _build_sensor_preview_camera_map(self, rgb_state: dict):
@@ -2324,8 +2648,16 @@ class PatoSimExtension(omni.ext.IExt):
             )
             front_underwater = _best_visible(
                 _read_buffer(front_camera, "preview_rgb_image", "rgb_image"),
-                _read_buffer(getattr(front_stereo, "left", None), "preview_rgb_image", "rgb_image"),
-                _read_buffer(getattr(front_stereo, "right", None), "preview_rgb_image", "rgb_image"),
+                _read_buffer(
+                    getattr(front_stereo, "left", None),
+                    "preview_rgb_image",
+                    "rgb_image",
+                ),
+                _read_buffer(
+                    getattr(front_stereo, "right", None),
+                    "preview_rgb_image",
+                    "rgb_image",
+                ),
             )
 
             if _preview_score(front_raw) >= 2.0:
@@ -2444,11 +2776,19 @@ class PatoSimExtension(omni.ext.IExt):
         labels = []
         sensor_candidates = (
             ("front", getattr(robot, "front_camera", None)),
-            ("stereo_left", getattr(getattr(robot, "front_stereo", None), "left", None)),
-            ("stereo_right", getattr(getattr(robot, "front_stereo", None), "right", None)),
+            (
+                "stereo_left",
+                getattr(getattr(robot, "front_stereo", None), "left", None),
+            ),
+            (
+                "stereo_right",
+                getattr(getattr(robot, "front_stereo", None), "right", None),
+            ),
         )
         for name, sensor_obj in sensor_candidates:
-            if sensor_obj is None or not hasattr(sensor_obj, "get_preview_backend_status"):
+            if sensor_obj is None or not hasattr(
+                sensor_obj, "get_preview_backend_status"
+            ):
                 continue
             try:
                 status = sensor_obj.get_preview_backend_status()
@@ -2567,12 +2907,21 @@ class PatoSimExtension(omni.ext.IExt):
         canvas[mid, :, :3] = 55
         canvas[:, mid, :3] = 55
         robot_half = 3
-        canvas[max(0, mid - robot_half):min(size, mid + robot_half + 1),
-               max(0, mid - robot_half):min(size, mid + robot_half + 1), :3] = [220, 180, 60]
-        self._format_lidar_preview_stats(status=backend_status, note="no pointcloud data")
+        canvas[
+            max(0, mid - robot_half) : min(size, mid + robot_half + 1),
+            max(0, mid - robot_half) : min(size, mid + robot_half + 1),
+            :3,
+        ] = [220, 180, 60]
+        self._format_lidar_preview_stats(
+            status=backend_status, note="no pointcloud data"
+        )
 
         current_pts = self._select_lidar_preview_points(pointcloud_state)
-        history_sets = [pts for pts in getattr(self, "_lidar_preview_history", []) if pts is not None and len(pts) > 0]
+        history_sets = [
+            pts
+            for pts in getattr(self, "_lidar_preview_history", [])
+            if pts is not None and len(pts) > 0
+        ]
         if current_pts is None and len(history_sets) == 0:
             return canvas
 
@@ -2580,7 +2929,11 @@ class PatoSimExtension(omni.ext.IExt):
             draw_sets = list(history_sets)
             if current_pts is not None:
                 draw_sets.append(current_pts)
-            combined = np.concatenate(draw_sets, axis=0) if len(draw_sets) > 1 else draw_sets[0]
+            combined = (
+                np.concatenate(draw_sets, axis=0)
+                if len(draw_sets) > 1
+                else draw_sets[0]
+            )
 
             x = combined[:, 0]
             y = combined[:, 1]
@@ -2600,12 +2953,14 @@ class PatoSimExtension(omni.ext.IExt):
                 if self._lidar_preview_smoothed_range is None:
                     self._lidar_preview_smoothed_range = raw_range
                 alpha = 0.18 if self._lidar_preview_mode == "robust" else 0.35
-                self._lidar_preview_smoothed_range = (
-                    (1.0 - alpha) * float(self._lidar_preview_smoothed_range) + alpha * raw_range
-                )
+                self._lidar_preview_smoothed_range = (1.0 - alpha) * float(
+                    self._lidar_preview_smoothed_range
+                ) + alpha * raw_range
                 lidar_range = float(self._lidar_preview_smoothed_range)
             else:
-                lidar_range = float(max(1.0, int(getattr(self, "_lidar_preview_manual_range_m", 8))))
+                lidar_range = float(
+                    max(1.0, int(getattr(self, "_lidar_preview_manual_range_m", 8)))
+                )
                 self._lidar_preview_smoothed_range = lidar_range
             scale = (size - 1) / (2.0 * lidar_range)
 
@@ -2624,7 +2979,9 @@ class PatoSimExtension(omni.ext.IExt):
                     y=(float(np.min(y)), float(np.max(y))),
                     z=(float(np.min(z)), float(np.max(z))),
                     history_frames=len(history_sets),
-                    note="rendering history only" if current_pts is None else f"0/{combined.shape[0]} points inside view",
+                    note="rendering history only"
+                    if current_pts is None
+                    else f"0/{combined.shape[0]} points inside view",
                 )
                 return canvas
 
@@ -2645,7 +3002,9 @@ class PatoSimExtension(omni.ext.IExt):
                 set_d = np.sqrt(set_x * set_x + set_y * set_y)
                 set_u = np.round(mid - set_y * scale).astype(np.int32)
                 set_v = np.round(mid - set_x * scale).astype(np.int32)
-                set_inside = (set_u >= 0) & (set_u < size) & (set_v >= 0) & (set_v < size)
+                set_inside = (
+                    (set_u >= 0) & (set_u < size) & (set_v >= 0) & (set_v < size)
+                )
                 if not np.any(set_inside):
                     offset += count
                     continue
@@ -2684,20 +3043,39 @@ class PatoSimExtension(omni.ext.IExt):
             )
             return canvas
         except Exception:
-            self._format_lidar_preview_stats(status=backend_status, note="preview rendering failed")
+            self._format_lidar_preview_stats(
+                status=backend_status, note="preview rendering failed"
+            )
             return canvas
 
-    def _refresh_lidar_preview(self, pointcloud_state: dict, update_history: bool = True):
+    def _refresh_lidar_preview(
+        self, pointcloud_state: dict, update_history: bool = True
+    ):
         try:
             if update_history:
                 pts = self._select_lidar_preview_points(pointcloud_state)
                 if pts is not None and pts.shape[0] > 0:
-                    max_points = int(max(200, getattr(self, "_lidar_preview_history_max_points_per_frame", 1500)))
+                    max_points = int(
+                        max(
+                            200,
+                            getattr(
+                                self,
+                                "_lidar_preview_history_max_points_per_frame",
+                                1500,
+                            ),
+                        )
+                    )
                     if pts.shape[0] > max_points:
-                        idx = np.linspace(0, pts.shape[0] - 1, max_points).astype(np.int32)
+                        idx = np.linspace(0, pts.shape[0] - 1, max_points).astype(
+                            np.int32
+                        )
                         pts = pts[idx]
-                    self._lidar_preview_history.append(np.asarray(pts, dtype=np.float32))
-                    keep = int(max(1, getattr(self, "_lidar_preview_history_frames", 4)))
+                    self._lidar_preview_history.append(
+                        np.asarray(pts, dtype=np.float32)
+                    )
+                    keep = int(
+                        max(1, getattr(self, "_lidar_preview_history_frames", 4))
+                    )
                     self._lidar_preview_history = self._lidar_preview_history[-keep:]
             rgba = self._build_lidar_preview_rgba(pointcloud_state)
             self._lidar_preview_image_provider.set_bytes_data(
@@ -2801,7 +3179,9 @@ class PatoSimExtension(omni.ext.IExt):
             "lidar": ("lidar_translation", "lidar_rotation"),
         }
         translation_attr, rotation_attr = mapping.get(sensor_name, (None, None))
-        config_translation = getattr(robot, translation_attr, None) if translation_attr else None
+        config_translation = (
+            getattr(robot, translation_attr, None) if translation_attr else None
+        )
         config_rotation = getattr(robot, rotation_attr, None) if rotation_attr else None
         return config_translation, config_rotation, translation_attr, rotation_attr
 
@@ -2809,7 +3189,9 @@ class PatoSimExtension(omni.ext.IExt):
     def _fmt_xyz_precise(values) -> str:
         if values is None or len(values) != 3:
             return "n/a"
-        return f"({float(values[0]):.3f}, {float(values[1]):.3f}, {float(values[2]):.3f})"
+        return (
+            f"({float(values[0]):.3f}, {float(values[1]):.3f}, {float(values[2]):.3f})"
+        )
 
     def _read_local_sensor_pose_from_prim(self, prim):
         if prim is None or not prim.IsValid():
@@ -2829,7 +3211,11 @@ class PatoSimExtension(omni.ext.IExt):
                     value = None
 
                 if op_type == UsdGeom.XformOp.TypeTranslate and value is not None:
-                    local_translation = (float(value[0]), float(value[1]), float(value[2]))
+                    local_translation = (
+                        float(value[0]),
+                        float(value[1]),
+                        float(value[2]),
+                    )
                 elif op_type == UsdGeom.XformOp.TypeOrient and value is not None:
                     imag = value.GetImaginary()
                     local_quat_wxyz = (
@@ -2855,7 +3241,9 @@ class PatoSimExtension(omni.ext.IExt):
             self._sensor_pose_text = text
             try:
                 if self._sensor_pose_header_label is not None:
-                    self._sensor_pose_header_label.text = "Sensor Poses Relative To Robot"
+                    self._sensor_pose_header_label.text = (
+                        "Sensor Poses Relative To Robot"
+                    )
                 if self._sensor_pose_label is not None:
                     self._sensor_pose_label.text = text
             except Exception:
@@ -2873,7 +3261,9 @@ class PatoSimExtension(omni.ext.IExt):
             self._sensor_pose_text = text
             try:
                 if self._sensor_pose_header_label is not None:
-                    self._sensor_pose_header_label.text = "Sensor Poses Relative To Robot"
+                    self._sensor_pose_header_label.text = (
+                        "Sensor Poses Relative To Robot"
+                    )
                 if self._sensor_pose_label is not None:
                     self._sensor_pose_label.text = text
             except Exception:
@@ -2898,19 +3288,29 @@ class PatoSimExtension(omni.ext.IExt):
                     lines.append(f"{sensor_name}: prim not found ({prim_path})")
                     continue
                 try:
-                    config_translation, config_rotation, translation_attr, rotation_attr = self._get_sensor_config_pose(robot, sensor_name)
-                    local_translation, local_rotation = self._read_local_sensor_pose_from_prim(prim)
+                    (
+                        config_translation,
+                        config_rotation,
+                        translation_attr,
+                        rotation_attr,
+                    ) = self._get_sensor_config_pose(robot, sensor_name)
+                    local_translation, local_rotation = (
+                        self._read_local_sensor_pose_from_prim(prim)
+                    )
                     sensor_world = xform_cache.GetLocalToWorldTransform(prim)
                     rel = robot_world_inv * sensor_world
                     rel_t = rel.ExtractTranslation()
                     world_t = sensor_world.ExtractTranslation()
                     lines.append(f"{sensor_name}:")
                     lines.append(f"  prim: {prim_path}")
-                    lines.append(f"  config.translation: {self._fmt_xyz(config_translation)}")
-                    lines.append(f"  config.rotation_xyz_deg: {self._fmt_xyz(config_rotation)}")
                     lines.append(
-                        f"  stage.local_translation: "
-                        f"{self._fmt_xyz(local_translation)}"
+                        f"  config.translation: {self._fmt_xyz(config_translation)}"
+                    )
+                    lines.append(
+                        f"  config.rotation_xyz_deg: {self._fmt_xyz(config_rotation)}"
+                    )
+                    lines.append(
+                        f"  stage.local_translation: {self._fmt_xyz(local_translation)}"
                     )
                     lines.append(
                         f"  stage.local_rotation_xyz_deg: "
@@ -2935,7 +3335,9 @@ class PatoSimExtension(omni.ext.IExt):
                             f"{translation_attr} = {self._fmt_xyz_precise(local_translation)}"
                         )
                 except Exception:
-                    lines.append(f"{sensor_name}: failed to compute transform ({prim_path})")
+                    lines.append(
+                        f"{sensor_name}: failed to compute transform ({prim_path})"
+                    )
 
         text = "\n".join(lines)
         self._sensor_pose_text = text
@@ -2947,12 +3349,16 @@ class PatoSimExtension(omni.ext.IExt):
         except Exception:
             pass
 
-
     def update_recording_count(self):
         num_recordings = len(glob.glob(os.path.join(RECORDINGS_DIR, "*")))
         try:
-            if hasattr(self, "recording_count_label") and self.recording_count_label is not None:
-                self.recording_count_label.text = f"Number of recordings: {num_recordings}"
+            if (
+                hasattr(self, "recording_count_label")
+                and self.recording_count_label is not None
+            ):
+                self.recording_count_label.text = (
+                    f"Number of recordings: {num_recordings}"
+                )
         except Exception:
             pass
 
@@ -2960,29 +3366,38 @@ class PatoSimExtension(omni.ext.IExt):
     def create_config(self):
         # Minimal, clear create_config: read UI values and return Config
         try:
-            scenario_type = list(SCENARIOS.names())[self.scenario_combo_box.model.get_item_value_model().get_value_as_int()]
+            scenario_type = list(SCENARIOS.names())[
+                self.scenario_combo_box.model.get_item_value_model().get_value_as_int()
+            ]
         except Exception:
             scenario_type = list(SCENARIOS.names())[0]
         try:
-            robot_type = list(ROBOTS.names())[self.robot_combo_box.model.get_item_value_model().get_value_as_int()]
+            robot_type = list(ROBOTS.names())[
+                self.robot_combo_box.model.get_item_value_model().get_value_as_int()
+            ]
         except Exception:
             robot_type = list(ROBOTS.names())[0]
 
         scene_path = self.scene_usd_field_string_model.as_string
-        scene_path = dev_scene_path if  scene_path == "" else scene_path
+        scene_path = dev_scene_path if scene_path == "" else scene_path
         dataset_object_path = self._get_selected_dataset_object_path()
 
         config = Config(
             scenario_type=scenario_type,
             robot_type=robot_type,
             scene_usd=scene_path,
-            dataset_object_enabled=bool(self._dataset_object_enabled_model.as_bool) and bool(dataset_object_path),
+            dataset_object_enabled=bool(self._dataset_object_enabled_model.as_bool)
+            and bool(dataset_object_path),
             dataset_object_usd=dataset_object_path,
-            dataset_object_reflectivity=float(self._dataset_object_reflectivity_model.as_float),
+            dataset_object_reflectivity=float(
+                self._dataset_object_reflectivity_model.as_float
+            ),
             dataset_object_position=(0.0, 0.0, 0.0),
             water_profile_path=self._oceansim_water_profile_model.as_string,
             waypoint_path=self._oceansim_waypoint_path_model.as_string,
-            apply_sonar_reflectivity_to_world=bool(self._oceansim_apply_sonar_reflectivity_model.as_bool),
+            apply_sonar_reflectivity_to_world=bool(
+                self._oceansim_apply_sonar_reflectivity_model.as_bool
+            ),
             rov_linear_speed=float(self._oceansim_linear_speed_model.as_float),
             rov_angular_speed=float(self._oceansim_angular_speed_model.as_float),
             enable_dvl_debug_lines=bool(self._oceansim_dvl_debug_model.as_bool),
@@ -2995,18 +3410,18 @@ class PatoSimExtension(omni.ext.IExt):
             rov_operating_depth=float(self._oceansim_operating_depth_model.as_float),
         )
         return config
-    
+
     def scenario_type(self):
         index = self.scenario_combo_box.model.get_item_value_model().get_value_as_int()
         return SCENARIOS.get_index(index)
-    
+
     def on_shutdown(self):
         # Defensive shutdown: some Kit shutdown sequences remove the world
         # before extensions are asked to shutdown, so `get_world()` may
         # return None. Guard all disconnect/remove calls to avoid raising
         # during extension shutdown.
         try:
-            if hasattr(self, 'keyboard') and self.keyboard is not None:
+            if hasattr(self, "keyboard") and self.keyboard is not None:
                 try:
                     self.keyboard.disconnect()
                 except Exception:
@@ -3014,7 +3429,7 @@ class PatoSimExtension(omni.ext.IExt):
         except Exception:
             pass
         try:
-            if hasattr(self, 'gamepad') and self.gamepad is not None:
+            if hasattr(self, "gamepad") and self.gamepad is not None:
                 try:
                     self.gamepad.disconnect()
                 except Exception:
@@ -3039,15 +3454,17 @@ class PatoSimExtension(omni.ext.IExt):
         writer.write_occupancy_map(self.scenario.occupancy_map)
         writer.copy_stage(self.cached_stage_path)
         self.step = 0
-        self.recording_time = 0.
+        self.recording_time = 0.0
         if self.recording_name_label is not None:
             self.recording_name_label.text = f"Current recording name: {recording_name}"
         if self.recording_step_label is not None:
-            self.recording_step_label.text = f"Current recording duration: {self.recording_time:.2f}s"
+            self.recording_step_label.text = (
+                f"Current recording duration: {self.recording_time:.2f}s"
+            )
         self.writer = writer
         self._set_scenario_pointcloud_requirement()
         self.update_recording_count()
-    
+
     def clear_recording(self):
         self.writer = None
         if self.recording_name_label is not None:
@@ -3077,6 +3494,10 @@ class PatoSimExtension(omni.ext.IExt):
             pass
         self.scenario = None
         self.cached_stage_path = None
+        try:
+            self._update_build_status_display()
+        except Exception:
+            pass
 
     def _remove_physics_callback_safe(self, world, name: str) -> bool:
         """Try one compatible API shape without double-removing."""
@@ -3099,7 +3520,11 @@ class PatoSimExtension(omni.ext.IExt):
 
     def _detach_physics_callback(self, world):
         """Remove physics callback using both old/new Isaac APIs."""
-        target_world = self._physics_callback_world if self._physics_callback_world is not None else world
+        target_world = (
+            self._physics_callback_world
+            if self._physics_callback_world is not None
+            else world
+        )
         if target_world is None:
             return
         if not getattr(self, "_physics_callback_registered", False):
@@ -3149,7 +3574,9 @@ class PatoSimExtension(omni.ext.IExt):
         for key, value in state_dict.items():
             if not isinstance(key, str):
                 continue
-            if key.endswith("segmentation_info") or key.endswith("instance_id_segmentation_info"):
+            if key.endswith("segmentation_info") or key.endswith(
+                "instance_id_segmentation_info"
+            ):
                 semantic_state[key] = self._to_jsonable(value)
         return semantic_state
 
@@ -3204,7 +3631,9 @@ class PatoSimExtension(omni.ext.IExt):
             return
 
         if scenario is not None:
-            sensor_preview_enabled = bool(getattr(self, "_sensor_preview_enabled", True))
+            sensor_preview_enabled = bool(
+                getattr(self, "_sensor_preview_enabled", True)
+            )
             lidar_preview_enabled = bool(getattr(self, "_lidar_preview_enabled", False))
             if self._should_pause_previews_while_recording():
                 sensor_preview_enabled = False
@@ -3238,9 +3667,8 @@ class PatoSimExtension(omni.ext.IExt):
             rgb_state_for_preview = {}
             pointcloud_state_for_preview = None
             need_rgb_state = (
-                (should_update_camera and sensor_preview_enabled)
-                or full_sensor_recording_enabled
-            )
+                should_update_camera and sensor_preview_enabled
+            ) or full_sensor_recording_enabled
             if need_rgb_state:
                 try:
                     rgb_state_for_preview = scenario.state_dict_rgb()
@@ -3249,23 +3677,36 @@ class PatoSimExtension(omni.ext.IExt):
 
             if should_update_lidar and lidar_preview_enabled:
                 try:
-                    pointcloud_state_for_preview = scenario.state_dict_pointcloud_preview()
-                    if isinstance(pointcloud_state_for_preview, dict) and len(pointcloud_state_for_preview) > 0:
-                        self._sensor_preview_latest_pointcloud = pointcloud_state_for_preview
+                    pointcloud_state_for_preview = (
+                        scenario.state_dict_pointcloud_preview()
+                    )
+                    if (
+                        isinstance(pointcloud_state_for_preview, dict)
+                        and len(pointcloud_state_for_preview) > 0
+                    ):
+                        self._sensor_preview_latest_pointcloud = (
+                            pointcloud_state_for_preview
+                        )
                 except Exception:
                     pointcloud_state_for_preview = None
 
             _cam_win = getattr(self, "_sensor_preview_window", None)
             _cam_win_visible = bool(getattr(_cam_win, "visible", False))
             if should_update_camera and sensor_preview_enabled and _cam_win_visible:
-                if isinstance(rgb_state_for_preview, dict) and len(rgb_state_for_preview) > 0:
+                if (
+                    isinstance(rgb_state_for_preview, dict)
+                    and len(rgb_state_for_preview) > 0
+                ):
                     self._sensor_preview_latest_rgb = rgb_state_for_preview
                 camera_input = (
                     rgb_state_for_preview
-                    if isinstance(rgb_state_for_preview, dict) and len(rgb_state_for_preview) > 0
+                    if isinstance(rgb_state_for_preview, dict)
+                    and len(rgb_state_for_preview) > 0
                     else self._sensor_preview_latest_rgb
                 )
-                self._sensor_preview_latest_camera_map = self._build_sensor_preview_camera_map(camera_input)
+                self._sensor_preview_latest_camera_map = (
+                    self._build_sensor_preview_camera_map(camera_input)
+                )
                 try:
                     self._refresh_sensor_preview(self._sensor_preview_latest_camera_map)
                 except Exception:
@@ -3288,7 +3729,8 @@ class PatoSimExtension(omni.ext.IExt):
                 try:
                     lidar_input = (
                         pointcloud_state_for_preview
-                        if isinstance(pointcloud_state_for_preview, dict) and len(pointcloud_state_for_preview) > 0
+                        if isinstance(pointcloud_state_for_preview, dict)
+                        and len(pointcloud_state_for_preview) > 0
                         else self._sensor_preview_latest_pointcloud
                     )
                     self._refresh_lidar_preview(lidar_input)
@@ -3299,9 +3741,14 @@ class PatoSimExtension(omni.ext.IExt):
                 lidar_obj = getattr(robot, "lidar", None) if robot is not None else None
                 if lidar_obj is not None:
                     lidar_status = str(
-                        getattr(getattr(lidar_obj, "status", None), "get_value", lambda: "")()
+                        getattr(
+                            getattr(lidar_obj, "status", None), "get_value", lambda: ""
+                        )()
                     )
-                    if hasattr(self, "_lidar_status_label") and self._lidar_status_label is not None:
+                    if (
+                        hasattr(self, "_lidar_status_label")
+                        and self._lidar_status_label is not None
+                    ):
                         self._lidar_status_label.text = f"Lidar: {lidar_status}"
             except Exception:
                 pass
@@ -3315,7 +3762,9 @@ class PatoSimExtension(omni.ext.IExt):
                 None,
             )
             _sonar_gen = _sonar_obj if isinstance(_sonar_obj, int) else -2
-            _sonar_data_new = (_sonar_gen != getattr(self, "_sonar_preview_last_generation", -1))
+            _sonar_data_new = _sonar_gen != getattr(
+                self, "_sonar_preview_last_generation", -1
+            )
 
             if (
                 should_update_sonar
@@ -3328,38 +3777,53 @@ class PatoSimExtension(omni.ext.IExt):
                     self._refresh_sonar_preview_window()
                 except Exception:
                     pass
-            
+
             if self.writer is not None:
                 state_dict_common = scenario.state_dict_common()
-                common_interval = max(1, int(getattr(self, "record_common_interval", 1)))
+                common_interval = max(
+                    1, int(getattr(self, "record_common_interval", 1))
+                )
                 if (self.step % common_interval) == 0:
-                    self.writer.write_state_dict_common(state_dict_common, step=self.step)
+                    self.writer.write_state_dict_common(
+                        state_dict_common, step=self.step
+                    )
 
                 if full_sensor_recording_enabled:
                     try:
-                        self.writer.write_state_dict_rgb(rgb_state_for_preview, step=self.step)
-                    except Exception:
-                        pass
-                    try:
-                        self.writer.write_state_dict_segmentation(scenario.state_dict_segmentation(), step=self.step)
-                    except Exception:
-                        pass
-                    try:
-                        self.writer.write_state_dict_instance_id_segmentation(
-                            scenario.state_dict_instance_id_segmentation(), step=self.step
+                        self.writer.write_state_dict_rgb(
+                            rgb_state_for_preview, step=self.step
                         )
                     except Exception:
                         pass
                     try:
-                        self.writer.write_state_dict_depth(scenario.state_dict_depth(), step=self.step)
+                        self.writer.write_state_dict_segmentation(
+                            scenario.state_dict_segmentation(), step=self.step
+                        )
                     except Exception:
                         pass
                     try:
-                        self.writer.write_state_dict_normals(scenario.state_dict_normals(), step=self.step)
+                        self.writer.write_state_dict_instance_id_segmentation(
+                            scenario.state_dict_instance_id_segmentation(),
+                            step=self.step,
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        self.writer.write_state_dict_depth(
+                            scenario.state_dict_depth(), step=self.step
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        self.writer.write_state_dict_normals(
+                            scenario.state_dict_normals(), step=self.step
+                        )
                     except Exception:
                         pass
 
-                if full_sensor_recording_enabled and self._pointcloud_record_due(self.step):
+                if full_sensor_recording_enabled and self._pointcloud_record_due(
+                    self.step
+                ):
                     if isinstance(pointcloud_state_for_preview, dict):
                         state_pc = pointcloud_state_for_preview
                     else:
@@ -3370,13 +3834,19 @@ class PatoSimExtension(omni.ext.IExt):
                     except Exception:
                         fmt = "npy"
                     try:
-                        self.writer.write_state_dict_pointcloud(state_pc, step=self.step, save_format=fmt)
+                        self.writer.write_state_dict_pointcloud(
+                            state_pc, step=self.step, save_format=fmt
+                        )
                     except Exception:
                         pass
 
                     # Persist per-sensor metadata (pose) next to the pointcloud
                     try:
-                        metadata = {} if bool(getattr(self, "_record_pointcloud_metadata", True)) else None
+                        metadata = (
+                            {}
+                            if bool(getattr(self, "_record_pointcloud_metadata", True))
+                            else None
+                        )
                         modules = scenario.named_modules()
                         if metadata is not None:
                             for full_name, arr_value in state_pc.items():
@@ -3390,17 +3860,25 @@ class PatoSimExtension(omni.ext.IExt):
                                 pos = None
                                 ori = None
                                 try:
-                                    if hasattr(module, "position") and module.position.get_value() is not None:
+                                    if (
+                                        hasattr(module, "position")
+                                        and module.position.get_value() is not None
+                                    ):
                                         pos = module.position.get_value()
                                 except Exception:
                                     pos = None
                                 try:
-                                    if hasattr(module, "orientation") and module.orientation.get_value() is not None:
+                                    if (
+                                        hasattr(module, "orientation")
+                                        and module.orientation.get_value() is not None
+                                    ):
                                         ori = module.orientation.get_value()
                                 except Exception:
                                     ori = None
 
-                                if (pos is None or ori is None) and hasattr(module, "_xform_prim"):
+                                if (pos is None or ori is None) and hasattr(
+                                    module, "_xform_prim"
+                                ):
                                     try:
                                         p, o = module._xform_prim.get_world_pose()
                                         if pos is None:
@@ -3423,21 +3901,41 @@ class PatoSimExtension(omni.ext.IExt):
                                             elif ncol == 6:
                                                 fields = ["x", "y", "z", "r", "g", "b"]
                                             elif ncol == 7:
-                                                fields = ["x", "y", "z", "r", "g", "b", "intensity"]
+                                                fields = [
+                                                    "x",
+                                                    "y",
+                                                    "z",
+                                                    "r",
+                                                    "g",
+                                                    "b",
+                                                    "intensity",
+                                                ]
                                             else:
                                                 fields = ["x", "y", "z"]
                                 except Exception:
                                     fields = None
 
-                                if pos is not None or ori is not None or fields is not None:
+                                if (
+                                    pos is not None
+                                    or ori is not None
+                                    or fields is not None
+                                ):
                                     metadata[module_name] = {
-                                        "position": None if pos is None else [float(x) for x in list(pos)],
-                                        "orientation": None if ori is None else [float(x) for x in list(ori)],
-                                        "prim_path": getattr(module, "_prim_path", None),
+                                        "position": None
+                                        if pos is None
+                                        else [float(x) for x in list(pos)],
+                                        "orientation": None
+                                        if ori is None
+                                        else [float(x) for x in list(ori)],
+                                        "prim_path": getattr(
+                                            module, "_prim_path", None
+                                        ),
                                         "fields": fields,
                                     }
                         if metadata:
-                            self.writer.write_pointcloud_metadata(metadata, step=self.step)
+                            self.writer.write_pointcloud_metadata(
+                                metadata, step=self.step
+                            )
                     except Exception:
                         pass
 
@@ -3447,7 +3945,9 @@ class PatoSimExtension(omni.ext.IExt):
                         annotations = self._gather_annotations(self.step)
                         payload = dict(annotations)
                         payload["step"] = int(self.step)
-                        payload["semantic"] = self._extract_semantic_state_from_common(state_dict_common)
+                        payload["semantic"] = self._extract_semantic_state_from_common(
+                            state_dict_common
+                        )
                         if not isinstance(payload.get("bboxes2d"), list):
                             payload["bboxes2d"] = []
                         if not isinstance(payload.get("bboxes3d"), list):
@@ -3462,11 +3962,13 @@ class PatoSimExtension(omni.ext.IExt):
                 self.step += 1
                 self.recording_time += step_size
                 if self.step % 15 == 0:
-                    self.recording_step_label.text = f"Current recording duration: {self.recording_time:.2f}s"
+                    self.recording_step_label.text = (
+                        f"Current recording duration: {self.recording_time:.2f}s"
+                    )
 
                 # handle recording-for-N-frames feature (used by 'Record 30 frames & Play')
                 try:
-                    cnt = getattr(self, '_record_30_remaining', None)
+                    cnt = getattr(self, "_record_30_remaining", None)
                     if cnt is not None:
                         if cnt > 0:
                             self._record_30_remaining = cnt - 1
@@ -3493,7 +3995,9 @@ class PatoSimExtension(omni.ext.IExt):
         semantic_labels = {}
         for attr in prim.GetAttributes():
             name = attr.GetName()
-            if not name.startswith("semantic:") or not name.endswith(":params:semanticData"):
+            if not name.startswith("semantic:") or not name.endswith(
+                ":params:semanticData"
+            ):
                 continue
             raw_value = attr.Get()
             if raw_value is None:
@@ -3512,7 +4016,11 @@ class PatoSimExtension(omni.ext.IExt):
         parent = prim.GetParent()
         while parent is not None and parent.IsValid() and not parent.IsPseudoRoot():
             labels = self._extract_semantic_labels_from_prim(parent)
-            if str(labels.get("dataset_object_root", "")).strip().lower() in {"true", "1", "yes"}:
+            if str(labels.get("dataset_object_root", "")).strip().lower() in {
+                "true",
+                "1",
+                "yes",
+            }:
                 return True
             parent = parent.GetParent()
         return False
@@ -3529,7 +4037,9 @@ class PatoSimExtension(omni.ext.IExt):
         if stage is None:
             return annotations
 
-        bbox_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
+        bbox_cache = UsdGeom.BBoxCache(
+            Usd.TimeCode.Default(), [UsdGeom.Tokens.default_]
+        )
         xform_cache = UsdGeom.XformCache(Usd.TimeCode.Default())
         camera_contexts = []
         for prim in stage.Traverse():
@@ -3561,7 +4071,11 @@ class PatoSimExtension(omni.ext.IExt):
                 continue
 
         for prim in stage.Traverse():
-            if prim.IsPseudoRoot() or not prim.IsActive() or prim.GetTypeName() == "Camera":
+            if (
+                prim.IsPseudoRoot()
+                or not prim.IsActive()
+                or prim.GetTypeName() == "Camera"
+            ):
                 continue
             if self._has_dataset_object_root_ancestor(prim):
                 continue
@@ -3582,12 +4096,14 @@ class PatoSimExtension(omni.ext.IExt):
                 semantic_labels = self._extract_semantic_labels_from_prim(prim)
                 class_name = semantic_labels.get("class", prim.GetName())
                 # 3D annotation entry
-                annotations["bboxes3d"].append({
-                    "prim_path": prim.GetPath().pathString,
-                    "class": class_name,
-                    "semantic_labels": semantic_labels,
-                    "corners": corners,
-                })
+                annotations["bboxes3d"].append(
+                    {
+                        "prim_path": prim.GetPath().pathString,
+                        "class": class_name,
+                        "semantic_labels": semantic_labels,
+                        "corners": corners,
+                    }
+                )
 
                 for cam_ctx in camera_contexts:
                     cam_mat = cam_ctx["cam_mat"]
@@ -3608,20 +4124,29 @@ class PatoSimExtension(omni.ext.IExt):
                             ymin = max(0.0, min(ys))
                             xmax = min(cam_ctx["image_w"] - 1.0, max(xs))
                             ymax = min(cam_ctx["image_h"] - 1.0, max(ys))
-                            annotations["bboxes2d"].append({
-                                "prim_path": prim.GetPath().pathString,
-                                "camera_name": cam_ctx["name"],
-                                "camera_prim_path": cam_ctx["prim_path"],
-                                "image_size": [cam_ctx["image_w"], cam_ctx["image_h"]],
-                                "class": class_name,
-                                "semantic_labels": semantic_labels,
-                                "bbox": [xmin, ymin, xmax, ymax],
-                            })
+                            annotations["bboxes2d"].append(
+                                {
+                                    "prim_path": prim.GetPath().pathString,
+                                    "camera_name": cam_ctx["name"],
+                                    "camera_prim_path": cam_ctx["prim_path"],
+                                    "image_size": [
+                                        cam_ctx["image_w"],
+                                        cam_ctx["image_h"],
+                                    ],
+                                    "class": class_name,
+                                    "semantic_labels": semantic_labels,
+                                    "bbox": [xmin, ymin, xmax, ymax],
+                                }
+                            )
             except Exception:
                 continue
 
         annotations["classes"] = sorted(
-            {entry.get("class", "") for entry in annotations["bboxes3d"] if entry.get("class", "")}
+            {
+                entry.get("class", "")
+                for entry in annotations["bboxes3d"]
+                if entry.get("class", "")
+            }
         )
         return annotations
 
@@ -3657,7 +4182,9 @@ class PatoSimExtension(omni.ext.IExt):
 
                 self.config = config
                 self.scenario = await build_scenario_from_config(config)
-                self._load_path_planning_models_from_robot(getattr(self.scenario, "robot", None))
+                self._load_path_planning_models_from_robot(
+                    getattr(self.scenario, "robot", None)
+                )
                 self._sync_path_planning_button_state()
                 try:
                     if bool(getattr(self, "_sensor_preview_enabled", True)):
@@ -3671,14 +4198,22 @@ class PatoSimExtension(omni.ext.IExt):
                 except Exception:
                     pass
                 try:
-                    self._sensor_preview_window.visible = bool(getattr(self, "_sensor_preview_enabled", True))
+                    self._update_build_status_display()
                 except Exception:
                     pass
                 try:
-                    self._lidar_preview_window.visible = bool(getattr(self, "_lidar_preview_enabled", False))
+                    self._sensor_preview_window.visible = bool(
+                        getattr(self, "_sensor_preview_enabled", True)
+                    )
                 except Exception:
                     pass
-                
+                try:
+                    self._lidar_preview_window.visible = bool(
+                        getattr(self, "_lidar_preview_enabled", False)
+                    )
+                except Exception:
+                    pass
+
                 world = get_world()
                 self._detach_physics_callback(world)
                 await world.reset_async()
@@ -3686,7 +4221,9 @@ class PatoSimExtension(omni.ext.IExt):
 
                 self.scenario.reset()
                 try:
-                    chase_camera_path = getattr(getattr(self.scenario, "robot", None), "chase_camera_path", "")
+                    chase_camera_path = getattr(
+                        getattr(self.scenario, "robot", None), "chase_camera_path", ""
+                    )
                     if chase_camera_path:
                         set_viewport_camera(chase_camera_path)
                 except Exception:
@@ -3736,10 +4273,12 @@ class PatoSimExtension(omni.ext.IExt):
         # open a simple player window for pointcloud replay
         try:
             from omni.ext.patosim.pointcloud_player import PointCloudPlayer
+
             # Ask user for recording path? Use last recording dir if present
             if self.writer is None:
                 # pick most recent recording
                 import glob, os
+
                 recs = sorted(glob.glob(os.path.join(RECORDINGS_DIR, "*")))
                 if len(recs) == 0:
                     return
@@ -3751,11 +4290,18 @@ class PatoSimExtension(omni.ext.IExt):
             self._pc_player = player
 
             # Build a small UI window for player controls
-            self._pc_player_window = ui.Window("PointCloud Player", width=400, height=300)
+            self._pc_player_window = ui.Window(
+                "PointCloud Player", width=400, height=300
+            )
             with self._pc_player_window.frame:
                 with ui.VStack():
                     with ui.HStack():
-                        ui.Button("Play", clicked_fn=lambda: player.play(fps=float(self._pc_fps_model.get_value())))
+                        ui.Button(
+                            "Play",
+                            clicked_fn=lambda: player.play(
+                                fps=float(self._pc_fps_model.get_value())
+                            ),
+                        )
                         ui.Button("Pause", clicked_fn=lambda: player.pause())
                         ui.Button("Prev", clicked_fn=lambda: player.step(forward=False))
                         ui.Button("Next", clicked_fn=lambda: player.step(forward=True))
@@ -3763,21 +4309,34 @@ class PatoSimExtension(omni.ext.IExt):
                         ui.Label("Frame")
                         self._pc_index_model = ui.SimpleIntModel(0)
                         ui.IntField(model=self._pc_index_model, height=25)
-                        ui.Button("Go", clicked_fn=lambda: player.goto(int(self._pc_index_model.get_value())))
+                        ui.Button(
+                            "Go",
+                            clicked_fn=lambda: player.goto(
+                                int(self._pc_index_model.get_value())
+                            ),
+                        )
                     with ui.HStack():
                         ui.Label("FPS")
                         self._pc_fps_model = ui.SimpleIntModel(10)
                         ui.IntField(model=self._pc_fps_model, height=25, enabled=True)
-                        ui.Button("Set FPS", clicked_fn=lambda: player.set_fps(float(self._pc_fps_model.get_value())))
+                        ui.Button(
+                            "Set FPS",
+                            clicked_fn=lambda: player.set_fps(
+                                float(self._pc_fps_model.get_value())
+                            ),
+                        )
                     ui.Label("Sensors (toggle visibility)")
                     # per-sensor toggles
                     for s in player.sensors:
                         m = ui.SimpleBoolModel(True)
+
                         # bind change to player visibility
                         def make_toggle(sensor_name, model):
                             def _on_change():
                                 player.set_visibility(sensor_name, model.get_value())
+
                             return _on_change
+
                         cb = ui.CheckBox(model=m)
                         cb.model.add_value_changed_fn(make_toggle(s, m))
                         ui.Label(s)
@@ -3800,15 +4359,17 @@ class PatoSimExtension(omni.ext.IExt):
     def _toggle_occ_map(self):
         try:
             # try both APIs: set_visible or .visible attribute
-            if hasattr(self._visualize_window, 'visible'):
+            if hasattr(self._visualize_window, "visible"):
                 try:
                     self._visualize_window.visible = not self._visualize_window.visible
                     return
                 except Exception:
                     pass
-            if hasattr(self._visualize_window, 'set_visible'):
+            if hasattr(self._visualize_window, "set_visible"):
                 try:
-                    self._visualize_window.set_visible(not self._visualize_window.get_visible())
+                    self._visualize_window.set_visible(
+                        not self._visualize_window.get_visible()
+                    )
                     return
                 except Exception:
                     pass
@@ -3817,7 +4378,9 @@ class PatoSimExtension(omni.ext.IExt):
 
     def _show_help(self):
         try:
-            print("PatoSim extension help:\n - Build Scenario: build the chosen scene and robot.\n - Plan & Start Auto: plan a path and start autonomous following using the scenario if available.\n - Record PointClouds: use the Quick Params checkbox to enable pointcloud capture during recording.\n")
+            print(
+                "PatoSim extension help:\n - Build Scenario: build the chosen scene and robot.\n - Plan & Start Auto: plan a path and start autonomous following using the scenario if available.\n - Record PointClouds: use the Quick Params checkbox to enable pointcloud capture during recording.\n"
+            )
         except Exception:
             pass
 
@@ -3830,13 +4393,23 @@ class PatoSimExtension(omni.ext.IExt):
     def _dataset_object_labels(self):
         if len(getattr(self, "_dataset_object_assets", [])) == 0:
             return ["(none found)"]
-        return [entry.get("label", entry.get("path", "")) for entry in self._dataset_object_assets]
+        return [
+            entry.get("label", entry.get("path", ""))
+            for entry in self._dataset_object_assets
+        ]
 
     def _get_selected_dataset_object_path(self) -> str:
         assets = getattr(self, "_dataset_object_assets", [])
         if len(assets) == 0:
             return ""
-        idx = int(max(0, min(getattr(self, "_dataset_object_selected_index", 0), len(assets) - 1)))
+        idx = int(
+            max(
+                0,
+                min(
+                    getattr(self, "_dataset_object_selected_index", 0), len(assets) - 1
+                ),
+            )
+        )
         try:
             return str(assets[idx].get("path", ""))
         except Exception:
@@ -3847,7 +4420,9 @@ class PatoSimExtension(omni.ext.IExt):
         if not bool(self._dataset_object_enabled_model.as_bool):
             text = "Dataset object disabled."
         elif not selected:
-            text = "No dataset object asset found in platforms/statues_temples/scenario."
+            text = (
+                "No dataset object asset found in platforms/statues_temples/scenario."
+            )
         else:
             text = f"Selected: {selected}"
         self._dataset_object_status_text = text
@@ -3857,7 +4432,9 @@ class PatoSimExtension(omni.ext.IExt):
         self._dataset_object_assets = self._scan_dataset_object_assets()
         self._dataset_object_selected_index = 0
         for idx, entry in enumerate(self._dataset_object_assets):
-            if os.path.normpath(str(entry.get("path", ""))) == os.path.normpath(str(current or "")):
+            if os.path.normpath(str(entry.get("path", ""))) == os.path.normpath(
+                str(current or "")
+            ):
                 self._dataset_object_selected_index = idx
                 break
         self._update_dataset_object_status()
@@ -3888,7 +4465,9 @@ class PatoSimExtension(omni.ext.IExt):
             pass
 
     def _open_dataset_object_window(self):
-        self._set_simple_window_visible("_dataset_object_window", "_dataset_object_window_toggle_model", True)
+        self._set_simple_window_visible(
+            "_dataset_object_window", "_dataset_object_window_toggle_model", True
+        )
         self._refresh_dataset_object_assets()
 
     def _build_dataset_object_frame(self):
@@ -3921,8 +4500,14 @@ class PatoSimExtension(omni.ext.IExt):
                         pass
                 with ui.HStack(height=26):
                     ui.Label("Reflectivity", width=120)
-                    ui.FloatDrag(model=self._dataset_object_reflectivity_model, min=0.05, max=10.0)
-                ui.Label("Only assets inside plataforms/platforms, statues_temples and scenario are listed when those folders exist.")
+                    ui.FloatDrag(
+                        model=self._dataset_object_reflectivity_model,
+                        min=0.05,
+                        max=10.0,
+                    )
+                ui.Label(
+                    "Only assets inside plataforms/platforms, statues_temples and scenario are listed when those folders exist."
+                )
                 ui.Label(self._dataset_object_status_text)
 
     def _scan_worlds(self):
@@ -3930,14 +4515,17 @@ class PatoSimExtension(omni.ext.IExt):
 
         Returns a list of absolute paths (may be empty).
         """
-        exts = ('.usd', '.usda', '.usdc')
+        exts = (".usd", ".usda", ".usdc")
         roots = [os.getcwd()]
         # allow user-provided worlds dir (UI) to be used for scanning
         try:
             try:
                 # prefer the UI-provided value if present
                 v = None
-                if hasattr(self, 'worlds_dir_field') and self.worlds_dir_field is not None:
+                if (
+                    hasattr(self, "worlds_dir_field")
+                    and self.worlds_dir_field is not None
+                ):
                     try:
                         v = self.worlds_dir_field.model.get_value()
                     except Exception:
@@ -3978,7 +4566,11 @@ class PatoSimExtension(omni.ext.IExt):
     def _refresh_worlds(self):
         try:
             self._available_worlds = self._scan_worlds()
-            items = self._available_worlds if len(self._available_worlds) > 0 else ["(none found)"]
+            items = (
+                self._available_worlds
+                if len(self._available_worlds) > 0
+                else ["(none found)"]
+            )
             # rebuild combo model if possible
             try:
                 # attempt to reset items by creating a new ComboBox model value
@@ -3991,10 +4583,14 @@ class PatoSimExtension(omni.ext.IExt):
 
     def _apply_selected_world(self):
         try:
-            if not hasattr(self, 'worlds_combo_box'):
+            if not hasattr(self, "worlds_combo_box"):
                 return
             idx = self.worlds_combo_box.model.get_item_value_model().get_value_as_int()
-            items = self._available_worlds if len(self._available_worlds) > 0 else ["(none found)"]
+            items = (
+                self._available_worlds
+                if len(self._available_worlds) > 0
+                else ["(none found)"]
+            )
             if idx < 0 or idx >= len(items):
                 return
             sel = items[idx]
@@ -4008,85 +4604,103 @@ class PatoSimExtension(omni.ext.IExt):
         try:
             if self.scenario is None:
                 return
-            robot = getattr(self.scenario, 'robot', None)
+            robot = getattr(self.scenario, "robot", None)
             if robot is None:
                 return
-            for name in ('front_camera', 'front_stereo', 'fisheye_left', 'fisheye_right'):
+            for name in (
+                "front_camera",
+                "front_stereo",
+                "fisheye_left",
+                "fisheye_right",
+            ):
                 try:
                     mod = getattr(robot, name, None)
                     if mod is None:
                         continue
-                    if hasattr(mod, 'enable_rgb_rendering'):
+                    if hasattr(mod, "enable_rgb_rendering"):
                         mod.enable_rgb_rendering()
                     else:
-                        if hasattr(mod, 'left') and hasattr(mod.left, 'enable_rgb_rendering'):
+                        if hasattr(mod, "left") and hasattr(
+                            mod.left, "enable_rgb_rendering"
+                        ):
                             mod.left.enable_rgb_rendering()
-                        if hasattr(mod, 'right') and hasattr(mod.right, 'enable_rgb_rendering'):
+                        if hasattr(mod, "right") and hasattr(
+                            mod.right, "enable_rgb_rendering"
+                        ):
                             mod.right.enable_rgb_rendering()
                 except Exception:
                     pass
-            print('Enabled all cameras (best-effort)')
+            print("Enabled all cameras (best-effort)")
         except Exception as e:
-            print('Error enabling cameras:', e)
+            print("Error enabling cameras:", e)
 
     def _disable_all_cameras(self):
         try:
             if self.scenario is None:
                 return
-            robot = getattr(self.scenario, 'robot', None)
+            robot = getattr(self.scenario, "robot", None)
             if robot is None:
                 return
-            for name in ('front_camera', 'front_stereo', 'fisheye_left', 'fisheye_right'):
+            for name in (
+                "front_camera",
+                "front_stereo",
+                "fisheye_left",
+                "fisheye_right",
+            ):
                 try:
                     mod = getattr(robot, name, None)
                     if mod is None:
                         continue
-                    if hasattr(mod, 'disable_rendering'):
+                    if hasattr(mod, "disable_rendering"):
                         mod.disable_rendering()
                     else:
-                        if hasattr(mod, 'left') and hasattr(mod.left, 'disable_rendering'):
+                        if hasattr(mod, "left") and hasattr(
+                            mod.left, "disable_rendering"
+                        ):
                             mod.left.disable_rendering()
-                        if hasattr(mod, 'right') and hasattr(mod.right, 'disable_rendering'):
+                        if hasattr(mod, "right") and hasattr(
+                            mod.right, "disable_rendering"
+                        ):
                             mod.right.disable_rendering()
                 except Exception:
                     pass
-            print('Disabled all cameras (best-effort)')
+            print("Disabled all cameras (best-effort)")
         except Exception as e:
-            print('Error disabling cameras:', e)
+            print("Error disabling cameras:", e)
 
     def _enable_all_lidar(self):
         try:
             if self.scenario is None:
                 return
-            robot = getattr(self.scenario, 'robot', None)
+            robot = getattr(self.scenario, "robot", None)
             if robot is None:
                 return
             try:
-                mod = getattr(robot, 'lidar', None)
-                if mod is not None and hasattr(mod, 'enable_lidar'):
+                mod = getattr(robot, "lidar", None)
+                if mod is not None and hasattr(mod, "enable_lidar"):
                     mod.enable_lidar()
             except Exception:
                 pass
-            print('Enabled lidar (best-effort)')
+            print("Enabled lidar (best-effort)")
         except Exception as e:
-            print('Error enabling lidar:', e)
+            print("Error enabling lidar:", e)
 
     def _disable_all_lidar(self):
         try:
             if self.scenario is None:
                 return
-            robot = getattr(self.scenario, 'robot', None)
+            robot = getattr(self.scenario, "robot", None)
             if robot is None:
                 return
             try:
-                mod = getattr(robot, 'lidar', None)
-                if mod is not None and hasattr(mod, 'disable_lidar'):
+                mod = getattr(robot, "lidar", None)
+                if mod is not None and hasattr(mod, "disable_lidar"):
                     mod.disable_lidar()
             except Exception:
                 pass
-            print('Disabled lidar (best-effort)')
+            print("Disabled lidar (best-effort)")
         except Exception as e:
-            print('Error disabling lidar:', e)
+            print("Error disabling lidar:", e)
 
     # ------------------ Robot / sensor UI handlers ------------------
     def _apply_control_mode(self):
@@ -4098,10 +4712,12 @@ class PatoSimExtension(omni.ext.IExt):
         try:
             if self.scenario is None:
                 return
-            robot = getattr(self.scenario, 'robot', None)
+            robot = getattr(self.scenario, "robot", None)
             if robot is None:
                 return
-            idx = self.control_mode_combo.model.get_item_value_model().get_value_as_int()
+            idx = (
+                self.control_mode_combo.model.get_item_value_model().get_value_as_int()
+            )
             mode = "manual" if idx == 0 else "auto"
             try:
                 robot.set_control_mode(mode)
@@ -4127,10 +4743,10 @@ class PatoSimExtension(omni.ext.IExt):
         try:
             if self.scenario is None:
                 return
-            robot = getattr(self.scenario, 'robot', None)
+            robot = getattr(self.scenario, "robot", None)
             if robot is None:
                 return
-            occupancy_map = getattr(self.scenario, 'occupancy_map', None)
+            occupancy_map = getattr(self.scenario, "occupancy_map", None)
             if occupancy_map is None:
                 return
 
@@ -4140,21 +4756,21 @@ class PatoSimExtension(omni.ext.IExt):
             try:
                 # If the scenario has a target_path Buffer, set it and also
                 # update its PathHelper so the follower can use it.
-                if hasattr(self.scenario, 'target_path'):
+                if hasattr(self.scenario, "target_path"):
                     try:
                         path_list = robot.plan_path_from_occupancy_map(occupancy_map)
                     except Exception:
                         # If robot planner fails, try letting the scenario generate
                         # its own random target if it exposes that method.
-                        if hasattr(self.scenario, '_set_random_target_path'):
+                        if hasattr(self.scenario, "_set_random_target_path"):
                             try:
                                 self.scenario._set_random_target_path()
                                 # ensure UI reflects auto mode
                                 try:
-                                    robot.set_control_mode('auto')
+                                    robot.set_control_mode("auto")
                                 except Exception:
                                     try:
-                                        robot.control_mode = 'auto'
+                                        robot.control_mode = "auto"
                                     except Exception:
                                         pass
                                 return
@@ -4163,6 +4779,7 @@ class PatoSimExtension(omni.ext.IExt):
                         raise
 
                     import numpy as _np
+
                     arr = _np.asarray(path_list, dtype=_np.float32)
                     try:
                         # Buffer-like API
@@ -4178,10 +4795,10 @@ class PatoSimExtension(omni.ext.IExt):
                     except Exception:
                         pass
                     try:
-                        robot.set_control_mode('auto')
+                        robot.set_control_mode("auto")
                     except Exception:
                         try:
-                            robot.control_mode = 'auto'
+                            robot.control_mode = "auto"
                         except Exception:
                             pass
                     return
@@ -4189,14 +4806,14 @@ class PatoSimExtension(omni.ext.IExt):
                 # fallback: ask robot to plan and set its own auto-path
                 path = robot.plan_path_from_occupancy_map(occupancy_map)
                 try:
-                    robot.set_control_mode('auto')
+                    robot.set_control_mode("auto")
                 except Exception:
                     try:
-                        robot.control_mode = 'auto'
+                        robot.control_mode = "auto"
                     except Exception:
                         pass
             except Exception as e:
-                print('Path planning failed:', e)
+                print("Path planning failed:", e)
         except Exception:
             pass
 
@@ -4204,7 +4821,7 @@ class PatoSimExtension(omni.ext.IExt):
         try:
             if self.scenario is None:
                 return
-            robot = getattr(self.scenario, 'robot', None)
+            robot = getattr(self.scenario, "robot", None)
             if robot is None:
                 return
             module = getattr(robot, sensor_name, None)
@@ -4213,34 +4830,42 @@ class PatoSimExtension(omni.ext.IExt):
             # cameras: Camera instances expose enable_rgb_rendering()/disable_rendering()
             if enabled:
                 try:
-                    if hasattr(module, 'enable_rgb_rendering'):
+                    if hasattr(module, "enable_rgb_rendering"):
                         module.enable_rgb_rendering()
                     else:
                         # stereo wrapper may have left/right
-                        if hasattr(module, 'left') and hasattr(module.left, 'enable_rgb_rendering'):
+                        if hasattr(module, "left") and hasattr(
+                            module.left, "enable_rgb_rendering"
+                        ):
                             module.left.enable_rgb_rendering()
-                        if hasattr(module, 'right') and hasattr(module.right, 'enable_rgb_rendering'):
+                        if hasattr(module, "right") and hasattr(
+                            module.right, "enable_rgb_rendering"
+                        ):
                             module.right.enable_rgb_rendering()
                 except Exception:
                     pass
                 try:
-                    if hasattr(module, 'enable_lidar'):
+                    if hasattr(module, "enable_lidar"):
                         module.enable_lidar()
                 except Exception:
                     pass
             else:
                 try:
-                    if hasattr(module, 'disable_rendering'):
+                    if hasattr(module, "disable_rendering"):
                         module.disable_rendering()
                     else:
-                        if hasattr(module, 'left') and hasattr(module.left, 'disable_rendering'):
+                        if hasattr(module, "left") and hasattr(
+                            module.left, "disable_rendering"
+                        ):
                             module.left.disable_rendering()
-                        if hasattr(module, 'right') and hasattr(module.right, 'disable_rendering'):
+                        if hasattr(module, "right") and hasattr(
+                            module.right, "disable_rendering"
+                        ):
                             module.right.disable_rendering()
                 except Exception:
                     pass
                 try:
-                    if hasattr(module, 'disable_lidar'):
+                    if hasattr(module, "disable_lidar"):
                         module.disable_lidar()
                 except Exception:
                     pass
@@ -4252,17 +4877,17 @@ class PatoSimExtension(omni.ext.IExt):
         try:
             if self.scenario is None:
                 return
-            robot = getattr(self.scenario, 'robot', None)
+            robot = getattr(self.scenario, "robot", None)
             if robot is None:
                 return
 
             # control mode
             try:
-                mode = getattr(robot, 'control_mode', None)
-                if mode is None and hasattr(robot, 'control_mode'):
+                mode = getattr(robot, "control_mode", None)
+                if mode is None and hasattr(robot, "control_mode"):
                     mode = robot.control_mode
                 if mode is not None:
-                    idx = 0 if mode == 'manual' else 1
+                    idx = 0 if mode == "manual" else 1
                     try:
                         self.control_mode_combo.model.set_value(idx)
                     except Exception:
@@ -4273,19 +4898,27 @@ class PatoSimExtension(omni.ext.IExt):
             self._sync_oceansim_sensor_models_from_source(robot)
             try:
                 if hasattr(robot, "water_profile_path"):
-                    self._oceansim_water_profile_model.set_value(str(getattr(robot, "water_profile_path", "") or ""))
+                    self._oceansim_water_profile_model.set_value(
+                        str(getattr(robot, "water_profile_path", "") or "")
+                    )
             except Exception:
                 pass
             try:
-                self._oceansim_linear_speed_model.set_value(float(getattr(robot, "teleop_linear_speed_gain", 0.75)))
+                self._oceansim_linear_speed_model.set_value(
+                    float(getattr(robot, "teleop_linear_speed_gain", 0.75))
+                )
             except Exception:
                 pass
             try:
-                self._oceansim_angular_speed_model.set_value(float(getattr(robot, "teleop_angular_speed_gain", 0.90)))
+                self._oceansim_angular_speed_model.set_value(
+                    float(getattr(robot, "teleop_angular_speed_gain", 0.90))
+                )
             except Exception:
                 pass
             try:
-                self._oceansim_dvl_debug_model.set_value(bool(getattr(robot, "enable_dvl_debug_lines", False)))
+                self._oceansim_dvl_debug_model.set_value(
+                    bool(getattr(robot, "enable_dvl_debug_lines", False))
+                )
             except Exception:
                 pass
         except Exception:
@@ -4303,4 +4936,4 @@ class PatoSimExtension(omni.ext.IExt):
             # set countdown
             self._record_30_remaining = 30
         except Exception as e:
-            print('Failed to start 30-frame recording:', e)
+            print("Failed to start 30-frame recording:", e)

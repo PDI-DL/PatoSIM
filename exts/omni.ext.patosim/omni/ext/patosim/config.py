@@ -27,7 +27,7 @@ class Config:
     dataset_object_scale: float = 1.0
     dataset_object_rotation_euler_deg: tuple = (0.0, 0.0, 0.0)
     rov_operating_depth: float = -2.0
-    occupancy_map_z_half: float = 3.0
+    occupancy_map_z_half: float = 0.5
     sonar_save_raw_npy: bool = True
     sonar_save_png16: bool = False
     sonar_save_polar_png: bool = False

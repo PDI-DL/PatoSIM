@@ -73,6 +73,12 @@ async def occupancy_map_generate_from_prim_async(
         unknown_as_freespace: bool = True
     ) -> OccupancyMap:
 
+    import warnings
+    warnings.warn(
+        f"[occupancy_map] Starting generation: prim_path={prim_path}, cell_size={cell_size}m, z_range=[{z_min}, {z_max}]m, rotation={rotation.name}",
+        stacklevel=2
+    )
+
     app = get_app()
 
     om = _occupancy_map.acquire_omap_interface()
@@ -83,9 +89,9 @@ async def occupancy_map_generate_from_prim_async(
     
     stage = get_stage()
     stage_scale = UsdGeom.GetStageMetersPerUnit(stage)
-
-    if stage_scale != 1.0:
-        raise RuntimeError("Stage unit must be 1 meter.")
+    if stage_scale <= 0.0:
+        raise RuntimeError(f"Invalid stage meters-per-unit value: {stage_scale!r}")
+    units_per_meter = 1.0 / float(stage_scale)
     
     # Apply physics: only define the physics scene if it doesn't already exist
     try:
@@ -105,17 +111,55 @@ async def occupancy_map_generate_from_prim_async(
 
     # Compute bounds for occupancy map calculation using specified prim
     prim_path = os.path.join(prim_path)
+    prim_path_str = prim_path
     prim_path = stage.GetPrimAtPath(prim_path)
+    
+    import warnings
+    warnings.warn(f"[occupancy_map] Attempting to compute bbox for prim '{prim_path_str}' (valid={prim_path is not None and prim_path.IsValid()})", stacklevel=2)
 
-    lower_bound, upper_bound, midpoint = prim_compute_bbox(prim_path)
-    lower_bound = (lower_bound[0], lower_bound[1], z_min)
-    upper_bound = (upper_bound[0], upper_bound[1], z_max)
+    lower_bound = upper_bound = midpoint = None
+    for attempt in range(10):
+        if prim_path is not None and prim_path.IsValid():
+            try:
+                lower_bound, upper_bound, midpoint = prim_compute_bbox(prim_path)
+                size = np.linalg.norm(np.asarray(upper_bound) - np.asarray(lower_bound))
+                warnings.warn(f"[occupancy_map] Attempt {attempt}: bbox size={size:.3f}m", stacklevel=2)
+                if size > 1e-6:
+                    warnings.warn(f"[occupancy_map] Success: valid bbox with size {size:.3f}m", stacklevel=2)
+                    break
+            except Exception as e:
+                warnings.warn(f"[occupancy_map] Attempt {attempt}: bbox computation failed: {e}", stacklevel=2)
+        await app.next_update_async()
+    if lower_bound is None or upper_bound is None or midpoint is None:
+        raise RuntimeError(
+            f"Unable to compute a valid occupancy-map bbox for prim '{prim_path.GetPath() if prim_path and prim_path.IsValid() else prim_path_str}'. "
+            "The scene may still be composing/loading, or the referenced USD may contain no visible geometry."
+        )
+
+    lower_bound = (
+        lower_bound[0],
+        lower_bound[1],
+        z_min * units_per_meter,
+    )
+    upper_bound = (
+        upper_bound[0],
+        upper_bound[1],
+        z_max * units_per_meter,
+    )
 
     width = upper_bound[0] - lower_bound[0]
     height = upper_bound[1] - lower_bound[1]
-    origin = (lower_bound[0] - cell_size, lower_bound[1] - cell_size, 0)
-    lower_bound = (0, 0, z_min)
-    upper_bound = (width + cell_size, height + cell_size, z_max)
+    cell_size_stage = cell_size * units_per_meter
+    origin = (lower_bound[0] - cell_size_stage, lower_bound[1] - cell_size_stage, 0)
+    lower_bound = (0, 0, z_min * units_per_meter)
+    upper_bound = (width + cell_size_stage, height + cell_size_stage, z_max * units_per_meter)
+    
+    import warnings
+    warnings.warn(
+        f"[occupancy_map] Bounds computed: width={width:.2f}m, height={height:.2f}m, z_range=[{lower_bound[2]:.2f}, {upper_bound[2]:.2f}]m, "
+        f"origin={origin}, cell_size_stage={cell_size_stage}, units_per_meter={units_per_meter}",
+        stacklevel=2
+    )
 
     update_location(
         om,
@@ -128,12 +172,17 @@ async def occupancy_map_generate_from_prim_async(
     
 
     # Set cell size
-    om.set_cell_size(cell_size)
+    om.set_cell_size(cell_size_stage)
+    
+    import warnings
+    warnings.warn(f"[occupancy_map] OMap interface configured with cell_size={cell_size_stage}", stacklevel=2)
     
     await app.next_update_async()
     
 
     # Generate occupancy map
+    import warnings
+    warnings.warn(f"[occupancy_map] Starting occupancy map generation: dims will be computed from bounds", stacklevel=2)
     timeline.stop()
     
     await app.next_update_async()
@@ -142,6 +191,7 @@ async def occupancy_map_generate_from_prim_async(
     
     await app.next_update_async()
     
+    warnings.warn(f"[occupancy_map] Calling om.generate()...", stacklevel=2)
     om.generate()
     
     await app.next_update_async()
@@ -150,19 +200,29 @@ async def occupancy_map_generate_from_prim_async(
     
     await app.next_update_async()
     
+    warnings.warn(f"[occupancy_map] Generation complete, retrieving buffer...", stacklevel=2)
 
     # Format Image
     buffer = om.get_buffer()
     dims = om.get_dimensions()
+    warnings.warn(f"[occupancy_map] Buffer shape: dims={dims}, buffer_size={len(buffer)}, total_cells={dims[0]*dims[1]}", stacklevel=2)
     buffer = np.array(buffer)
     buffer = np.reshape(buffer, (dims[1], dims[0]))
     occupied_mask = buffer == 1.0
     freespace_mask = buffer == 0.0
     unknown_mask = ~(occupied_mask | freespace_mask)
+    warnings.warn(f"[occupancy_map] Mask counts: occupied={np.sum(occupied_mask)}, freespace={np.sum(freespace_mask)}, unknown={np.sum(unknown_mask)}", stacklevel=2)
 
     if unknown_as_freespace:
         freespace_mask[unknown_mask] = True
         unknown_mask = np.zeros_like(unknown_mask)
+
+    import warnings
+    occupied_pct = 100.0 * np.sum(buffer == 1.0) / buffer.size
+    warnings.warn(
+        f"[occupancy_map] Occupancy rate: {occupied_pct:.1f}% (occupied={np.sum(buffer == 1.0)}, freespace={np.sum(buffer == 0.0)}, unknown={np.sum(~(buffer == 1.0) & (buffer == 0.0))})",
+        stacklevel=2
+    )
 
     image = np.zeros(occupied_mask.shape, dtype=np.uint8)
     image[occupied_mask] = OccupancyMapDataValue.OCCUPIED.ros_image_value()
@@ -173,25 +233,32 @@ async def occupancy_map_generate_from_prim_async(
 
     # Format Yaml
     if rotation == OccupancyMapGenerateRotation.ROTATE_0:
-        top_left, top_right, bottom_left, bottom_right, image_coords = compute_coordinates(om, cell_size)
+        top_left, top_right, bottom_left, bottom_right, image_coords = compute_coordinates(om, cell_size_stage)
     elif rotation == OccupancyMapGenerateRotation.ROTATE_270:  # -90 degrees
-        top_right, bottom_right, top_left, bottom_left, image_coords = compute_coordinates(om, cell_size)
+        top_right, bottom_right, top_left, bottom_left, image_coords = compute_coordinates(om, cell_size_stage)
     elif rotation == OccupancyMapGenerateRotation.ROTATE_90:  # 90 degrees
-        bottom_left, top_left, bottom_right, top_right, image_coords = compute_coordinates(om, cell_size)
+        bottom_left, top_left, bottom_right, top_right, image_coords = compute_coordinates(om, cell_size_stage)
     elif rotation == OccupancyMapGenerateRotation.ROTATE_180:  # 180 degrees
-        bottom_right, bottom_left, top_right, top_left, image_coords = compute_coordinates(om, cell_size)
+        bottom_right, bottom_left, top_right, top_left, image_coords = compute_coordinates(om, cell_size_stage)
 
     occupancy_map = OccupancyMap.from_ros_image(
         ros_image=image,
         resolution=cell_size,
         origin=[
-            float(bottom_left[0]),
-            float(bottom_left[1]),
+            float(bottom_left[0] * stage_scale),
+            float(bottom_left[1] * stage_scale),
             0.0
         ],
         negate=False,
         free_thresh=ROS_FREESPACE_THRESH_DEFAULT,
         occupied_thresh=ROS_OCCUPIED_THRESH_DEFAULT
+    )
+    
+    import warnings
+    warnings.warn(
+        f"[occupancy_map] OccupancyMap created: resolution={cell_size}m, origin=({bottom_left[0]*stage_scale:.2f}, {bottom_left[1]*stage_scale:.2f}, 0), "
+        f"image_size={image.size}, image_mode={image.mode}", 
+        stacklevel=2
     )
     
     _occupancy_map.release_omap_interface(om)
