@@ -5,16 +5,14 @@ set -e
 HF_REPO_ID="PDI-DL/PDI_3DUW"
 LOCAL_FOLDER="../../assets/models"
 
-
 usage() {
     echo ""
-    echo "Usage: ./sync.sh [command]"
+    echo "Usage: ./assets.sh [command]"
     echo ""
     echo "Commands:"
     echo "  -auth       Authenticate with Hugging Face (run once)"
     echo "  -download   Clone the remote dataset into ${LOCAL_FOLDER}"
     echo "  -upload     Push all local changes to the remote dataset"
-    echo "  -lfs-fix    Migrate large files to LFS (run if push is rejected)"
     echo "  -status     Show pending changes without uploading"
     echo "  -help       Show this message"
     echo ""
@@ -24,7 +22,7 @@ get_token() {
     local token
     token=$(cat ~/.cache/huggingface/token 2>/dev/null)
     if [ -z "$token" ]; then
-        echo "### Error: no HuggingFace token found. Run ./sync.sh -auth first."
+        echo "### Error: no HuggingFace token found. Run ./assets.sh -auth first."
         exit 1
     fi
     echo "$token"
@@ -32,7 +30,17 @@ get_token() {
 
 check_git_repo() {
     if [ ! -d "${LOCAL_FOLDER}/.git" ]; then
-        echo "### Error: '${LOCAL_FOLDER}' is not a git repo. Run ./sync.sh -download first."
+        echo "### Error: '${LOCAL_FOLDER}' is not a git repo. Run ./assets.sh -download first."
+        exit 1
+    fi
+}
+
+check_git_xet() {
+    if ! command -v git-xet &>/dev/null; then
+        echo "### Error: git-xet is not installed."
+        echo "# Install it with:"
+        echo "    curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/huggingface/xet-core/refs/heads/main/git_xet/install.sh | sh"
+        echo "    git xet install"
         exit 1
     fi
 }
@@ -41,54 +49,43 @@ cmd_auth() {
     echo ""
     echo "# Authenticating with Hugging Face..."
     hf auth login
+    echo ""
 }
 
 cmd_download() {
+    check_git_xet
+
     if [ -d "${LOCAL_FOLDER}/.git" ]; then
         echo "### Error: '${LOCAL_FOLDER}' already exists. Delete it first if you want a fresh clone."
         exit 1
     fi
 
     echo ""
-    echo "# Cloning ${HF_REPO_ID} into ${LOCAL_FOLDER}..."
+    echo "### Cloning ${HF_REPO_ID} into ${LOCAL_FOLDER}..."
     echo "# This may take a while for large datasets."
     echo ""
-
-    git lfs install --skip-repo
 
     local token
     token=$(get_token)
     git clone "https://user:${token}@huggingface.co/datasets/${HF_REPO_ID}" "${LOCAL_FOLDER}"
 
     echo ""
-    echo "# Done. Files are in ${LOCAL_FOLDER}"
-    echo ""
-}
-
-cmd_lfs_fix() {
-    check_git_repo
-    cd "${LOCAL_FOLDER}"
-
-    echo ""
-    echo "# Tracking large file extensions with LFS..."
-    git lfs track "*.usdc" "*.fbx" "*.usd" "*.usda" "*.bin" "*.pt" "*.pth" "*.onnx" "*.pkl"
-    git add .gitattributes
-
-    echo "# Re-indexing all files against new LFS rules..."
-    git rm -r --cached .
-    git add .
-
-    echo ""
-    echo "# Done. Run ./sync.sh -upload to push."
+    if [ "$LOCAL_FOLDER" == "../../assets/models" ]; then
+        echo "# Done. Files are in assets/models"
+    else
+        echo "# Done. Files are in ${LOCAL_FOLDER}"
+    fi
     echo ""
 }
 
 cmd_upload() {
+    check_git_xet
     check_git_repo
     cd "${LOCAL_FOLDER}"
 
     echo ""
-    echo "# Staging all changes..."
+    echo "### Staging all changes..."
+    echo ""
     git add -A
 
     # Check for staged changes
@@ -120,7 +117,7 @@ cmd_upload() {
 
         echo ""
         echo "# Committing..."
-        git commit -m "Update dataset"
+        git commit -m "Update dataset via assets.sh"
     else
         echo "# Found unpushed commits — pushing now..."
     fi
@@ -156,12 +153,10 @@ cmd_status() {
     echo ""
 }
 
-# ── Entry point ───────────────────────────────────────────────────────────────
 case "$1" in
     -auth)     cmd_auth ;;
     -download) cmd_download ;;
     -upload)   cmd_upload ;;
-    -lfs-fix)  cmd_lfs_fix ;;
     -status)   cmd_status ;;
     -help|"")  usage ;;
     *)
