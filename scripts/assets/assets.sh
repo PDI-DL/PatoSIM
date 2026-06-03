@@ -48,7 +48,10 @@ check_git_xet() {
 cmd_auth() {
     echo ""
     echo "# Authenticating with Hugging Face..."
-    hf auth login
+    hf auth login || echo "### Authentication failed. Check if you have the Hugging Face CLI installed or if you are already logged in. 
+    If you are already logged in dismiss this message.
+    If you are not logged in install hf-cli with: 
+    curl -LsSf https://hf.co/cli/install.sh | bash"
     echo ""
 }
 
