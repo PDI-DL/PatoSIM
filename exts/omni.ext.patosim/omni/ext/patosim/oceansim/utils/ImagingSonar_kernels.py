@@ -175,7 +175,35 @@ def make_sonar_map_all(r: wp.array(ndim=2, dtype=wp.float32),
                           r[i,j] * wp.sin(azi[i,j]),
                           intensity[i,j])
 
-@wp.kernel 
+@wp.kernel
+def make_sonar_map_raw(r: wp.array(ndim=2, dtype=wp.float32),
+                       azi: wp.array(ndim=2, dtype=wp.float32),
+                       intensity: wp.array(ndim=2, dtype=wp.float32),
+                       gau_noise: wp.array(ndim=2, dtype=wp.float32),
+                       range_ray_noise: wp.array(ndim=2, dtype=wp.float32),
+                       offset: wp.float32,
+                       gain: wp.float32,
+                       result: wp.array(ndim=2, dtype=wp.vec3)):
+    # Unlike make_sonar_map_all/make_sonar_map_range, this mode does NOT divide
+    # by any per-frame or per-range-ring maximum. The physically-based
+    # exponential range attenuation already computed in compute_intensity()
+    # (reflectivity * cos_theta * exp(-attenuation * dist)) is preserved as-is,
+    # only going through noise/offset/gain/clamp. This is the mode that keeps
+    # true distance information in the output, which normalizing by a local
+    # maximum (either globally or per range ring) destroys.
+    i, j = wp.tid()
+
+    intensity[i,j] *= (0.5 + gau_noise[i,j])
+    intensity[i,j] += range_ray_noise[i,j]
+    intensity[i,j] += offset
+    intensity[i,j] *= gain
+    intensity[i,j] = wp.clamp(intensity[i,j], wp.float32(0.0), wp.float32(1.0))
+
+    result[i,j] = wp.vec3(r[i,j] * wp.cos(azi[i,j]),
+                          r[i,j] * wp.sin(azi[i,j]),
+                          intensity[i,j])
+
+@wp.kernel
 def make_sonar_map_range(r: wp.array(ndim=2, dtype=wp.float32),
                        azi: wp.array(ndim=2, dtype=wp.float32),
                        intensity: wp.array(ndim=2, dtype=wp.float32),

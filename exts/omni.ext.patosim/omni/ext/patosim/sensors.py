@@ -507,6 +507,45 @@ class Lidar(Sensor):
         self._render_product = None
         self._pointcloud_enabled = False
         self._rtx_initialized = False
+        # Underwater range/attenuation profile (see configure_underwater_profile).
+        # Defaults mirror a Voyis Insight Micro-class scanner (~7 m, small ROV/AUV)
+        # rather than a generic terrestrial lidar's long default range.
+        self._uw_min_range = 0.13
+        self._uw_max_range = 7.0
+        self._uw_attenuation_coeff = 0.35
+        self._uw_rng = np.random.default_rng()
+
+    def configure_underwater_profile(
+        self, min_range: float, max_range: float, attenuation_coeff: float
+    ) -> None:
+        """Calibrate this lidar's usable range and return-dropout to underwater
+        conditions. Real subsea vehicles use short-range laser triangulation
+        scanners (e.g. Voyis Insight family, ~2.5-15 m depending on model)
+        rather than long-range terrestrial ToF lidar, because water absorption
+        and backscatter make long ranges unusable. This is applied as a
+        software post-process on the returned point cloud (range clipping +
+        Beer-Lambert style return-probability falloff), independent of
+        whichever RTX Lidar sensor profile is used for ray casting.
+        """
+        self._uw_min_range = max(0.0, float(min_range))
+        self._uw_max_range = max(self._uw_min_range + 1e-3, float(max_range))
+        self._uw_attenuation_coeff = max(0.0, float(attenuation_coeff))
+
+    def _apply_underwater_profile(self, points):
+        """Clip to [min_range, max_range] and apply distance-dependent return
+        dropout. `points` is Nx3 (or NxK, K>=3) with columns 0:3 = local xyz.
+        Delegates to the pure, unit-tested underwater_lidar_math module."""
+        if points is None:
+            return None
+        from isaacsim.oceansim.utils.underwater_lidar_math import apply_underwater_lidar_profile
+
+        return apply_underwater_lidar_profile(
+            points,
+            min_range=self._uw_min_range,
+            max_range=self._uw_max_range,
+            attenuation_coeff=self._uw_attenuation_coeff,
+            rng=self._uw_rng,
+        )
 
     @classmethod
     def build(cls, prim_path: str) -> "Lidar":
@@ -681,6 +720,7 @@ class Lidar(Sensor):
             # If we have an annotator, try to get its data
             if self._rtx is not None:
                 pts, source = self._extract_rtx_pointcloud()
+                pts = self._apply_underwater_profile(pts)
                 self.pointcloud.set_value(pts)
                 if pts is None:
                     self.status.set_value(source)
@@ -690,6 +730,7 @@ class Lidar(Sensor):
                 try:
                     pc = self._annotator.get_data()
                     pts = _sanitize_pointcloud_array(_extract_pointcloud_array(pc))
+                    pts = self._apply_underwater_profile(pts)
                     self.pointcloud.set_value(pts)
                     if pts is None:
                         self.status.set_value("annotator_no_pointcloud")
@@ -1409,7 +1450,11 @@ class OceanSimImagingSonar(Sensor):
         self._central_peak = 2.0
         self._central_std = 0.001
         self._binning_method = "sum"
-        self._normalizing_method = "range"
+        # "raw" preserves the physically-computed exp(-attenuation*dist) falloff,
+        # which is what downstream ML models (DPS_sonar_net / PSNetSonarPriority)
+        # need as a distance signal. "range"/"all" remain available as
+        # visualization presets that trade distance information for contrast.
+        self._normalizing_method = "raw"
         self._polar_proj_cache: dict = {}
         self._overlay_cache: dict = {}
         self._data_generation: int = 0

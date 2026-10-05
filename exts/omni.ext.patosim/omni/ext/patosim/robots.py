@@ -415,6 +415,16 @@ class OceanSimROVRobot(Robot):
     teleop_angular_speed_gain: float = 1.4
     teleop_velocity_assist_gain: float = 1.0
 
+    # ROV joystick/gamepad teleoperation tuning. These are dimensionless UX
+    # multipliers layered on top of keyboard_linear/angular_velocity_gain
+    # (the shared Newton-scale force/torque gain), so joystick "feel" can be
+    # tuned per-axis without touching the keyboard scale.
+    rov_gamepad_linear_gain: float = 1.0
+    rov_gamepad_vertical_gain: float = 1.0
+    rov_gamepad_angular_gain: float = 1.0
+    rov_gamepad_deadzone: float = 0.08
+    rov_gamepad_expo: float = 0.3
+
     usd_relative_path: str = "bluerov/BROV_low.usd"
     fallback_assets_root: str = os.path.abspath(
         os.path.join(
@@ -449,11 +459,22 @@ class OceanSimROVRobot(Robot):
     dvl_translation: Tuple[float, float, float] = (0.0, 0.0, -0.1)
     lidar_translation: Tuple[float, float, float] = (0.32, 0.0, 0.18)
     lidar_orientation_euler_deg: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    # Underwater range/attenuation profile applied as a post-process on the
+    # lidar point cloud. Defaults match a Voyis Insight Micro-class subsea
+    # laser scanner (~7 m, sized for a small ROV/AUV) rather than a generic
+    # terrestrial lidar's long default range.
+    lidar_min_range: float = 0.13
+    lidar_max_range: float = 7.0
+    lidar_attenuation_coeff: float = 0.35
     uw_camera_focal_length: float = 2.1
     uw_camera_clipping_range: Tuple[float, float] = (0.1, 100.0)
     water_surface_z: float = 1.43389
     water_profile_path: Optional[str] = None
     sonar_max_range: float = 10.0
+    # "raw" preserves true exponential distance falloff (best for dataset
+    # generation); "range"/"all" trade distance information for contrast and
+    # are meant for interactive preview only.
+    sonar_normalizing_method: str = "raw"
     dvl_max_range: float = 10.0
     enable_dvl_debug_lines: bool = False
     enable_front_camera: bool = True
@@ -673,6 +694,11 @@ class OceanSimROVRobot(Robot):
             _xform_translate(lidar_path, tuple(float(v) for v in cls.lidar_translation))
             qw, qx, qy, qz = _quat_from_euler_xyz(*cls.lidar_orientation_euler_deg)
             _xform_orient_quat(lidar_path, (qw, qx, qy, qz))
+            instance.lidar.configure_underwater_profile(
+                min_range=float(cls.lidar_min_range),
+                max_range=float(cls.lidar_max_range),
+                attenuation_coeff=float(cls.lidar_attenuation_coeff),
+            )
             try:
                 instance.lidar.enable_lidar()
             except Exception:
@@ -687,6 +713,9 @@ class OceanSimROVRobot(Robot):
                 ),
                 max_range=float(cls.sonar_max_range),
             )
+            instance.sonar.set_render_model_params(
+                normalizing_method=str(cls.sonar_normalizing_method)
+            )
         if cls.enable_dvl:
             instance.dvl = OceanSimDVL.build(
                 rigid_body_path=prim_path,
@@ -700,6 +729,42 @@ class OceanSimROVRobot(Robot):
                 water_surface_z=float(cls.water_surface_z),
             )
         return instance
+
+    def get_sensor_extrinsics(self) -> dict:
+        """Fixed body-frame (robot-local) mounting transform of every active
+        sensor, read directly from this robot class's mount constants.
+
+        This complements the per-frame world-frame poses already recorded in
+        state/common: since every sensor is rigidly mounted, this constant
+        transform lets downstream consumers recover
+        ``T_world_sensor = T_world_robot * T_robot_sensor`` without
+        re-deriving it from per-frame world poses, and doubles as a
+        redundant sanity check against them (see
+        docs/plano_upgrade_simulacao_subaquatica.md §Fase 1).
+        """
+
+        def _entry(translation, euler_deg=(0.0, 0.0, 0.0)):
+            return {
+                "translation_m": [float(v) for v in translation],
+                "rotation_euler_xyz_deg": [float(v) for v in euler_deg],
+            }
+
+        extrinsics: dict = {}
+        if self.front_camera is not None:
+            extrinsics["front_camera"] = _entry(self.mono_camera_translation)
+        if self.front_stereo is not None:
+            extrinsics["front_stereo.left"] = _entry(self.stereo_left_translation)
+            extrinsics["front_stereo.right"] = _entry(self.stereo_right_translation)
+        if self.sonar is not None:
+            extrinsics["sonar"] = _entry(self.sonar_translation, self.sonar_orientation_euler_deg)
+        if self.dvl is not None:
+            extrinsics["dvl"] = _entry(self.dvl_translation)
+        if self.lidar is not None:
+            extrinsics["lidar"] = _entry(self.lidar_translation, self.lidar_orientation_euler_deg)
+        if self.barometer is not None:
+            # Barometer is built at the robot origin with no mount offset.
+            extrinsics["barometer"] = _entry((0.0, 0.0, 0.0))
+        return extrinsics
 
     def write_action(self, step_size: float):
         action = np.asarray(self.action.get_value(), dtype=np.float32).reshape(-1)

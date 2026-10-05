@@ -23,6 +23,7 @@ import glob
 import math
 from collections import OrderedDict
 
+import carb
 import omni.ext
 import omni.ui as ui
 
@@ -280,7 +281,10 @@ class PatoSimExtension(omni.ext.IExt):
         self._sonar_central_peak_model = ui.SimpleFloatModel(2.0)
         self._sonar_central_std_model = ui.SimpleFloatModel(0.001)
         self._sonar_binning_method_model = ui.SimpleIntModel(0)
-        self._sonar_normalizing_method_model = ui.SimpleIntModel(1)
+        # Index into ["raw", "range", "all"] — "raw" (index 0) is the default
+        # because it preserves true distance-dependent intensity, which is what
+        # dataset generation for the fusion/reconstruction models needs.
+        self._sonar_normalizing_method_model = ui.SimpleIntModel(0)
         self._sonar_min_range_model = ui.SimpleFloatModel(0.2)
         self._sonar_max_range_model = ui.SimpleFloatModel(10.0)
         self._sonar_yaml_path_model = ui.SimpleStringModel("")
@@ -1493,7 +1497,7 @@ class PatoSimExtension(omni.ext.IExt):
         if sonar is None:
             return
         binning_items = ["sum", "mean"]
-        normalizing_items = ["all", "range"]
+        normalizing_items = ["raw", "range", "all"]
         try:
             sonar.set_render_model_params(
                 gau_noise_param=float(self._sonar_gau_noise_model.as_float),
@@ -1542,7 +1546,7 @@ class PatoSimExtension(omni.ext.IExt):
         if sonar is None:
             return
         binning_items = ["sum", "mean"]
-        normalizing_items = ["all", "range"]
+        normalizing_items = ["raw", "range", "all"]
         try:
             self._sonar_gau_noise_model.set_value(float(sonar._gau_noise_param))
             self._sonar_ray_noise_model.set_value(float(sonar._ray_noise_param))
@@ -1559,7 +1563,7 @@ class PatoSimExtension(omni.ext.IExt):
             ni = (
                 normalizing_items.index(sonar._normalizing_method)
                 if sonar._normalizing_method in normalizing_items
-                else 1
+                else 0
             )
             self._sonar_binning_method_model.set_value(bi)
             self._sonar_normalizing_method_model.set_value(ni)
@@ -1570,7 +1574,7 @@ class PatoSimExtension(omni.ext.IExt):
 
     def _build_sonar_noise_controls(self):
         binning_items = ["sum", "mean"]
-        normalizing_items = ["all", "range"]
+        normalizing_items = ["raw", "range", "all"]
         bind_callbacks = not bool(getattr(self, "_sonar_advanced_callbacks_bound", False))
 
         def _changed(_m):
@@ -2993,6 +2997,9 @@ class PatoSimExtension(omni.ext.IExt):
             enable_rov_dvl=bool(self._oceansim_dvl_model.as_bool),
             enable_rov_barometer=bool(self._oceansim_barometer_model.as_bool),
             rov_operating_depth=float(self._oceansim_operating_depth_model.as_float),
+            sonar_normalizing_method=["raw", "range", "all"][
+                max(0, min(int(self._sonar_normalizing_method_model.as_int), 2))
+            ],
         )
         return config
     
@@ -3037,7 +3044,15 @@ class PatoSimExtension(omni.ext.IExt):
         writer = Writer(recording_path)
         writer.write_config(self.config)
         writer.write_occupancy_map(self.scenario.occupancy_map)
+        writer.write_occupancy_map_stack(getattr(self.scenario, "occupancy_map_stack", None))
         writer.copy_stage(self.cached_stage_path)
+        try:
+            robot_for_extrinsics = getattr(self.scenario, "robot", None)
+            get_extrinsics = getattr(robot_for_extrinsics, "get_sensor_extrinsics", None)
+            if callable(get_extrinsics):
+                writer.write_sensor_extrinsics(get_extrinsics())
+        except Exception as exc:
+            carb.log_warn(f"[PatoSim] recording: failed to write sensor extrinsics: {exc}")
         self.step = 0
         self.recording_time = 0.
         if self.recording_name_label is not None:
@@ -3336,28 +3351,68 @@ class PatoSimExtension(omni.ext.IExt):
                     self.writer.write_state_dict_common(state_dict_common, step=self.step)
 
                 if full_sensor_recording_enabled:
+                    recording_robot = getattr(scenario, "robot", None)
+                    sonar_obj = getattr(recording_robot, "sonar", None)
                     try:
-                        self.writer.write_state_dict_rgb(rgb_state_for_preview, step=self.step)
-                    except Exception:
-                        pass
+                        self.writer.write_state_dict_rgb(
+                            rgb_state_for_preview, step=self.step, sonar_ref=sonar_obj
+                        )
+                    except Exception as exc:
+                        carb.log_warn(
+                            f"[PatoSim] recording: failed to write rgb at step {self.step}: {exc}"
+                        )
                     try:
                         self.writer.write_state_dict_segmentation(scenario.state_dict_segmentation(), step=self.step)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        carb.log_warn(
+                            f"[PatoSim] recording: failed to write segmentation at step {self.step}: {exc}"
+                        )
                     try:
                         self.writer.write_state_dict_instance_id_segmentation(
                             scenario.state_dict_instance_id_segmentation(), step=self.step
                         )
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        carb.log_warn(
+                            f"[PatoSim] recording: failed to write instance_id_segmentation at step {self.step}: {exc}"
+                        )
                     try:
                         self.writer.write_state_dict_depth(scenario.state_dict_depth(), step=self.step)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        carb.log_warn(
+                            f"[PatoSim] recording: failed to write depth at step {self.step}: {exc}"
+                        )
                     try:
                         self.writer.write_state_dict_normals(scenario.state_dict_normals(), step=self.step)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        carb.log_warn(
+                            f"[PatoSim] recording: failed to write normals at step {self.step}: {exc}"
+                        )
+                    if sonar_obj is not None:
+                        try:
+                            intensity = sonar_obj.sonar_intensity.get_value()
+                        except Exception:
+                            intensity = None
+                        if intensity is not None:
+                            try:
+                                sonar_meta = {
+                                    "position": sonar_obj.position.get_value(),
+                                    "orientation": sonar_obj.orientation.get_value(),
+                                    "params": sonar_obj.get_params_as_dict(),
+                                    "step": int(self.step),
+                                }
+                                self.writer.write_sonar_data_package(
+                                    intensity,
+                                    sonar_meta,
+                                    step=self.step,
+                                    save_npy=bool(getattr(self.config, "sonar_save_raw_npy", True)),
+                                    save_png16=bool(getattr(self.config, "sonar_save_png16", False)),
+                                    save_polar_png=bool(getattr(self.config, "sonar_save_polar_png", False)),
+                                    sonar_ref=sonar_obj,
+                                )
+                            except Exception as exc:
+                                carb.log_warn(
+                                    f"[PatoSim] recording: failed to write raw sonar package at step {self.step}: {exc}"
+                                )
 
                 if full_sensor_recording_enabled and self._pointcloud_record_due(self.step):
                     if isinstance(pointcloud_state_for_preview, dict):

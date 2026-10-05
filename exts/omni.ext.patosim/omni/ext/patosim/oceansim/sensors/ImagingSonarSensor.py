@@ -303,9 +303,9 @@ class ImagingSonarSensor(Camera):
         return True
 
 
-    def make_sonar_data(self, 
-                        binning_method: str = "sum", 
-                        normalizing_method: str = "range",
+    def make_sonar_data(self,
+                        binning_method: str = "sum",
+                        normalizing_method: str = "raw",
                         query_prop: str ='reflectivity', # Do not modify this if not developing the sensor.
                         attenuation: float = 0.1, # Control the attentuation along distance when computing attenuation
                         gau_noise_param: float = 0.2, # multiplicative noise coefficient 
@@ -320,7 +320,11 @@ class ImagingSonarSensor(Camera):
         Args:
             binning_method (str): "sum" or "mean" for intensity accumulation
                                 Remember to adjust your noise scale accordingly after changing this.
-            normalizing_method (str): "all" (global max) or "range" (per-range max)
+            normalizing_method (str): "raw" (no normalization, preserves the true
+                                exponential distance falloff — recommended for ML/
+                                dataset generation), "all" (global max) or "range"
+                                (per-range max, best for human preview/visualization
+                                contrast but destroys distance information).
                                 Remember to adjust your noise scale accordingly after changing this.
             query_prop (str): Material property to query (default 'reflectivity')
                             Don't modify this if not for development.
@@ -517,6 +521,26 @@ class ImagingSonarSensor(Camera):
                   ]
                   )
             
+        if normalizing_method == "raw":
+            # No normalization at all: keep the physically-computed exponential
+            # attenuation from compute_intensity() as the actual output signal.
+            wp.launch(
+                  kernel=make_sonar_map_raw,
+                  dim=self.sonar_map.shape,
+                  inputs=[
+                      self.r,
+                      self.azi,
+                      self.binned_intensity,
+                      self.gau_noise,
+                      self.range_dependent_ray_noise,
+                      intensity_offset,
+                      intensity_gain
+                  ],
+                  outputs=[
+                      self.sonar_map
+                  ]
+                  )
+
         if normalizing_method == "range":
             # Compute rangewise maximum
             maximum = wp.zeros(shape=(self.r.shape[0],), dtype=wp.float32)

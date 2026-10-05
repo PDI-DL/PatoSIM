@@ -409,10 +409,31 @@ class Writer:
         with open(os.path.join(self.path, "config.json"), 'w') as f:
             f.write(config.to_json())
 
+    def write_sensor_extrinsics(self, extrinsics: dict):
+        """Write the static, per-recording robot-to-sensor mount transforms.
+
+        Complements the per-frame world-frame poses in state/common -- see
+        Robot.get_sensor_extrinsics() for why this is recorded separately.
+        """
+        if not os.path.exists(self.path):
+            os.makedirs(self.path)
+        with open(os.path.join(self.path, "sensors_extrinsics.json"), "w", encoding="utf-8") as f:
+            json.dump(extrinsics, f, indent=2)
+
     def write_occupancy_map(self, occupancy_map: OccupancyMap):
         if not os.path.exists(self.path):
             os.makedirs(self.path)
         occupancy_map.save_ros(os.path.join(self.path, "occupancy_map"))
+
+    def write_occupancy_map_stack(self, occupancy_map_stack) -> None:
+        """Persist the optional multi-band 3D occupancy map stack (see
+        OccupancyMapStack), when the scenario was built with
+        occupancy_map_mode="3d_stack". No-op if None."""
+        if occupancy_map_stack is None:
+            return
+        if not os.path.exists(self.path):
+            os.makedirs(self.path)
+        occupancy_map_stack.save(os.path.join(self.path, "occupancy_map_3d"))
 
     def copy_init(self, other_path: str, overwrite: bool = False, verbose: bool = False):
         """Copy initial artifacts (stage/config/occupancy_map) from another recording.
