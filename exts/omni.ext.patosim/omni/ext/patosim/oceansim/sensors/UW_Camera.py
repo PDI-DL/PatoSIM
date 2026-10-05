@@ -92,6 +92,7 @@ class UW_Camera(Camera):
         self._id = 0
         self._viewport = viewport
         self._device = wp.get_preferred_device()
+        self._use_gpu_annotators = bool(viewport or writing_dir is not None)
         super().initialize(physics_sim_view)
 
         if UW_yaml_path is not None:
@@ -113,8 +114,12 @@ class UW_Camera(Camera):
             print(f'[{self._name}] On {str(self._device)}. Using default render parameters.')
 
         
-        self._rgba_annot = rep.AnnotatorRegistry.get_annotator('LdrColor', device=str(self._device))
-        self._depth_annot = rep.AnnotatorRegistry.get_annotator('distance_to_camera', device=str(self._device))
+        if self._use_gpu_annotators:
+            self._rgba_annot = rep.AnnotatorRegistry.get_annotator('LdrColor', device=str(self._device))
+            self._depth_annot = rep.AnnotatorRegistry.get_annotator('distance_to_camera', device=str(self._device))
+        else:
+            self._rgba_annot = rep.AnnotatorRegistry.get_annotator('LdrColor', do_array_copy=True)
+            self._depth_annot = rep.AnnotatorRegistry.get_annotator('distance_to_camera', do_array_copy=True)
 
         self._rgba_annot.attach(self._render_product_path)
         self._depth_annot.attach(self._render_product_path)

@@ -57,6 +57,7 @@ from omni.ext.patosim.common import Module, Buffer
 from omni.ext.patosim.robots import Robot
 from omni.ext.patosim.occupancy_map import OccupancyMap
 from omni.ext.patosim.types import Point2d
+from omni.ext.patosim.gamepad_math import shape_axis as _shape_axis
 
 import omni.ext.patosim.pose_samplers as pose_samplers
 import omni.ext.patosim.inputs as inputs
@@ -200,6 +201,132 @@ class OceanSimROVTeleoperationScenario(Scenario):
                 )
         except Exception:
             pass
+        self.robot.update_state()
+        return True
+
+
+
+
+class _ROVGamepadController:
+    """Reads the shared GamepadDriver's 4 analog axes and maps them to a
+    BlueROV-style 6DOF force/torque command.
+
+    Mapping (matches common commercial ROV joystick conventions, and the
+    physical layout of the 4 axes already exposed by GamepadDriver):
+    - left stick vertical   -> surge (body X, forward/back)
+    - left stick horizontal -> sway  (body Y, left/right)
+    - right stick vertical  -> heave (body Z, up/down)
+    - right stick horizontal-> yaw torque (about body Z)
+
+    Roll/pitch are intentionally not exposed to manual control: the BlueROV
+    physics model (underwater_physics.py) is passively stable in roll/pitch
+    because its center of buoyancy sits above its center of mass, matching
+    how real BlueROV pilots fly (roll/pitch are not manually actuated).
+    """
+
+    def __init__(self, deadzone: float = 0.08, expo: float = 0.3):
+        self.deadzone = float(deadzone)
+        self.expo = float(expo)
+        self._driver = None
+        self._connected = False
+        self._connect()
+
+    def _connect(self):
+        try:
+            self._driver = inputs.GamepadDriver.instance()
+            inputs.GamepadDriver.connect()
+            self._connected = True
+        except Exception as exc:
+            carb.log_warn(f"[PatoSim] gamepad: failed to connect ({exc}); joystick input disabled")
+            self._driver = None
+            self._connected = False
+
+    def get_force_and_torque(self) -> Tuple[np.ndarray, np.ndarray]:
+        force = np.zeros(3, dtype=np.float32)
+        torque = np.zeros(3, dtype=np.float32)
+        if not self._connected or self._driver is None:
+            return force, torque
+        try:
+            axes = np.asarray(self._driver.get_axis_values(), dtype=np.float32).reshape(-1)
+        except Exception as exc:
+            # Treat any read failure (e.g. controller unplugged mid-session)
+            # as a disconnect: fail safe to zero thrust rather than holding
+            # the last commanded value.
+            carb.log_warn(f"[PatoSim] gamepad: read failed ({exc}); zeroing action")
+            self._connected = False
+            return force, torque
+        if axes.size < 4:
+            return force, torque
+
+        surge = _shape_axis(float(axes[0]), self.deadzone, self.expo)
+        sway = _shape_axis(float(axes[1]), self.deadzone, self.expo)
+        heave = _shape_axis(float(axes[2]), self.deadzone, self.expo)
+        yaw = _shape_axis(float(axes[3]), self.deadzone, self.expo)
+
+        force[:] = (surge, sway, heave)
+        torque[:] = (0.0, 0.0, yaw)
+        return force, torque
+
+    def cleanup(self):
+        try:
+            inputs.GamepadDriver.disconnect()
+        except Exception:
+            pass
+        self._driver = None
+        self._connected = False
+
+
+@SCENARIOS.register()
+class OceanSimROVGamepadTeleoperationScenario(Scenario):
+    """Teleop 6DOF do ROV usando um gamepad/joystick, com ganhos e curva de
+    resposta (deadzone/expo) configuraveis por eixo. Falha de forma segura
+    (acao zerada) se o controle desconectar durante a gravacao."""
+
+    def __init__(self, robot: Robot, occupancy_map: OccupancyMap):
+        super().__init__(robot, occupancy_map)
+        self._gamepad = _ROVGamepadController(
+            deadzone=float(getattr(self.robot, "rov_gamepad_deadzone", 0.08)),
+            expo=float(getattr(self.robot, "rov_gamepad_expo", 0.3)),
+        )
+        self._default_position = np.asarray(
+            getattr(self.robot, "spawn_translation", getattr(self.robot, "initial_translation", (-2.0, 0.0, -0.8))),
+            dtype=np.float32,
+        )
+        init_euler = np.asarray(
+            getattr(self.robot, "initial_orientation_euler_deg", (0.0, 0.0, 0.0)),
+            dtype=np.float32,
+        )
+        self._default_orientation = np.asarray(
+            [math.cos(math.radians(init_euler[2]) * 0.5), 0.0, 0.0, math.sin(math.radians(init_euler[2]) * 0.5)],
+            dtype=np.float32,
+        )
+        self._force_gain = float(getattr(self.robot, "keyboard_linear_velocity_gain", 10.0))
+        self._torque_gain = float(getattr(self.robot, "keyboard_angular_velocity_gain", 10.0))
+        self._linear_gain = float(getattr(self.robot, "rov_gamepad_linear_gain", 1.0))
+        self._vertical_gain = float(getattr(self.robot, "rov_gamepad_vertical_gain", 1.0))
+        self._angular_gain = float(getattr(self.robot, "rov_gamepad_angular_gain", 1.0))
+
+    def __del__(self):
+        try:
+            self._gamepad.cleanup()
+        except Exception:
+            pass
+
+    def reset(self):
+        if hasattr(self.robot, "set_pose_3d"):
+            self.robot.set_pose_3d(self._default_position, self._default_orientation)
+        self.robot.action.set_value(np.zeros(6, dtype=np.float32))
+        self.robot.write_action(float(getattr(self.robot, "physics_dt", 0.01)))
+
+    def step(self, step_size: float) -> bool:
+        force_dir, torque_dir = self._gamepad.get_force_and_torque()
+        force = force_dir * self._force_gain
+        force[0] *= self._linear_gain
+        force[1] *= self._linear_gain
+        force[2] *= self._vertical_gain
+        torque = torque_dir * self._torque_gain * self._angular_gain
+        self.robot.action.set_value(np.concatenate([force, torque]).astype(np.float32))
+        self.robot.write_action(step_size)
         self.robot.update_state()
         return True
 

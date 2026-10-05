@@ -152,6 +152,49 @@ def _sanitize_pointcloud_array(array: Optional[np.ndarray]) -> Optional[np.ndarr
     return np.ascontiguousarray(pts)
 
 
+def _build_sonar_acoustic_lut() -> np.ndarray:
+    anchors = np.asarray([0, 76, 178, 229, 255], dtype=np.float32)
+    colors = np.asarray(
+        [
+            [0, 8, 24],
+            [0, 64, 144],
+            [0, 220, 170],
+            [255, 220, 0],
+            [255, 255, 255],
+        ],
+        dtype=np.float32,
+    )
+    lut = np.empty((256, 3), dtype=np.uint8)
+    xs = np.arange(256, dtype=np.float32)
+    for channel in range(3):
+        lut[:, channel] = np.clip(
+            np.interp(xs, anchors, colors[:, channel]),
+            0,
+            255,
+        ).astype(np.uint8)
+    return lut
+
+
+_SONAR_ACOUSTIC_LUT = _build_sonar_acoustic_lut()
+
+
+def _apply_sonar_acoustic_colormap(gray: np.ndarray) -> np.ndarray:
+    gray_u8 = np.asarray(gray, dtype=np.uint8)
+    return _SONAR_ACOUSTIC_LUT[gray_u8]
+
+
+def _blend_overlay_rgba(base_rgba: np.ndarray, overlay_rgb: np.ndarray, overlay_alpha: np.ndarray) -> np.ndarray:
+    alpha = np.clip(np.asarray(overlay_alpha, dtype=np.float32), 0.0, 255.0) / 255.0
+    if not np.any(alpha > 0.0):
+        return base_rgba
+    base_rgb = np.asarray(base_rgba[..., :3], dtype=np.float32)
+    overlay_rgb_f = np.asarray(overlay_rgb, dtype=np.float32)
+    blended = base_rgb * (1.0 - alpha[..., None]) + overlay_rgb_f * alpha[..., None]
+    out = np.array(base_rgba, copy=True)
+    out[..., :3] = np.clip(blended, 0.0, 255.0).astype(np.uint8)
+    return out
+
+
 def _normalize_asset_path(asset_path: str) -> str:
     text = str(asset_path or "").strip()
     if "://" in text:
@@ -464,6 +507,45 @@ class Lidar(Sensor):
         self._render_product = None
         self._pointcloud_enabled = False
         self._rtx_initialized = False
+        # Underwater range/attenuation profile (see configure_underwater_profile).
+        # Defaults mirror a Voyis Insight Micro-class scanner (~7 m, small ROV/AUV)
+        # rather than a generic terrestrial lidar's long default range.
+        self._uw_min_range = 0.13
+        self._uw_max_range = 7.0
+        self._uw_attenuation_coeff = 0.35
+        self._uw_rng = np.random.default_rng()
+
+    def configure_underwater_profile(
+        self, min_range: float, max_range: float, attenuation_coeff: float
+    ) -> None:
+        """Calibrate this lidar's usable range and return-dropout to underwater
+        conditions. Real subsea vehicles use short-range laser triangulation
+        scanners (e.g. Voyis Insight family, ~2.5-15 m depending on model)
+        rather than long-range terrestrial ToF lidar, because water absorption
+        and backscatter make long ranges unusable. This is applied as a
+        software post-process on the returned point cloud (range clipping +
+        Beer-Lambert style return-probability falloff), independent of
+        whichever RTX Lidar sensor profile is used for ray casting.
+        """
+        self._uw_min_range = max(0.0, float(min_range))
+        self._uw_max_range = max(self._uw_min_range + 1e-3, float(max_range))
+        self._uw_attenuation_coeff = max(0.0, float(attenuation_coeff))
+
+    def _apply_underwater_profile(self, points):
+        """Clip to [min_range, max_range] and apply distance-dependent return
+        dropout. `points` is Nx3 (or NxK, K>=3) with columns 0:3 = local xyz.
+        Delegates to the pure, unit-tested underwater_lidar_math module."""
+        if points is None:
+            return None
+        from isaacsim.oceansim.utils.underwater_lidar_math import apply_underwater_lidar_profile
+
+        return apply_underwater_lidar_profile(
+            points,
+            min_range=self._uw_min_range,
+            max_range=self._uw_max_range,
+            attenuation_coeff=self._uw_attenuation_coeff,
+            rng=self._uw_rng,
+        )
 
     @classmethod
     def build(cls, prim_path: str) -> "Lidar":
@@ -638,6 +720,7 @@ class Lidar(Sensor):
             # If we have an annotator, try to get its data
             if self._rtx is not None:
                 pts, source = self._extract_rtx_pointcloud()
+                pts = self._apply_underwater_profile(pts)
                 self.pointcloud.set_value(pts)
                 if pts is None:
                     self.status.set_value(source)
@@ -647,6 +730,7 @@ class Lidar(Sensor):
                 try:
                     pc = self._annotator.get_data()
                     pts = _sanitize_pointcloud_array(_extract_pointcloud_array(pc))
+                    pts = self._apply_underwater_profile(pts)
                     self.pointcloud.set_value(pts)
                     if pts is None:
                         self.status.set_value("annotator_no_pointcloud")
@@ -900,6 +984,8 @@ class OceanSimUWCamera(Sensor):
     """Wrapper do OceanSim UW_Camera no formato Module/Buffer do PatoSim."""
 
     resolution: Tuple[int, int] = (1920, 1080)
+    preview_resolution: Tuple[int, int] = (640, 360)
+    max_cuda_preview_resolution: Tuple[int, int] = (960, 540)
 
     def __init__(
         self,
@@ -915,9 +1001,16 @@ class OceanSimUWCamera(Sensor):
         self._initialized = False
         self._rgb_enabled = False
         self._depth_enabled = False
+        self._preview_enabled = False
+        self._preview_resolution = tuple(int(v) for v in self.preview_resolution)
+        self._preview_prefer_cuda = True
+        self._preview_cuda_failed = False
+        self._preview_backend_status = "off"
+        self._uw_preview_bufs: dict = {}
 
         self.raw_rgb_image = Buffer(tags=["rgb"])
         self.rgb_image = Buffer(tags=["rgb"])
+        self.preview_rgb_image = Buffer()
         self.depth_image = Buffer(tags=["depth"])
         self.position = Buffer()
         self.orientation = Buffer()
@@ -991,6 +1084,47 @@ class OceanSimUWCamera(Sensor):
         self._depth_enabled = True
         self._ensure_initialized()
 
+    def set_preview_enabled(
+        self,
+        enabled: bool,
+        *,
+        resolution: Tuple[int, int] | None = None,
+        prefer_cuda: bool = True,
+    ) -> None:
+        self._preview_enabled = bool(enabled)
+        if resolution is not None:
+            self._preview_resolution = self._sanitize_preview_resolution(resolution)
+        self._preview_prefer_cuda = bool(prefer_cuda)
+        self._preview_cuda_failed = False
+        if not self._preview_enabled:
+            self._preview_backend_status = "off"
+            self.preview_rgb_image.set_value(None)
+        else:
+            self._preview_backend_status = "pending"
+
+    def get_preview_backend_status(self) -> str:
+        return str(getattr(self, "_preview_backend_status", "unknown"))
+
+    def _sanitize_preview_resolution(
+        self,
+        resolution: Tuple[int, int] | None,
+    ) -> Tuple[int, int]:
+        if resolution is None:
+            return tuple(int(v) for v in self.preview_resolution)
+        try:
+            width = max(1, int(resolution[0]))
+            height = max(1, int(resolution[1]))
+        except Exception:
+            return tuple(int(v) for v in self.preview_resolution)
+
+        max_width = max(1, int(self.max_cuda_preview_resolution[0]))
+        max_height = max(1, int(self.max_cuda_preview_resolution[1]))
+        scale = min(float(max_width) / float(width), float(max_height) / float(height), 1.0)
+        if scale < 1.0:
+            width = max(1, int(width * scale))
+            height = max(1, int(height * scale))
+        return (width, height)
+
     def disable_rendering(self):
         if not self._initialized:
             return
@@ -999,46 +1133,201 @@ class OceanSimUWCamera(Sensor):
         except Exception:
             pass
         self._initialized = False
+        self.preview_rgb_image.set_value(None)
+        self._preview_backend_status = "off"
+
+    def _prepare_underwater_inputs(
+        self,
+        raw_rgba,
+        depth,
+        *,
+        target_resolution: Tuple[int, int] | None = None,
+    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        raw_np = _to_numpy_array(raw_rgba)
+        depth_np = _to_numpy_array(depth)
+        if raw_np is None or depth_np is None:
+            return None, None
+
+        raw_np = np.asarray(raw_np)
+        depth_np = np.asarray(depth_np)
+        if raw_np.ndim != 3 or raw_np.shape[2] < 3:
+            return None, None
+        if depth_np.ndim == 3 and depth_np.shape[2] >= 1:
+            depth_np = depth_np[..., 0]
+        if depth_np.ndim != 2:
+            return None, None
+
+        height = min(int(raw_np.shape[0]), int(depth_np.shape[0]))
+        width = min(int(raw_np.shape[1]), int(depth_np.shape[1]))
+        if height <= 0 or width <= 0:
+            return None, None
+
+        raw_rgb = np.asarray(raw_np[:height, :width, :3], dtype=np.uint8)
+        depth_crop = np.asarray(depth_np[:height, :width], dtype=np.float32)
+        depth_crop = np.nan_to_num(depth_crop, nan=0.0, posinf=0.0, neginf=0.0)
+        depth_crop = np.maximum(depth_crop, 0.0)
+
+        if target_resolution is None:
+            return raw_rgb, depth_crop
+
+        try:
+            target_w = max(1, int(target_resolution[0]))
+            target_h = max(1, int(target_resolution[1]))
+        except Exception:
+            return raw_rgb, depth_crop
+
+        scale = min(float(target_w) / float(width), float(target_h) / float(height), 1.0)
+        if scale >= 1.0:
+            return raw_rgb, depth_crop
+
+        new_w = max(1, int(width * scale))
+        new_h = max(1, int(height * scale))
+        x_idx = np.linspace(0, width - 1, new_w).astype(np.int32)
+        y_idx = np.linspace(0, height - 1, new_h).astype(np.int32)
+        raw_rgb = np.ascontiguousarray(raw_rgb[y_idx][:, x_idx, :])
+        depth_crop = np.ascontiguousarray(depth_crop[y_idx][:, x_idx])
+        return raw_rgb, depth_crop
+
+    def _compute_underwater_rgb_numpy(
+        self,
+        raw_rgb: np.ndarray,
+        depth_crop: np.ndarray,
+    ) -> Optional[np.ndarray]:
+        try:
+            raw_rgb_f32 = np.asarray(raw_rgb, dtype=np.float32)
+            backscatter = np.asarray(
+                [
+                    float(self._sensor._backscatter_value[0]),
+                    float(self._sensor._backscatter_value[1]),
+                    float(self._sensor._backscatter_value[2]),
+                ],
+                dtype=np.float32,
+            )
+            atten = np.asarray(
+                [
+                    float(self._sensor._atten_coeff[0]),
+                    float(self._sensor._atten_coeff[1]),
+                    float(self._sensor._atten_coeff[2]),
+                ],
+                dtype=np.float32,
+            )
+            back_coeff = np.asarray(
+                [
+                    float(self._sensor._backscatter_coeff[0]),
+                    float(self._sensor._backscatter_coeff[1]),
+                    float(self._sensor._backscatter_coeff[2]),
+                ],
+                dtype=np.float32,
+            )
+
+            depth_3d = depth_crop[..., None]
+            exp_atten = np.exp(-depth_3d * atten[None, None, :])
+            exp_back = np.exp(-depth_3d * back_coeff[None, None, :])
+            uw_rgb = raw_rgb_f32 * exp_atten + (backscatter[None, None, :] * 255.0) * (1.0 - exp_back)
+            return np.asarray(np.clip(uw_rgb, 0.0, 255.0), dtype=np.uint8)
+        except Exception:
+            return None
+
+    def _compute_underwater_rgb_cuda_preview(
+        self,
+        raw_rgb: np.ndarray,
+        depth_crop: np.ndarray,
+    ) -> Optional[np.ndarray]:
+        import warp as wp
+        from isaacsim.oceansim.utils.UWrenderer_utils import UW_render
+
+        if raw_rgb.size == 0 or depth_crop.size == 0:
+            return None
+        if raw_rgb.shape[0] != depth_crop.shape[0] or raw_rgb.shape[1] != depth_crop.shape[1]:
+            return None
+
+        device = wp.get_preferred_device()
+        height = int(raw_rgb.shape[0])
+        width = int(raw_rgb.shape[1])
+        rgba = np.zeros((height, width, 4), dtype=np.uint8)
+        rgba[:, :, :3] = raw_rgb
+        rgba[:, :, 3] = 255
+
+        buf_key = (height, width)
+        bufs = self._uw_preview_bufs.get(buf_key)
+        if bufs is None:
+            raw_dev = wp.array(np.ascontiguousarray(rgba), dtype=wp.uint8, device=device)
+            depth_dev = wp.array(np.ascontiguousarray(depth_crop), dtype=wp.float32, device=device)
+            out_dev = wp.empty(shape=rgba.shape, dtype=wp.uint8, device=device)
+            bufs = (raw_dev, depth_dev, out_dev)
+            self._uw_preview_bufs[buf_key] = bufs
+        else:
+            raw_dev, depth_dev, out_dev = bufs
+            if hasattr(raw_dev, "assign") and hasattr(depth_dev, "assign"):
+                raw_dev.assign(np.ascontiguousarray(rgba))
+                depth_dev.assign(np.ascontiguousarray(depth_crop))
+            else:
+                raw_dev = wp.array(np.ascontiguousarray(rgba), dtype=wp.uint8, device=device)
+                depth_dev = wp.array(np.ascontiguousarray(depth_crop), dtype=wp.float32, device=device)
+                out_dev = wp.empty(shape=rgba.shape, dtype=wp.uint8, device=device)
+                bufs = (raw_dev, depth_dev, out_dev)
+                self._uw_preview_bufs[buf_key] = bufs
+        wp.launch(
+            kernel=UW_render,
+            dim=(rgba.shape[0], rgba.shape[1]),
+            inputs=[
+                raw_dev,
+                depth_dev,
+                self._sensor._backscatter_value,
+                self._sensor._atten_coeff,
+                self._sensor._backscatter_coeff,
+            ],
+            outputs=[out_dev],
+            device=device,
+        )
+        wp.synchronize_device(device)
+        out_np = np.asarray(out_dev.numpy())
+        if out_np.ndim != 3 or out_np.shape[2] < 3:
+            return None
+        return np.asarray(out_np[..., :3], dtype=np.uint8)
 
     def _render_underwater_rgb(self, raw_rgba, depth) -> Optional[np.ndarray]:
         # The underwater camera is simulated as a post-process over optical RGB
         # plus depth, not as a separate 3D sensor. This keeps it lightweight and
         # makes the output compatible with the same RGB/depth recording pipeline.
-        try:
-            import warp as wp
-            from isaacsim.oceansim.utils.UWrenderer_utils import UW_render
-        except Exception:
-            raw_np = _to_numpy_array(raw_rgba)
-            if raw_np is None:
-                return None
-            return np.asarray(raw_np[..., :3], dtype=np.uint8)
-
         if raw_rgba is None or depth is None:
             return None
 
+        target_resolution = self._preview_resolution if self._preview_enabled else None
         try:
-            uw_image = wp.zeros_like(raw_rgba)
-            wp.launch(
-                dim=np.flip(self._sensor.get_resolution()),
-                kernel=UW_render,
-                inputs=[
-                    raw_rgba,
-                    depth,
-                    self._sensor._backscatter_value,
-                    self._sensor._atten_coeff,
-                    self._sensor._backscatter_coeff,
-                ],
-                outputs=[uw_image],
+            raw_rgb, depth_crop = self._prepare_underwater_inputs(
+                raw_rgba,
+                depth,
+                target_resolution=target_resolution,
             )
-            uw_np = _to_numpy_array(uw_image)
-            if uw_np is None:
+            if raw_rgb is None or depth_crop is None:
                 return None
-            return np.asarray(uw_np[..., :3], dtype=np.uint8)
+
+            if self._preview_enabled and self._preview_prefer_cuda and not self._preview_cuda_failed:
+                try:
+                    rgb_cuda = self._compute_underwater_rgb_cuda_preview(raw_rgb, depth_crop)
+                    if rgb_cuda is not None:
+                        self._preview_backend_status = f"cuda:{rgb_cuda.shape[1]}x{rgb_cuda.shape[0]}"
+                        return rgb_cuda
+                except Exception:
+                    self._preview_cuda_failed = True
+
+            rgb_cpu = self._compute_underwater_rgb_numpy(raw_rgb, depth_crop)
+            if rgb_cpu is not None:
+                if self._preview_enabled:
+                    self._preview_backend_status = f"cpu:{rgb_cpu.shape[1]}x{rgb_cpu.shape[0]}"
+                else:
+                    self._preview_backend_status = "cpu_full"
+            return rgb_cpu
         except Exception:
+            self._preview_backend_status = "fallback_raw"
             raw_np = _to_numpy_array(raw_rgba)
             if raw_np is None:
                 return None
-            return np.asarray(raw_np[..., :3], dtype=np.uint8)
+            raw_arr = np.asarray(raw_np)
+            if raw_arr.ndim != 3 or raw_arr.shape[2] < 3:
+                return None
+            return np.asarray(raw_arr[..., :3], dtype=np.uint8)
 
     def update_state(self):
         if self._initialized:
@@ -1058,6 +1347,10 @@ class OceanSimUWCamera(Sensor):
                 if raw_np is not None:
                     self.raw_rgb_image.set_value(np.asarray(raw_np[..., :3], dtype=np.uint8))
                 rgb = self._render_underwater_rgb(raw_rgba, depth)
+                if self._preview_enabled:
+                    self.preview_rgb_image.set_value(rgb)
+                else:
+                    self.preview_rgb_image.set_value(None)
                 if rgb is not None:
                     self.rgb_image.set_value(rgb)
 
@@ -1119,6 +1412,22 @@ class OceanSimStereoUWCamera(Sensor):
         )
         return cls(left, right)
 
+    def set_preview_enabled(
+        self,
+        enabled: bool,
+        *,
+        resolution: Tuple[int, int] | None = None,
+        prefer_cuda: bool = True,
+    ) -> None:
+        try:
+            self.left.set_preview_enabled(enabled, resolution=resolution, prefer_cuda=prefer_cuda)
+        except Exception:
+            pass
+        try:
+            self.right.set_preview_enabled(enabled, resolution=resolution, prefer_cuda=prefer_cuda)
+        except Exception:
+            pass
+
 
 class OceanSimImagingSonar(Sensor):
     """Wrapper do ImagingSonarSensor com buffers compatíveis com preview e gravação."""
@@ -1130,15 +1439,36 @@ class OceanSimImagingSonar(Sensor):
         self._initialized = False
         self._rgb_enabled = False
         self._pointcloud_enabled = False
+        self._preview_enabled = False
+        self._preview_error_latched = False
+        self._preview_backend_status = "off"
+        self._gau_noise_param = 0.05
+        self._ray_noise_param = 0.05
+        self._attenuation = 0.3
+        self._intensity_offset = 0.0
+        self._intensity_gain = 1.0
+        self._central_peak = 2.0
+        self._central_std = 0.001
+        self._binning_method = "sum"
+        # "raw" preserves the physically-computed exp(-attenuation*dist) falloff,
+        # which is what downstream ML models (DPS_sonar_net / PSNetSonarPriority)
+        # need as a distance signal. "range"/"all" remain available as
+        # visualization presets that trade distance information for contrast.
+        self._normalizing_method = "raw"
+        self._polar_proj_cache: dict = {}
+        self._overlay_cache: dict = {}
+        self._data_generation: int = 0
 
         # rgb_image stores the processed acoustic image produced by the sonar
         # model. pointcloud stores the raw scan pointcloud used internally by the
         # sonar backend before polar binning/noise are applied.
         self.rgb_image = Buffer(tags=["rgb"])
+        self.sonar_intensity = Buffer(tags=["sonar_intensity"])
         self.pointcloud = Buffer(tags=["pointcloud"])
         self.position = Buffer()
         self.orientation = Buffer()
         self.status = Buffer("idle")
+        self._sync_sensor_render_params()
 
     @classmethod
     def build(
@@ -1187,6 +1517,41 @@ class OceanSimImagingSonar(Sensor):
     def enable_rgb_rendering(self):
         self._rgb_enabled = True
         self._ensure_initialized()
+        self._preview_error_latched = False
+        if self._preview_enabled:
+            self._preview_backend_status = "cuda_sensor"
+
+    def disable_rendering(self):
+        self._rgb_enabled = False
+        if self._pointcloud_enabled:
+            return
+        if not self._initialized:
+            return
+        # Pause data fetching without destroying the sensor. Setting
+        # _initialized = False stops update_state() from calling make_sonar_data().
+        # The underlying ImagingSonarSensor (self._sensor) is kept alive so that
+        # enable_rgb_rendering() → _ensure_initialized() can resume it later.
+        # close() must NOT be called here — it is reserved for permanent teardown
+        # at scenario destruction, where OmniGraph is no longer evaluating.
+        self._initialized = False
+        self.status.set_value("sonar_disabled")
+        self.rgb_image.set_value(None)
+        self.sonar_intensity.set_value(None)
+        self._preview_backend_status = "off"
+
+    def set_preview_enabled(self, enabled: bool) -> None:
+        self._preview_enabled = bool(enabled)
+        self._preview_error_latched = False
+        if self._preview_enabled:
+            self.enable_rgb_rendering()
+            self._preview_backend_status = "cuda_sensor"
+        else:
+            if not self._pointcloud_enabled:
+                self.disable_rendering()
+            self._preview_backend_status = "off"
+
+    def get_preview_backend_status(self) -> str:
+        return str(getattr(self, "_preview_backend_status", "unknown"))
 
     def set_pointcloud_enabled(self, enabled: bool):
         self._pointcloud_enabled = bool(enabled)
@@ -1194,18 +1559,218 @@ class OceanSimImagingSonar(Sensor):
             self._ensure_initialized()
         else:
             self.pointcloud.set_value(None)
+            if not self._rgb_enabled and self._initialized:
+                # Same pause-only pattern as disable_rendering(): keep self._sensor
+                # alive so that re-enabling pointcloud can resume without re-creating
+                # the annotators.
+                self._initialized = False
+                self.status.set_value("sonar_disabled")
+
+    @property
+    def min_range(self) -> float:
+        try:
+            return float(self._sensor.min_range)
+        except Exception:
+            return 0.2
+
+    @property
+    def max_range(self) -> float:
+        try:
+            return float(self._sensor.max_range)
+        except Exception:
+            return 10.0
+
+    def set_range(self, min_range: float, max_range: float) -> None:
+        """Change sonar range at runtime. The polar projection cache is cleared
+        so the next preview render recomputes the fan geometry and arc labels."""
+        min_range = max(0.01, float(min_range))
+        max_range = max(min_range + 0.1, float(max_range))
+        try:
+            self._sensor.min_range = min_range
+            self._sensor.max_range = max_range
+        except Exception:
+            pass
+        self._polar_proj_cache.clear()
+        self._overlay_cache.clear()
+
+    def _sync_sensor_render_params(self):
+        if self._sensor is None:
+            return
+        try:
+            self._sensor.gau_noise_param = float(self._gau_noise_param)
+            self._sensor.ray_noise_param = float(self._ray_noise_param)
+            self._sensor.attenuation = float(self._attenuation)
+            self._sensor.intensity_offset = float(self._intensity_offset)
+            self._sensor.intensity_gain = float(self._intensity_gain)
+            self._sensor.central_peak = float(self._central_peak)
+            self._sensor.central_std = float(self._central_std)
+            self._sensor.binning_method = str(self._binning_method)
+            self._sensor.normalizing_method = str(self._normalizing_method)
+        except Exception:
+            pass
+
+    def set_render_model_params(
+        self,
+        *,
+        gau_noise_param: Optional[float] = None,
+        ray_noise_param: Optional[float] = None,
+        attenuation: Optional[float] = None,
+        intensity_offset: Optional[float] = None,
+        intensity_gain: Optional[float] = None,
+        central_peak: Optional[float] = None,
+        central_std: Optional[float] = None,
+        binning_method: Optional[str] = None,
+        normalizing_method: Optional[str] = None,
+    ) -> None:
+        if gau_noise_param is not None:
+            self._gau_noise_param = float(gau_noise_param)
+        if ray_noise_param is not None:
+            self._ray_noise_param = float(ray_noise_param)
+        if attenuation is not None:
+            self._attenuation = float(attenuation)
+        if intensity_offset is not None:
+            self._intensity_offset = float(intensity_offset)
+        if intensity_gain is not None:
+            self._intensity_gain = float(intensity_gain)
+        if central_peak is not None:
+            self._central_peak = float(central_peak)
+        if central_std is not None:
+            self._central_std = float(central_std)
+        if binning_method is not None:
+            self._binning_method = str(binning_method)
+        if normalizing_method is not None:
+            self._normalizing_method = str(normalizing_method)
+        self._sync_sensor_render_params()
+
+    def get_params_as_dict(self) -> dict:
+        """Retorna todos os parâmetros de renderização como dict serializável."""
+        return {
+            "attenuation": self._attenuation,
+            "gau_noise_param": self._gau_noise_param,
+            "ray_noise_param": self._ray_noise_param,
+            "intensity_offset": self._intensity_offset,
+            "intensity_gain": self._intensity_gain,
+            "central_peak": self._central_peak,
+            "central_std": self._central_std,
+            "binning_method": self._binning_method,
+            "normalizing_method": self._normalizing_method,
+        }
+
+    def load_params_from_yaml(self, path: str) -> bool:
+        """Carrega parâmetros de renderização de um arquivo YAML."""
+        try:
+            import yaml
+
+            with open(path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            if not isinstance(data, dict):
+                return False
+            params = data.get("sonar", {}).get("render", data)
+            if not isinstance(params, dict):
+                return False
+            self.set_render_model_params(
+                attenuation=params.get("attenuation"),
+                gau_noise_param=params.get("gau_noise_param"),
+                ray_noise_param=params.get("ray_noise_param"),
+                intensity_offset=params.get("intensity_offset"),
+                intensity_gain=params.get("intensity_gain"),
+                central_peak=params.get("central_peak"),
+                central_std=params.get("central_std"),
+                binning_method=params.get("binning_method"),
+                normalizing_method=params.get("normalizing_method"),
+            )
+            return True
+        except Exception:
+            return False
+
+    def save_params_to_yaml(self, path: str) -> bool:
+        """Salva os parâmetros atuais em um arquivo YAML."""
+        try:
+            import yaml
+
+            data = {"sonar": {"render": self.get_params_as_dict()}}
+            with open(path, "w", encoding="utf-8") as f:
+                yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
+            return True
+        except Exception:
+            return False
+
+    def get_raw_intensity_map(self) -> Optional[np.ndarray]:
+        """Retorna a matriz float32 (N_range x N_azi) do último frame."""
+        if self._sensor is None:
+            return None
+        try:
+            sonar_map_np = self._sensor.sonar_map.numpy()
+            return np.ascontiguousarray(sonar_map_np[:, :, 2], dtype=np.float32)
+        except Exception:
+            return None
+
+    def get_sensor_metadata(self) -> dict:
+        """Retorna um dict serializável com os parâmetros físicos do sensor."""
+        s = self._sensor
+        if s is None:
+            return {}
+        try:
+            n_range = int(s.r.shape[0])
+            n_azi = int(s.r.shape[1])
+            azi_min = float(np.rad2deg(float(s.min_azi)))
+            azi_max = azi_min + float(s.hori_fov)
+        except Exception:
+            n_range, n_azi = 0, 0
+            azi_min, azi_max = 25.0, 155.0
+        return {
+            "min_range": getattr(s, "min_range", 0.2),
+            "max_range": getattr(s, "max_range", 10.0),
+            "range_res": getattr(s, "range_res", 0.005),
+            "hori_fov": getattr(s, "hori_fov", 130.0),
+            "angular_res": getattr(s, "angular_res", 0.25),
+            "n_range": n_range,
+            "n_azi": n_azi,
+            "azi_min_deg": azi_min,
+            "azi_max_deg": azi_max,
+        }
 
     def update_state(self):
-        if self._initialized:
+        if self._initialized and (self._rgb_enabled or self._pointcloud_enabled):
+            sonar_frame_ready = False
             try:
                 # make_sonar_data() computes the acoustic response map from raw
                 # pointcloud, normals and semantic reflectivity.
-                self._sensor.make_sonar_data()
+                self._sync_sensor_render_params()
+                self._sensor.make_sonar_data(
+                    attenuation=float(self._attenuation),
+                    gau_noise_param=float(self._gau_noise_param),
+                    ray_noise_param=float(self._ray_noise_param),
+                    intensity_offset=float(self._intensity_offset),
+                    intensity_gain=float(self._intensity_gain),
+                    central_peak=float(self._central_peak),
+                    central_std=float(self._central_std),
+                    binning_method=str(self._binning_method),
+                    normalizing_method=str(self._normalizing_method),
+                )
                 self.status.set_value("sonar_frame")
+                sonar_frame_ready = True
+                self._data_generation += 1
+                if self._preview_enabled and self._rgb_enabled:
+                    self._preview_backend_status = "cuda_sensor"
             except Exception as exc:
                 self.status.set_value(f"sonar_error:{type(exc).__name__}")
+                self.sonar_intensity.set_value(None)
+                self.rgb_image.set_value(None)
+                if self._preview_enabled:
+                    self._preview_error_latched = True
+                    self._preview_backend_status = f"error:{type(exc).__name__}"
+                if self._preview_enabled and not self._pointcloud_enabled:
+                    self._rgb_enabled = False
 
-            if self._rgb_enabled:
+            if sonar_frame_ready and self._rgb_enabled:
+                try:
+                    intensity_f32 = self.get_raw_intensity_map()
+                    self.sonar_intensity.set_value(intensity_f32)
+                except Exception:
+                    pass
+
+            if sonar_frame_ready and self._rgb_enabled:
                 try:
                     # The backend returns a rendered sonar image (polar acoustic
                     # intensity map), which we expose as an RGB-like preview.
@@ -1215,7 +1780,7 @@ class OceanSimImagingSonar(Sensor):
                 except Exception:
                     pass
 
-            if self._pointcloud_enabled:
+            if sonar_frame_ready and self._pointcloud_enabled:
                 try:
                     pcl = self._sensor.scan_data.get("pcl")
                 except Exception:
@@ -1224,6 +1789,9 @@ class OceanSimImagingSonar(Sensor):
                 # annotator, not the final binned sonar image/map.
                 pcl_np = _sanitize_pointcloud_array(_to_numpy_array(pcl))
                 self.pointcloud.set_value(pcl_np)
+        elif not self._rgb_enabled:
+            self.sonar_intensity.set_value(None)
+            self.rgb_image.set_value(None)
 
         try:
             position, orientation = self._xform_prim.get_world_pose()
@@ -1234,6 +1802,263 @@ class OceanSimImagingSonar(Sensor):
             self.orientation.set_value(None)
 
         super().update_state()
+
+    # ------------------------------------------------------------------
+    # Preview rendering helpers
+    # ------------------------------------------------------------------
+
+    def render_polar_preview(self, size: int = 400) -> Optional[np.ndarray]:
+        """Converte a imagem de sonar (grade r×azi) para uma imagem Cartesiana (setor fan).
+
+        O sonar OceanSim armazena os dados num grid 2D (N_range × N_azi) onde
+        cada célula [i, j] representa (range_i, azimute_j). Exibir esse grid
+        diretamente como imagem retangular produz distorção porque o espaço polar
+        não é linear em X,Y.
+
+        Este método projeta cada pixel do grid polar nas coordenadas Cartesianas
+        correspondentes, gerando uma imagem em visão de cima (bird's-eye) no
+        formato RGBA numpy compatível com ``omni.ui.ByteImageProvider``.
+
+        Args:
+            size: Lado em pixels da imagem de saída quadrada (padrão 400).
+
+        Returns:
+            np.ndarray RGBA (size, size, 4) uint8, ou None se não houver dados.
+        """
+        raw = self.rgb_image.get_value()
+        if raw is None:
+            return None
+        try:
+            src = np.asarray(raw, dtype=np.uint8)
+            if src.ndim == 3 and src.shape[2] >= 3:
+                gray = src[..., 0]  # sonar é grayscale nos 3 canais iguais
+            elif src.ndim == 2:
+                gray = src
+            else:
+                return None
+
+            n_range, n_azi = gray.shape
+            # Reconstrução dos vetores r e azi a partir dos parâmetros do sensor
+            try:
+                min_r = float(self._sensor.min_range)
+                max_r = float(self._sensor.max_range)
+                range_res = float(self._sensor.range_res)
+                hori_fov = float(self._sensor.hori_fov)
+                ang_res = float(self._sensor.angular_res)
+            except Exception:
+                # Fallback genérico se o sensor não estiver disponível
+                min_r, max_r, range_res = 0.2, 10.0, (10.0 - 0.2) / max(n_range, 1)
+                hori_fov, ang_res = 130.0, hori_fov / max(n_azi, 1)
+
+            azi_deg_min = 90.0 - hori_fov / 2.0
+            azi_deg_max = 90.0 + hori_fov / 2.0
+            _proj_key = (n_range, n_azi, size, float(min_r), float(max_r), float(hori_fov))
+            _cached_proj = self._polar_proj_cache.get(_proj_key)
+            if _cached_proj is None:
+                r_vals = np.linspace(min_r, max_r, n_range, dtype=np.float32)
+                azi_vals = np.deg2rad(
+                    np.linspace(azi_deg_max, azi_deg_min, n_azi, dtype=np.float32)
+                )
+                r_grid, azi_grid = np.meshgrid(r_vals, azi_vals, indexing='ij')
+                x_cart = r_grid * np.cos(azi_grid)
+                y_cart = r_grid * np.sin(azi_grid)
+                lat_half = float(max_r) * np.sin(np.deg2rad(hori_fov / 2.0))
+                lat_min = -lat_half
+                lat_max = lat_half
+                fwd_max = float(max_r)
+                col_f = (x_cart - lat_min) / max(lat_max - lat_min, 1e-6) * (size - 1)
+                row_f = (1.0 - np.clip(y_cart, 0.0, fwd_max) / max(fwd_max, 1e-6)) * (size - 1)
+                _cached_proj = (
+                    np.clip(row_f.astype(np.int32), 0, size - 1).ravel(),
+                    np.clip(col_f.astype(np.int32), 0, size - 1).ravel(),
+                    lat_min,
+                    lat_max,
+                    fwd_max,
+                )
+                self._polar_proj_cache[_proj_key] = _cached_proj
+            rows, cols, lat_min, lat_max, fwd_max = _cached_proj
+
+            out = np.zeros((size, size, 4), dtype=np.uint8)
+            out[:, :, 3] = 255
+            out_intensity = np.zeros((size, size), dtype=np.uint8)
+            intensity = gray.ravel()
+            colored = _apply_sonar_acoustic_colormap(gray).reshape(-1, 3)
+            # Pintar mais claro sobre mais escuro para preservar retornos fortes
+            current = out_intensity[rows, cols]
+            mask = intensity > current
+            out_intensity[rows[mask], cols[mask]] = intensity[mask]
+            out[rows[mask], cols[mask], :3] = colored[mask]
+
+            try:
+                import cv2
+                _ov_key = (size, float(min_r), float(max_r), float(hori_fov))
+                _cached_ov = self._overlay_cache.get(_ov_key)
+                if _cached_ov is None:
+                    overlay_rgb = np.zeros((size, size, 3), dtype=np.uint8)
+                    overlay_alpha = np.zeros((size, size), dtype=np.uint8)
+                    overlay_color = (255, 255, 255)
+                    overlay_alpha_value = 100
+                    fan_angles_deg = np.linspace(azi_deg_min, azi_deg_max, 256, dtype=np.float32)
+
+                    def _to_cv_points(radius_m: float, angles_deg: np.ndarray) -> np.ndarray:
+                        angles_rad = np.deg2rad(angles_deg)
+                        x_vals = radius_m * np.cos(angles_rad)
+                        y_vals = radius_m * np.sin(angles_rad)
+                        cols_local = np.clip(
+                            ((x_vals - lat_min) / max(lat_max - lat_min, 1e-6) * (size - 1))
+                            .round().astype(np.int32),
+                            0,
+                            size - 1,
+                        )
+                        rows_local = np.clip(
+                            ((1.0 - np.clip(y_vals, 0.0, fwd_max) / max(fwd_max, 1e-6)) * (size - 1))
+                            .round().astype(np.int32),
+                            0,
+                            size - 1,
+                        )
+                        return np.stack([cols_local, rows_local], axis=1).reshape(-1, 1, 2)
+
+                    max_range_mark = float(max_r)
+                    default_marks = [2.0, 4.0, 6.0, 8.0, 10.0]
+                    arc_ranges = [mark for mark in default_marks if mark < max_range_mark]
+                    if not arc_ranges and max_range_mark > 0.0:
+                        arc_ranges = list(
+                            np.linspace(max_range_mark * 0.2, max_range_mark, 5, dtype=np.float32)
+                        )
+                    elif max_range_mark > 0.0 and max_range_mark not in arc_ranges:
+                        arc_ranges.append(max_range_mark)
+
+                    for radius_m in arc_ranges:
+                        pts = _to_cv_points(float(radius_m), fan_angles_deg)
+                        if pts.shape[0] < 2:
+                            continue
+                        cv2.polylines(overlay_rgb, [pts], False, overlay_color, 1, lineType=cv2.LINE_AA)
+                        cv2.polylines(
+                            overlay_alpha,
+                            [pts],
+                            False,
+                            overlay_alpha_value,
+                            1,
+                            lineType=cv2.LINE_AA,
+                        )
+                        label_idx = int(np.argmin(pts[:, 0, 1]))
+                        label_x = int(np.clip(pts[label_idx, 0, 0] + 4, 0, size - 24))
+                        label_y = int(np.clip(pts[label_idx, 0, 1] - 4, 10, size - 4))
+                        label = f"{int(round(float(radius_m)))}m"
+                        cv2.putText(
+                            overlay_rgb,
+                            label,
+                            (label_x, label_y),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.35,
+                            overlay_color,
+                            1,
+                            lineType=cv2.LINE_AA,
+                        )
+                        cv2.putText(
+                            overlay_alpha,
+                            label,
+                            (label_x, label_y),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.35,
+                            overlay_alpha_value,
+                            1,
+                            lineType=cv2.LINE_AA,
+                        )
+
+                    center_angle_deg = 90.0
+                    for offset_deg in (15.0, 30.0, 45.0, 60.0):
+                        for sign in (-1.0, 1.0):
+                            angle_deg = center_angle_deg + sign * offset_deg
+                            if angle_deg < azi_deg_min or angle_deg > azi_deg_max:
+                                continue
+                            angle_rad = math.radians(angle_deg)
+                            start_x = 0.0
+                            start_y = 0.0
+                            end_x = float(max_r) * math.cos(angle_rad)
+                            end_y = float(max_r) * math.sin(angle_rad)
+                            start_col = int(
+                                np.clip(
+                                    round((start_x - lat_min) / max(lat_max - lat_min, 1e-6) * (size - 1)),
+                                    0,
+                                    size - 1,
+                                )
+                            )
+                            start_row = int(
+                                np.clip(
+                                    round((1.0 - start_y / max(fwd_max, 1e-6)) * (size - 1)),
+                                    0,
+                                    size - 1,
+                                )
+                            )
+                            end_col = int(
+                                np.clip(
+                                    round((end_x - lat_min) / max(lat_max - lat_min, 1e-6) * (size - 1)),
+                                    0,
+                                    size - 1,
+                                )
+                            )
+                            end_row = int(
+                                np.clip(
+                                    round((1.0 - end_y / max(fwd_max, 1e-6)) * (size - 1)),
+                                    0,
+                                    size - 1,
+                                )
+                            )
+                            start_xy = (start_col, start_row)
+                            end_xy = (end_col, end_row)
+                            cv2.line(overlay_rgb, start_xy, end_xy, overlay_color, 1, lineType=cv2.LINE_AA)
+                            cv2.line(
+                                overlay_alpha,
+                                start_xy,
+                                end_xy,
+                                overlay_alpha_value,
+                                1,
+                                lineType=cv2.LINE_AA,
+                            )
+                    _cached_ov = (overlay_rgb.copy(), overlay_alpha.copy())
+                    self._overlay_cache[_ov_key] = _cached_ov
+
+                overlay_rgb, overlay_alpha = _cached_ov
+                out = _blend_overlay_rgba(out, overlay_rgb, overlay_alpha)
+            except Exception:
+                pass
+            return out
+        except Exception:
+            return None
+
+    def render_planar_preview(self, width: int = 400, height: int = 300) -> Optional[np.ndarray]:
+        """Retorna a imagem polar retangular (r×azi) redimensionada como RGBA.
+
+        Esta é a representação direta do buffer do sonar — útil para depuração
+        e para ver o conteúdo bruto da saída do ``make_sonar_image()``.
+
+        Args:
+            width: Largura da imagem de saída em pixels.
+            height: Altura da imagem de saída em pixels.
+
+        Returns:
+            np.ndarray RGBA (height, width, 4) uint8, ou None se não houver dados.
+        """
+        raw = self.rgb_image.get_value()
+        if raw is None:
+            return None
+        try:
+            import cv2
+            src = np.asarray(raw, dtype=np.uint8)
+            if src.ndim == 3:
+                gray = src[..., 0]
+            else:
+                gray = src
+            resized = cv2.resize(gray, (width, height), interpolation=cv2.INTER_LINEAR)
+            colored = _apply_sonar_acoustic_colormap(resized)
+            out = np.concatenate(
+                [colored, np.full((height, width, 1), 255, dtype=np.uint8)],
+                axis=-1,
+            )
+            return out
+        except Exception:
+            return None
 
 
 class OceanSimDVL(Sensor):

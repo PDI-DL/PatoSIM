@@ -432,6 +432,29 @@ The state_dict has the following schema
 }
 ```
 
+### Pose convention
+
+- **Frame**: all `*.position` / `*.orientation` buffers (robot and every
+  sensor: front_camera, front_stereo.left/right, sonar, lidar, dvl,
+  barometer) are recorded in **world frame**, in meters, read from Isaac
+  Sim's `get_world_pose()` every physics step.
+- **Quaternion order**: **scalar-first, `[w, x, y, z]`** — the convention
+  used throughout `isaacsim.core` (`euler_angles_to_quat`,
+  `XFormPrim.get_world_pose()`), not the `[x, y, z, w]` order used by some
+  other libraries (e.g. ROS, scipy's default). Convert explicitly if your
+  downstream tooling expects `xyzw`.
+- **Relative (robot-to-sensor) extrinsics**: recorded once per recording in
+  `sensors_extrinsics.json` (next to `config.json`/`stage.usd`), since every
+  sensor is rigidly mounted and its body-frame offset is constant for the
+  whole recording. Combine with the per-frame `robot.position`/
+  `robot.orientation` to reconstruct `T_world_sensor` without relying only on
+  the (noisier, more expensive) per-frame world-frame sensor buffers, or use
+  those per-frame buffers directly as a cross-check.
+- **Underwater robot action vector**: for `OceanSimROVRobot`,
+  `robot.action` is `[6]` (body-frame `[Fx, Fy, Fz, Tx, Ty, Tz]`
+  force/torque), not the `[2]` (linear, angular) convention of the original
+  ground-robot `Robot` base class shown above.
+
 The ``Reader`` class abstracts away the details of reading the state dictionary
 from the recording.
 

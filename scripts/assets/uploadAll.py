@@ -1,7 +1,7 @@
 from pathlib import Path
 import os
 
-from huggingface_hub import HfApi
+from huggingface_hub import HfApi, list_repo_tree
 from huggingface_hub.utils import LocalTokenNotFoundError, RepositoryNotFoundError
 
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
@@ -67,6 +67,36 @@ def upload(api: HfApi, local_path: Path, repo_id: str, repo_type: str) -> bool:
 
     Returns True on success, or False if the upload raised an exception.
     """
+    protected_files = {".gitattributes", "README.md", "anotacoes.txt"}
+
+    try:
+        repo_contents = list_repo_tree(repo_id=repo_id, repo_type=repo_type)
+        
+        for item in repo_contents:
+            if item.path not in protected_files:
+                print(f"# Dynamically removing: {item.path}")
+                try:
+                    # Check if it's a folder or file to use the right delete method
+                    if item.type == "directory":
+                        api.delete_folder(
+                            path_in_repo=item.path,
+                            repo_id=repo_id,
+                            repo_type=repo_type,
+                            commit_message=f"System: Cleaning {item.path} for reorganization"
+                        )
+                    else:
+                        api.delete_file(
+                            path_in_repo=item.path,
+                            repo_id=repo_id,
+                            repo_type=repo_type,
+                            commit_message=f"System: Removing old file {item.path}"
+                        )
+                except Exception as e:
+                    print(f"  - Could not delete {item.path}: {e}")
+
+    except Exception as exc:
+        print(f"### Error during dynamic cleanup ###\n{exc}")
+    
     print(f"# Starting upload to: {repo_id}")
     print(f"Source: {local_path}")
     try:

@@ -19,6 +19,7 @@ import PIL.Image
 import numpy as np
 import shutil
 import json
+from typing import Optional
 
 try:
     import open3d as o3d
@@ -49,15 +50,114 @@ class Writer:
         state_dict_path = os.path.join(dict_folder, f"{step:08d}.npy")
         np.save(state_dict_path, state_dict)
 
-    def write_state_dict_rgb(self, state_rgb: dict, step: int):
+    def write_state_dict_rgb(self, state_rgb: dict, step: int, sonar_ref=None):
+        has_sonar_rgb = False
         for name, value in state_rgb.items():
             if value is not None:
+                if "sonar" in str(name).lower():
+                    has_sonar_rgb = True
                 image_folder = os.path.join(self.path, "state", "rgb", name)
                 if not os.path.exists(image_folder):
                     os.makedirs(image_folder)
                 image_path = os.path.join(image_folder, f"{step:08d}.jpg")
                 image = PIL.Image.fromarray(value)
                 image.save(image_path)
+        if sonar_ref is None or not has_sonar_rgb:
+            return
+        try:
+            preview = sonar_ref.render_polar_preview(size=512)
+        except Exception:
+            preview = None
+        if preview is None:
+            return
+        preview_np = np.asarray(preview, dtype=np.uint8)
+        output_folder = os.path.join(self.path, "state", "rgb", "sonar_polar")
+        if not os.path.exists(output_folder):
+            os.makedirs(output_folder)
+        output_path = os.path.join(output_folder, f"{step:08d}.jpg")
+        try:
+            import cv2
+
+            preview_bgr = cv2.cvtColor(preview_np, cv2.COLOR_RGBA2BGR)
+            ok, encoded = cv2.imencode(".jpg", preview_bgr)
+            if ok:
+                with open(output_path, "wb") as handle:
+                    handle.write(encoded.tobytes())
+                return
+        except Exception:
+            pass
+        PIL.Image.fromarray(preview_np[..., :3]).save(output_path)
+
+    def write_sonar_data_package(
+        self,
+        intensity: Optional[np.ndarray],
+        metadata: dict,
+        step: int,
+        *,
+        save_npy: bool = True,
+        save_png16: bool = True,
+        save_polar_png: bool = False,
+        sonar_ref=None,
+        polar_size: int = 512,
+    ) -> None:
+        """Grava pacote de dados do sonar em múltiplos formatos."""
+        base = os.path.join(self.path, "state", "sonar")
+
+        if intensity is not None:
+            arr = np.asarray(intensity, dtype=np.float32)
+
+            if save_npy:
+                try:
+                    folder = os.path.join(base, "raw")
+                    os.makedirs(folder, exist_ok=True)
+                    np.save(os.path.join(folder, f"{step:08d}.npy"), arr)
+                except Exception:
+                    pass
+
+            if save_png16:
+                try:
+                    folder = os.path.join(base, "png16")
+                    os.makedirs(folder, exist_ok=True)
+                    u16 = np.clip(arr * 65535.0, 0, 65535).astype(np.uint16)
+                    img = PIL.Image.fromarray(u16, mode="I;16")
+                    img.save(os.path.join(folder, f"{step:08d}.png"))
+                except Exception:
+                    pass
+
+        if save_polar_png and sonar_ref is not None:
+            try:
+                polar_rgba = sonar_ref.render_polar_preview(size=polar_size)
+                if polar_rgba is not None:
+                    folder = os.path.join(base, "polar_png")
+                    os.makedirs(folder, exist_ok=True)
+                    polar_arr = np.asarray(polar_rgba, dtype=np.uint8)
+                    img = PIL.Image.fromarray(polar_arr, mode="RGBA")
+                    img.save(os.path.join(folder, f"{step:08d}.png"))
+            except Exception:
+                pass
+
+        if metadata:
+            try:
+                folder = os.path.join(base, "meta")
+                os.makedirs(folder, exist_ok=True)
+                meta_path = os.path.join(folder, f"{step:08d}.json")
+
+                def _to_serializable(value):
+                    if isinstance(value, np.ndarray):
+                        return value.tolist()
+                    if isinstance(value, dict):
+                        return {str(k): _to_serializable(v) for k, v in value.items()}
+                    if isinstance(value, (list, tuple)):
+                        return [_to_serializable(v) for v in value]
+                    if isinstance(value, (np.integer, np.floating)):
+                        return value.item()
+                    return value
+
+                safe_meta = {k: _to_serializable(v) for k, v in metadata.items()}
+                with open(meta_path, "w", encoding="utf-8") as f:
+                    json.dump(safe_meta, f, indent=2)
+            except Exception:
+                pass
 
     def write_state_dict_segmentation(self, state_segmentation: dict, step: int):
         for name, value in state_segmentation.items():
@@ -309,10 +409,31 @@ class Writer:
         with open(os.path.join(self.path, "config.json"), 'w') as f:
             f.write(config.to_json())
 
+    def write_sensor_extrinsics(self, extrinsics: dict):
+        """Write the static, per-recording robot-to-sensor mount transforms.
+
+        Complements the per-frame world-frame poses in state/common -- see
+        Robot.get_sensor_extrinsics() for why this is recorded separately.
+        """
+        if not os.path.exists(self.path):
+            os.makedirs(self.path)
+        with open(os.path.join(self.path, "sensors_extrinsics.json"), "w", encoding="utf-8") as f:
+            json.dump(extrinsics, f, indent=2)
+
     def write_occupancy_map(self, occupancy_map: OccupancyMap):
         if not os.path.exists(self.path):
             os.makedirs(self.path)
         occupancy_map.save_ros(os.path.join(self.path, "occupancy_map"))
+
+    def write_occupancy_map_stack(self, occupancy_map_stack) -> None:
+        """Persist the optional multi-band 3D occupancy map stack (see
+        OccupancyMapStack), when the scenario was built with
+        occupancy_map_mode="3d_stack". No-op if None."""
+        if occupancy_map_stack is None:
+            return
+        if not os.path.exists(self.path):
+            os.makedirs(self.path)
+        occupancy_map_stack.save(os.path.join(self.path, "occupancy_map_3d"))
 
     def copy_init(self, other_path: str, overwrite: bool = False, verbose: bool = False):
         """Copy initial artifacts (stage/config/occupancy_map) from another recording.

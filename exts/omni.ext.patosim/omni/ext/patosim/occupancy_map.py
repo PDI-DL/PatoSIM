@@ -16,6 +16,7 @@
 
 import PIL.Image
 import os
+import json
 import typing as tp
 import numpy as np
 import enum
@@ -504,3 +505,80 @@ free_thresh: {free_thresh}
         y_px = int(pixel[0, 1])
         freespace = self.freespace_mask()
         return bool(freespace[y_px, x_px])
+
+
+class OccupancyMapStack:
+    """A stack of 2D OccupancyMap slices covering different depth (Z) bands.
+
+    This is an additive, backward-compatible complement to the single-slice
+    OccupancyMap used by the existing ROV scenarios -- it does not replace or
+    modify OccupancyMap, and existing scenarios keep using a single
+    OccupancyMap exactly as before. It exists so depth-aware navigation logic
+    can query which band covers a given Z, and whether there is vertical
+    clearance to move between adjacent bands, as a cheap alternative to a
+    full 3D voxel occupancy grid. See
+    docs/plano_upgrade_simulacao_subaquatica.md Fase 4a/4b for the rationale
+    and what remains to wire this into the path-following control loop.
+    """
+
+    MANIFEST_FILENAME = "manifest.json"
+
+    def __init__(self, bands: tp.List["OccupancyMap"], z_centers: tp.List[float], band_half_height: float):
+        if len(bands) != len(z_centers):
+            raise ValueError("OccupancyMapStack: bands and z_centers must have the same length")
+        if len(bands) == 0:
+            raise ValueError("OccupancyMapStack: at least one band is required")
+        self.bands = list(bands)
+        self.z_centers = [float(z) for z in z_centers]
+        self.band_half_height = float(band_half_height)
+
+    def band_index_for_z(self, z: float) -> int:
+        """Return the index of the band whose center is closest to z."""
+        diffs = [abs(float(z) - zc) for zc in self.z_centers]
+        return int(np.argmin(diffs))
+
+    def band_for_z(self, z: float) -> "OccupancyMap":
+        return self.bands[self.band_index_for_z(z)]
+
+    def has_vertical_clearance(self, x: float, y: float, z: float, num_neighbor_bands: int = 1) -> bool:
+        """Check freespace at (x, y) in the band nearest z plus
+        `num_neighbor_bands` bands above/below it -- a cheap proxy for "is it
+        safe to ascend/descend here" without a full 3D voxel grid.
+        """
+        idx = self.band_index_for_z(z)
+        lo = max(0, idx - int(num_neighbor_bands))
+        hi = min(len(self.bands) - 1, idx + int(num_neighbor_bands))
+        point = Point2d(x=float(x), y=float(y))
+        for i in range(lo, hi + 1):
+            if not self.bands[i].check_world_point_in_freespace(point):
+                return False
+        return True
+
+    def save(self, path: str):
+        """Save each band as its own ROS-format occupancy map under
+        <path>/band_<i>/, plus a manifest.json describing each band's
+        nominal Z (the ROS map.yaml format is inherently 2D, so a manifest
+        is needed to carry the Z axis)."""
+        if not os.path.exists(path):
+            os.makedirs(path)
+        manifest = {"band_half_height_m": self.band_half_height, "bands": []}
+        for i, (band, z) in enumerate(zip(self.bands, self.z_centers)):
+            band_subdir = f"band_{i:02d}"
+            band.save_ros(os.path.join(path, band_subdir))
+            manifest["bands"].append({"index": i, "z_center_m": z, "path": band_subdir})
+        with open(os.path.join(path, self.MANIFEST_FILENAME), "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+
+    @staticmethod
+    def load(path: str) -> "OccupancyMapStack":
+        with open(os.path.join(path, OccupancyMapStack.MANIFEST_FILENAME), "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+        bands = []
+        z_centers = []
+        for entry in manifest["bands"]:
+            yaml_path = os.path.join(path, entry["path"], OccupancyMap.ROS_YAML_FILENAME)
+            bands.append(OccupancyMap.from_ros_yaml(yaml_path))
+            z_centers.append(float(entry["z_center_m"]))
+        return OccupancyMapStack(
+            bands=bands, z_centers=z_centers, band_half_height=float(manifest["band_half_height_m"])
+        )

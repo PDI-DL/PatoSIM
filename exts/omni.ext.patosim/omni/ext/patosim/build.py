@@ -24,7 +24,7 @@ import isaacsim.core.api.objects as objects
 from isaacsim.core.prims import SingleGeometryPrim
 from isaacsim.core.utils.stage import add_reference_to_stage
 from isaacsim.core.utils.semantics import add_update_semantics
-from pxr import Usd, UsdGeom
+from pxr import Gf, Usd, UsdGeom
 
 
 from omni.ext.patosim.occupancy_map import OccupancyMap
@@ -34,10 +34,20 @@ from omni.ext.patosim.scenarios import Scenario, SCENARIOS
 from omni.ext.patosim.robots import ROBOTS
 from omni.ext.patosim.reader import Reader
 from omni.ext.patosim.utils.stage_utils import stage_get_prim
+from omni.ext.patosim.unit_scale_math import unit_scale_ratio
 
 
 DATASET_OBJECT_ALLOWED_FOLDERS = ("plataforms", "platforms", "statues_temples", "scenario")
 DATASET_OBJECT_ASSET_ROOT = Path(__file__).resolve().parents[5] / "assets" / "models"
+
+# Range envelopes (min_m, max_m) modelled on real subsea laser scanners (Voyis
+# Insight family) rather than a generic terrestrial lidar's long default
+# range. See docs/plano_upgrade_simulacao_subaquatica.md §4.
+LIDAR_RANGE_PROFILES = {
+    "insight_nano": (0.13, 2.5),
+    "insight_micro": (0.13, 7.0),
+    "insight_pro": (0.5, 15.0),
+}
 
 
 def _validate_scene_usd_path(scene_path: str) -> str:
@@ -82,6 +92,64 @@ def _make_underwater_placeholder_occupancy_map() -> OccupancyMap:
         resolution=resolution,
         origin=origin,
     )
+
+
+async def _make_underwater_occupancy_map_async(
+    scene_prim_path: str,
+    z_nominal: float = -2.0,
+    slice_half: float = 3.0,
+    cell_size: float = 0.25,
+) -> OccupancyMap:
+    try:
+        from omni.ext.patosim.utils.occupancy_map_utils import occupancy_map_generate_from_prim_async as _gen
+        omap = await _gen(
+            scene_prim_path,
+            cell_size=cell_size,
+            z_min=z_nominal - slice_half,
+            z_max=z_nominal + slice_half,
+        )
+        if getattr(omap, "data", None) is not None and omap.data.size > 0:
+            return omap
+    except Exception as exc:
+        import warnings
+        warnings.warn(
+            f"_make_underwater_occupancy_map_async: failed to generate scene occupancy map "
+            f"(z={z_nominal:.1f}m) — falling back to empty map. Reason: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    return _make_underwater_placeholder_occupancy_map()
+
+
+async def _make_underwater_occupancy_map_stack_async(
+    scene_prim_path: str,
+    z_center: float,
+    total_half_range: float,
+    num_bands: int,
+    cell_size: float = 0.25,
+) -> "OccupancyMapStack":
+    """Generate a stack of 2D occupancy map slices covering
+    [z_center - total_half_range, z_center + total_half_range], split into
+    `num_bands` equal bands. Additive complement to the single-band
+    _make_underwater_occupancy_map_async -- see OccupancyMapStack docstring.
+    """
+    from omni.ext.patosim.occupancy_map import OccupancyMapStack
+
+    num_bands = max(1, int(num_bands))
+    band_half_height = float(total_half_range) / num_bands
+    bands = []
+    z_centers = []
+    for i in range(num_bands):
+        band_z = float(z_center) - float(total_half_range) + band_half_height * (2 * i + 1)
+        band_map = await _make_underwater_occupancy_map_async(
+            scene_prim_path,
+            z_nominal=band_z,
+            slice_half=band_half_height,
+            cell_size=cell_size,
+        )
+        bands.append(band_map)
+        z_centers.append(band_z)
+    return OccupancyMapStack(bands=bands, z_centers=z_centers, band_half_height=band_half_height)
 
 
 def _enable_scene_collisions(scene_root_path: str) -> int:
@@ -321,6 +389,30 @@ def _mark_dataset_object_for_annotations(root_prim_path: str, asset_entry: dict,
     return applied
 
 
+def _compute_asset_unit_scale(asset_path: str, target_stage) -> float:
+    """Compensate for a referenced asset authored in different USD stage units.
+
+    ``add_reference_to_stage`` does not auto-rescale geometry when the
+    referenced asset's own ``metersPerUnit`` differs from the composed
+    stage's (e.g. a photogrammetry/scan export authored in centimeters
+    referenced into a stage authored in meters) -- USD leaves that scale
+    correction to the caller. Without this, assets whose source layer used a
+    different unit convention show up drastically over- or under-scaled.
+    """
+    try:
+        target_mpu = float(UsdGeom.GetStageMetersPerUnit(target_stage))
+    except Exception:
+        target_mpu = 1.0
+    try:
+        asset_stage = Usd.Stage.Open(asset_path)
+        if asset_stage is None:
+            return 1.0
+        source_mpu = float(UsdGeom.GetStageMetersPerUnit(asset_stage))
+    except Exception:
+        return 1.0
+    return unit_scale_ratio(source_mpu, target_mpu)
+
+
 def _insert_dataset_object_into_scene(
     scene_root_path: str,
     dataset_object_usd: str,
@@ -351,12 +443,37 @@ def _insert_dataset_object_into_scene(
         and hasattr(cfg_pos, "__len__")
         and len(cfg_pos) == 3
         and all(math.isfinite(float(v)) for v in cfg_pos)
+        and any(float(v) != 0.0 for v in cfg_pos)
     ):
         position = np.array([float(v) for v in cfg_pos], dtype=np.float32)
     else:
-        position = center
+        # Use XY from scene center; Z from operating depth so the object
+        # is placed at the ROV's working level, not at scene bbox center.
+        z_op = float(getattr(config, "rov_operating_depth", float(center[2])))
+        position = np.array([center[0], center[1], z_op], dtype=np.float32)
 
-    _set_prim_world_translation(prim_path, position)
+    # Apply a full transform: translate + rotate (XYZ Euler, degrees) + uniform scale.
+    stage = get_stage()
+    unit_scale = _compute_asset_unit_scale(asset_entry["path"], stage)
+    scale = float(getattr(config, "dataset_object_scale", 1.0)) * unit_scale
+    rot_cfg = getattr(config, "dataset_object_rotation_euler_deg", None)
+    if rot_cfg is not None and hasattr(rot_cfg, "__len__") and len(rot_cfg) == 3:
+        rotation_deg = tuple(float(v) for v in rot_cfg)
+    else:
+        rotation_deg = (0.0, 0.0, 0.0)
+
+    prim = stage_get_prim(stage, prim_path)
+    if prim is not None and prim.IsValid():
+        xformable = UsdGeom.Xformable(prim)
+        xformable.ClearXformOpOrder()
+        xformable.AddTranslateOp().Set(
+            Gf.Vec3d(float(position[0]), float(position[1]), float(position[2]))
+        )
+        xformable.AddRotateXYZOp().Set(
+            Gf.Vec3f(rotation_deg[0], rotation_deg[1], rotation_deg[2])
+        )
+        xformable.AddScaleOp().Set(Gf.Vec3f(scale, scale, scale))
+
     _enable_collisions_for_subtree(prim_path)
     _mark_dataset_object_for_annotations(prim_path, asset_entry, reflectivity=float(reflectivity))
     return prim_path
@@ -429,12 +546,31 @@ async def build_scenario_from_config(config: Config):
         robot_type.enable_dvl_debug_lines = bool(getattr(config, "enable_dvl_debug_lines", False))
         robot_type.teleop_linear_speed_gain = float(getattr(config, "rov_linear_speed", 0.75))
         robot_type.teleop_angular_speed_gain = float(getattr(config, "rov_angular_speed", 0.9))
+        robot_type.rov_gamepad_linear_gain = float(getattr(config, "rov_gamepad_linear_gain", 1.0))
+        robot_type.rov_gamepad_vertical_gain = float(getattr(config, "rov_gamepad_vertical_gain", 1.0))
+        robot_type.rov_gamepad_angular_gain = float(getattr(config, "rov_gamepad_angular_gain", 1.0))
+        robot_type.rov_gamepad_deadzone = float(getattr(config, "rov_gamepad_deadzone", 0.08))
+        robot_type.rov_gamepad_expo = float(getattr(config, "rov_gamepad_expo", 0.3))
+        robot_type.thruster_max_force_newtons = float(
+            getattr(config, "rov_thruster_max_force_newtons", 40.0)
+        )
         robot_type.enable_front_camera = bool(getattr(config, "enable_rov_front_camera", True))
         robot_type.enable_stereo_camera = bool(getattr(config, "enable_rov_stereo_camera", False))
         robot_type.enable_lidar = bool(getattr(config, "enable_rov_lidar", False))
         robot_type.enable_sonar = bool(getattr(config, "enable_rov_sonar", True))
+        robot_type.sonar_normalizing_method = str(
+            getattr(config, "sonar_normalizing_method", "raw") or "raw"
+        )
         robot_type.enable_dvl = bool(getattr(config, "enable_rov_dvl", True))
         robot_type.enable_barometer = bool(getattr(config, "enable_rov_barometer", True))
+
+        profile_name = str(getattr(config, "lidar_range_profile", "insight_micro") or "insight_micro")
+        profile_min, profile_max = LIDAR_RANGE_PROFILES.get(
+            profile_name, LIDAR_RANGE_PROFILES["insight_micro"]
+        )
+        robot_type.lidar_min_range = float(getattr(config, "lidar_min_range", profile_min) or profile_min)
+        robot_type.lidar_max_range = float(getattr(config, "lidar_max_range", profile_max) or profile_max)
+        robot_type.lidar_attenuation_coeff = float(getattr(config, "lidar_attenuation_coeff", 0.35))
     scene_usd = _validate_scene_usd_path(getattr(config, "scene_usd", ""))
     new_stage()
     world = new_world(physics_dt=robot_type.physics_dt)
@@ -469,7 +605,34 @@ async def build_scenario_from_config(config: Config):
             robot.set_pose_3d(safe_spawn, robot_type._initial_orientation())
         except Exception:
             pass
-        occupancy_map = _make_underwater_placeholder_occupancy_map()
+        z_nominal = float(getattr(config, "rov_operating_depth", -2.0))
+        occupancy_map = await _make_underwater_occupancy_map_async(
+            "/World/scene",
+            z_nominal=z_nominal,
+            slice_half=float(getattr(config, "occupancy_map_z_half", 3.0)),
+            cell_size=float(getattr(robot, "occupancy_map_cell_size", 0.25)),
+        )
+        occupancy_map_stack = None
+        if str(getattr(config, "occupancy_map_mode", "2d_band")) == "3d_stack":
+            num_bands = max(1, int(getattr(config, "occupancy_map_num_bands", 1)))
+            try:
+                occupancy_map_stack = await _make_underwater_occupancy_map_stack_async(
+                    "/World/scene",
+                    z_center=z_nominal,
+                    total_half_range=float(getattr(config, "occupancy_map_z_half", 3.0)),
+                    num_bands=num_bands,
+                    cell_size=float(getattr(robot, "occupancy_map_cell_size", 0.25)),
+                )
+            except Exception as exc:
+                import warnings
+                warnings.warn(
+                    f"build_scenario_from_config: failed to generate 3D occupancy map "
+                    f"stack ({num_bands} bands) -- falling back to single-band 2D map only. "
+                    f"Reason: {exc}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                occupancy_map_stack = None
     else:
         occupancy_map = await occupancy_map_generate_from_prim_async(
             "/World/scene",
@@ -498,4 +661,10 @@ async def build_scenario_from_config(config: Config):
                 scenario._waypoint_path = Path(waypoint_path)
             except Exception:
                 pass
+        # Optional additive attribute (see OccupancyMapStack): existing
+        # scenarios keep navigating off `scenario.occupancy_map` (single 2D
+        # band) exactly as before. This is available for depth-aware
+        # navigation logic to consult; wiring it into the actual
+        # path-following control loop is tracked as follow-up work (Fase 4b).
+        scenario.occupancy_map_stack = occupancy_map_stack
     return scenario
