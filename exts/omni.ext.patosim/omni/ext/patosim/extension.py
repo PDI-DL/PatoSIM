@@ -39,7 +39,7 @@ from omni.ext.patosim.robots import ROBOTS
 from omni.ext.patosim.config import Config
 from omni.ext.patosim.build import build_scenario_from_config, list_dataset_object_assets
 
-dev_scene_path = "/mnt/external/isaac/MOD_patosim/assets/models/worlds/Prototipo1/world.usd"
+dev_scene_path = "/home/pdi/Documentos/PatoSIM/assets/worlds/Prototipo1/world.usd"
 
 if "PATOSIM_DATA" in os.environ:
     DATA_DIR = os.environ['PATOSIM_DATA']

@@ -63,83 +63,79 @@ To get started with PatoSim follow the setup and usage instructions below!
 - [👏 Contributing](#-contributing)
 
 <a id="setup"></a>
-## 🛠️ Setup
+## 🛠 Setup & Installation
 
-Follow these steps to set up PatoSim
+Follow these steps to set up PatoSim and its C++ dependencies correctly, avoiding common path and environment isolation issues.
 
-### Step 1 - Install Isaac Sim
+### Step 1 — Locate or Install Isaac Sim
+Ensure you have **NVIDIA Isaac Sim 4.5.0** downloaded on your machine. 
+* Note down its absolute folder path (e.g., `~/isaacsim`, `~/Downloads/isaac-sim`, or `/opt/isaac-sim`).
 
-1. Download [Isaac Sim 4.5.0](https://docs.isaacsim.omniverse.nvidia.com/latest/installation/download.html)
+---
 
-    > We'll assume you use the zip file and extract it to ``~/isaacsim``.
+### Step 2 — Clone the Repository
+Clone the PatoSim repository to your preferred documents directory:
+```bash
+git clone <repo_url> PatoSim
+cd PatoSim
+```
+*Always keep your terminal session inside the repository root (`PatoSim/`) for the following steps.*
 
-### Step 2 - Clone this repository
+---
 
-1. Clone the repository
+### Step 3 — Link Isaac Sim to the Project
+The project uses a local `./app` directory shortcut to interact with Isaac Sim's internal Python tools. Run the linking script by passing the **exact folder path** where your Isaac Sim is located:
 
-    ```bash
-    git clone <repo_url> PatoSim
-    ```
+```bash
+# If Isaac Sim is inside your home folder (~/isaacsim)
+./link_app.sh --path ~/isaacsim
 
-> Remember the path you cloned to for the next step.
+# ALTERNATIVE: If it's located somewhere else, adjust accordingly:
+# ./link_app.sh --path ~/Documents/isaacsim
+```
 
-### Step 3 - Link Isaac Sim
+---
 
-Next, we'll call ``link_app.sh`` to link the Isaac Sim installation directory to the local ``app`` folder.
+### Step 4 — Install Core Python Dependencies
+Install basic required libraries using the Python interpreter bundled with Isaac Sim:
 
-1. Navigate to the repo root
+```bash
+./app/python.sh -m pip install tqdm wheel
+```
 
-    ```bash
-    cd PatoSim
-    ```
+---
 
-2. Run the following to link the ``app`` folder and pass it the path to where you installed Isaac Sim
+### Step 5 — Install the C++ Path Planner (Crucial Step)
+The `path_planner` module compiles C++ bindings under the hood. To prevent build environment issues, install it by pulling `pybind11` first and bypassing standard build isolation:
 
-    ```bash
-    ./link_app.sh --path ~/isaacsim
-    ```
+1. **Navigate to the planner subdirectory:**
+   ```bash
+   cd path_planner
+   ```
 
-<details>
-> This step is helpful as it (1) Enables us to use VS code autocompletion (2) Allows us to call ./app/python.sh to launch Isaac Sim Python scripts (3) Allows us to call ./app/isaac-sim.sh to launch Isaac Sim.
-</details>
+2. **Pre-install the compilation module:**
+   ```bash
+   ../app/python.sh -m pip install pybind11
+   ```
 
-### Step 4 - Install other python dependencies (including C++ path planner) (for procedural generation)
+3. **Install the package in editable mode without build isolation:**
+   ```bash
+   ../app/python.sh -m pip install --no-build-isolation -e .
+   ```
 
-1. Install miscellaneous python dependencies
+---
 
-    ```bash
-    ./app/python.sh -m pip install tqdm
-    ```
+### Step 6 — Launch PatoSim
+Always return to the **repository root folder** before executing any launch scripts to ensure relative application paths resolve correctly:
 
-2. Navigate to the path planner directory
+```bash
+# 1. Return to the root PatoSim folder
+cd ..
 
-    ```bash
-    cd PatoSim/path_planner
-    ```
-
-3. Install with pip using the Isaac Sim python interpreter
-
-    ```bash
-    ../app/python.sh -m pip install -e .
-    ```
-
-    > Note: If you run into an error related to pybind11 while running this command, you may try ``../app/python.sh -m pip install wheel`` and/or ``../app/python.sh -m pip install pybind11[global]``.
-
-### Step 4 - Launch Isaac Sim
-
-1. Navigate to the repo root
-
-    ```bash
-    cd PatoSim
-    ```
-
-2. Launch Isaac Sim with required extensions enabled by calling
-
-    ```bash
-    ./scripts/launch_sim.sh
-    ```
-
-That's it!  If everything worked, you should see Isaac Sim open with a window titled ``PatoSim`` appear.
+# 2. Launch the simulator with the required extensions
+./scripts/launch_patosim.sh
+```
+If everything worked smoothly, the NVIDIA Isaac Sim interface will boot up, displaying the custom **PatoSim** window context.
 
 <img src="./assets/readme/extension_gui.png" height="640px">
 

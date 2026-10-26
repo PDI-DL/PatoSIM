@@ -13,7 +13,7 @@ PatoSim is the single integrated Isaac Sim extension in this repository. It keep
 
 - `omni.ext.patosim`: main Isaac Sim extension package.
 - `omni.ext.patosim.oceansim`: integrated OceanSim code now living inside the main extension.
-- `isaacsim.oceansim`: compatibility path kept as a symlink to the integrated OceanSim package.
+- Internal OceanSim imports use `omni.ext.patosim.oceansim`, the package namespace owned by this extension.
 
 ## Main commands
 

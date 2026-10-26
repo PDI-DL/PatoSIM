@@ -17,7 +17,7 @@
 - `exts/omni.ext.patosim/media`: figures and GIFs used by docs.
 - `exts/omni.ext.patosim/omni/ext/patosim`: main extension package, derived from the MobilityGen structure.
 - `exts/omni.ext.patosim/omni/ext/patosim/oceansim`: OceanSim modules, sensors and utilities integrated into the main package.
-- `exts/omni.ext.patosim/isaacsim/oceansim`: compatibility symlink pointing to `omni/ext/patosim/oceansim`.
+- `exts/omni.ext.patosim/omni/ext/patosim/oceansim`: OceanSim package, imported as `omni.ext.patosim.oceansim`.
 
 ## Legacy material
 
@@ -27,4 +27,4 @@
 
 - The runtime extension is now only `omni.ext.patosim`.
 - The visual identity shown in Isaac is now `PatoSim`, not `MobilityGen`.
-- OceanSim code now lives under the same extension package while keeping a compatibility path for older imports.
+- OceanSim code now lives under the same extension package and is imported through the extension's own Python namespace.

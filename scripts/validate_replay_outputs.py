@@ -67,9 +67,6 @@ def bootstrap_repo_paths() -> Path:
     repo_root_str = str(repo_root)
     if repo_root_str not in sys.path:
         sys.path.insert(0, repo_root_str)
-    ext_pkg_root_str = str(ext_pkg_root)
-    if ext_pkg_root.exists() and ext_pkg_root_str not in sys.path:
-        sys.path.insert(0, ext_pkg_root_str)
     try:
         import omni.ext as omni_ext  # type: ignore
 

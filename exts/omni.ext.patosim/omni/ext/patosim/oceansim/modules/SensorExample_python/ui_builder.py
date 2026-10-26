@@ -21,7 +21,7 @@ from isaacsim.core.utils.extensions import get_extension_path
 # Custom import
 from .scenario import MHL_Sensor_Example_Scenario
 from .global_variables import EXTENSION_DESCRIPTION, EXTENSION_TITLE, EXTENSION_LINK
-from isaacsim.oceansim.utils.assets_utils import get_oceansim_assets_path
+from omni.ext.patosim.oceansim.utils.assets_utils import get_oceansim_assets_path
 
 class UIBuilder():
     def __init__(self):
@@ -338,7 +338,7 @@ class UIBuilder():
         
 
         if self._use_sonar:
-            from isaacsim.oceansim.sensors.ImagingSonarSensor import ImagingSonarSensor
+            from omni.ext.patosim.oceansim.sensors.ImagingSonarSensor import ImagingSonarSensor
             self._sonar = ImagingSonarSensor(prim_path=robot_prim_path + '/sonar',
                                             translation=self._sonar_trans,
                                             orientation=euler_angles_to_quat(np.array([0.0, 45, 0.0]),  degrees=True),
@@ -348,7 +348,7 @@ class UIBuilder():
                                             )
 ###########################stereo camera ###############################
         if self._use_stereo_camera:
-            from isaacsim.oceansim.sensors.UW_Camera import UW_Camera
+            from omni.ext.patosim.oceansim.sensors.UW_Camera import UW_Camera
             #set_camera_view(eye=np.array([5,0.6,0.4]), target=rob_collider_prim.get_world_pose()[0])
 
             self._camL = UW_Camera(prim_path=robot_prim_path + '/UW_camera',
@@ -367,7 +367,7 @@ class UIBuilder():
 #########################################################################
 
         if self._use_camera:
-            from isaacsim.oceansim.sensors.UW_Camera import UW_Camera
+            from omni.ext.patosim.oceansim.sensors.UW_Camera import UW_Camera
 
             self._cam = UW_Camera(prim_path=robot_prim_path + '/UW_camera',
                                     resolution=[1920,1080],
@@ -376,7 +376,7 @@ class UIBuilder():
             self._cam.set_clipping_range(0.1, 100)
             
         if self._use_DVL:
-            from isaacsim.oceansim.sensors.DVLsensor import DVLsensor
+            from omni.ext.patosim.oceansim.sensors.DVLsensor import DVLsensor
 
             self._DVL = DVLsensor(max_range=10)
             self._DVL.attachDVL(rigid_body_path=robot_prim_path,
@@ -384,7 +384,7 @@ class UIBuilder():
             self._DVL.add_debug_lines()
             
         if self._use_baro:
-            from isaacsim.oceansim.sensors.BarometerSensor import BarometerSensor
+            from omni.ext.patosim.oceansim.sensors.BarometerSensor import BarometerSensor
 
             self._baro = BarometerSensor(prim_path=robot_prim_path + '/Baro',
                                         water_surface_z=self._water_surface)

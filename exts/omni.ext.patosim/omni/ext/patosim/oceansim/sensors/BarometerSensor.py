@@ -7,7 +7,7 @@ from isaacsim.core.api.sensors import BaseSensor
 from isaacsim.core.api.physics_context import PhysicsContext
 
 # Custom import
-from isaacsim.oceansim.utils.MultivariateNormal import MultivariateNormal
+from omni.ext.patosim.oceansim.utils.MultivariateNormal import MultivariateNormal
 
 
 class BarometerSensor(BaseSensor):

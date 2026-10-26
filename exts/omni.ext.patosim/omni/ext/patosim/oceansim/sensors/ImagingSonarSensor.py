@@ -5,7 +5,7 @@ import numpy as np
 from omni.replicator.core.scripts.functional import write_np
 import warp as wp
 from pxr import UsdGeom
-from isaacsim.oceansim.utils.ImagingSonar_kernels import *
+from omni.ext.patosim.oceansim.utils.ImagingSonar_kernels import *
 
 
 # Future TODO

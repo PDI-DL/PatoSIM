@@ -435,7 +435,6 @@ class OceanSimROVRobot(Robot):
             "..",
             "..",
             "assets",
-            "models",
         )
     )
 
