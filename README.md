@@ -1,62 +1,47 @@
 <h1 align="center"><span>PatoSim</span></h1>
 
 <div align="center">
-A toolset built on <a href="https://developer.nvidia.com/isaac/sim">NVIDIA Isaac Sim</a> that
-allows you to easily collect data for mobile robots.
+An underwater robotics simulator built on <a href="https://developer.nvidia.com/isaac/sim">NVIDIA Isaac Sim 5.1</a>
+for collecting camera, sonar, lidar, DVL and barometer data with an ROV.
 <br></br>
-<div>
-<img src="assets/readme/robots.png" width="640px"/>
-<img src="assets/readme/gmg_screencast_scale.GIF" width="640px"/>
-</div>
-
-Read below to learn more.
-
+<img src="./assets/readme/extension_gui.png" height="480px"/>
 </div>
 
 ## Overview
 
-PatoSim is a toolset built on [NVIDIA Isaac Sim](https://developer.nvidia.com/isaac/sim) that enables you to easily generate and collect data for mobile robots.
+PatoSim joins two projects in one Isaac Sim extension (`omni.ext.patosim`):
 
-It supports
+- the recording structure of [MobilityGen](https://github.com/NVlabs/MobilityGen): robot and scenario
+  registries, two-phase recording (record poses online, render sensors offline) and the `Reader`/`Writer`;
+- the underwater sensors of [OceanSim](https://umfieldrobotics.github.io/OceanSim/): underwater camera,
+  imaging sonar, DVL and barometer, now imported as `omni.ext.patosim.oceansim` (inside the extension).
 
-- ***Rich ground truth data***
+It provides
 
-    https://github.com/user-attachments/assets/5e2c87c0-4255-4cdf-812e-104a43dd2f3c
+- ***Underwater robot***: `OceanSimROVRobot` (BlueROV, 6 DOF, thruster forces, BlueROV hydrodynamics).
+- ***Sensors***: underwater RGB camera, stereo pair, imaging sonar (the default `raw` mode keeps the real
+  range falloff), RTX lidar with an underwater range/attenuation profile, DVL and barometer. **All sensors
+  start off** (lightweight navigation): tick only the ones a recording needs.
+- ***Scenarios***: keyboard teleoperation, gamepad teleoperation (6 DOF), waypoints and autonomous path
+  following (`OceanSimROV*Scenario`).
+- ***World Builder***: a second, robot-free launcher that loads a world, imports dataset objects and
+  checks/applies the semantic classes, sonar reflectivity and collisions the sensors need, before recording.
+- ***Ground truth***: robot and sensor poses (world frame), sensor extrinsics, occupancy map (2D band or 3D
+  stack) and, after the offline replay, RGB, depth, segmentation, instance segmentation, normals, sonar and
+  point clouds.
 
-    - Occupancy Map
-    - Pose
-    - Joint Positions / Velocities
-    - RGB Images
-    - Segmentation Images
-    - Depth Images
-    - Instance Segmentation Images
-    - Normals Images
-    - *If you're interested in more, [let us know!](https://github.com/NVlabs/PatoSim/issues)*
-
-- ***Many robot types***
-
-    - Differential drive - Jetbot, Carter
-    - Quadruped - Spot
-    - Humanoid - H1
-    - *Implement your own by subclassing the [Robot](./exts/omni.ext.patosim/omni/ext/patosim/robots.py) class*
-
-- ***Many data collection methods***
-
-    - Manual - Keyboard Teleoperation, Gamepad Teleoperation
-    - Automated - Random Accelerations, Random Path Following
-    - *Implement your own by subclassing the [Scenario](./exts/omni.ext.patosim/omni/ext/patosim/scenarios.py) class*
-
-This enables you to train models and test algorithms related to robot mobility.
-
-To get started with PatoSim follow the setup and usage instructions below!
+Robots and scenarios are extensible: subclass [Robot](./exts/omni.ext.patosim/omni/ext/patosim/robots.py)
+or [Scenario](./exts/omni.ext.patosim/omni/ext/patosim/scenarios.py) and register them.
 
 ## Table of Contents
 
-- [🛠️ Setup](#setup)
+- [🛠 Setup & Installation](#setup)
 - [👍 Basic Usage](#usage)
+- [🌍 World Builder](#world-builder)
+- [✅ Tests](#tests)
 - [🚧 TODO / Roadmap](#todo)
 - [💡 How To Guides](#guides)
-    - [How to record procedural data](#how-to-procedural-data)
+    - [How to record autonomous data](#how-to-procedural-data)
     - [How to implement a custom robot](#how-to-custom-robot)
     - [How to implement a custom scenario](#how-to-custom-scenario)
 - [📝 Data Format](#-data-format)
@@ -65,18 +50,18 @@ To get started with PatoSim follow the setup and usage instructions below!
 <a id="setup"></a>
 ## 🛠 Setup & Installation
 
-Follow these steps to set up PatoSim and its C++ dependencies correctly, avoiding common path and environment isolation issues.
+Follow these steps to set up PatoSim and its C++ dependencies. Tested with **Isaac Sim 5.1.0** on an
+RTX 4070 (driver 565) and an RTX 5060 Ti (driver 580).
 
 ### Step 1 — Locate or Install Isaac Sim
-Ensure you have **NVIDIA Isaac Sim 4.5.0** downloaded on your machine. 
+Download the **NVIDIA Isaac Sim 5.1.0** standalone package and extract it.
 * Note down its absolute folder path (e.g., `~/isaacsim`, `~/Downloads/isaac-sim`, or `/opt/isaac-sim`).
 
 ---
 
 ### Step 2 — Clone the Repository
-Clone the PatoSim repository to your preferred documents directory:
 ```bash
-git clone <repo_url> PatoSim
+git clone https://github.com/PDI-DL/PatoSIM.git PatoSim
 cd PatoSim
 ```
 *Always keep your terminal session inside the repository root (`PatoSim/`) for the following steps.*
@@ -84,20 +69,17 @@ cd PatoSim
 ---
 
 ### Step 3 — Link Isaac Sim to the Project
-The project uses a local `./app` directory shortcut to interact with Isaac Sim's internal Python tools. Run the linking script by passing the **exact folder path** where your Isaac Sim is located:
+The project uses a local `./app` link to Isaac Sim (`./app/python.sh` and `./app/isaac-sim.sh` are used
+below). Pass the **exact folder path** where your Isaac Sim is located:
 
 ```bash
-# If Isaac Sim is inside your home folder (~/isaacsim)
 ./link_app.sh --path ~/isaacsim
-
-# ALTERNATIVE: If it's located somewhere else, adjust accordingly:
-# ./link_app.sh --path ~/Documents/isaacsim
 ```
 
 ---
 
 ### Step 4 — Install Core Python Dependencies
-Install basic required libraries using the Python interpreter bundled with Isaac Sim:
+Install them with the Python interpreter bundled with Isaac Sim:
 
 ```bash
 ./app/python.sh -m pip install tqdm wheel
@@ -105,163 +87,166 @@ Install basic required libraries using the Python interpreter bundled with Isaac
 
 ---
 
-### Step 5 — Install the C++ Path Planner (Crucial Step)
-The `path_planner` module compiles C++ bindings under the hood. To prevent build environment issues, install it by pulling `pybind11` first and bypassing standard build isolation:
+### Step 5 — Install the C++ Path Planner
+The `path_planner` module compiles C++ bindings. Install `pybind11` first and skip pip's build isolation:
 
-1. **Navigate to the planner subdirectory:**
-   ```bash
-   cd path_planner
-   ```
-
-2. **Pre-install the compilation module:**
-   ```bash
-   ../app/python.sh -m pip install pybind11
-   ```
-
-3. **Install the package in editable mode without build isolation:**
-   ```bash
-   ../app/python.sh -m pip install --no-build-isolation -e .
-   ```
+```bash
+cd path_planner
+../app/python.sh -m pip install pybind11
+../app/python.sh -m pip install --no-build-isolation -e .
+cd ..
+```
 
 ---
 
-### Step 6 — Launch PatoSim
-Always return to the **repository root folder** before executing any launch scripts to ensure relative application paths resolve correctly:
+### Step 6 — Get the Assets
+The worlds, the BlueROV model and the dataset objects are in the public Hugging Face dataset
+[`PDI-DL/PatoSimAssets`](https://huggingface.co/datasets/PDI-DL/PatoSimAssets). Download them into
+`assets/models` with any Python 3 that has `huggingface_hub`:
 
 ```bash
-# 1. Return to the root PatoSim folder
-cd ..
-
-# 2. Launch the simulator with the required extensions
-./scripts/launch_patosim.sh
+python3 -m pip install huggingface_hub hf_transfer
+python3 scripts/assets/downloadAll.py   # PDI-DL/PatoSimAssets -> assets/models
 ```
-If everything worked smoothly, the NVIDIA Isaac Sim interface will boot up, displaying the custom **PatoSim** window context.
 
-<img src="./assets/readme/extension_gui.png" height="640px">
+(`scripts/assets/assets.sh -auth / -download / -upload` works on a git clone of the private `PDI-DL/PDI_3DUW`
+dataset and needs a Hugging Face login with access to it.)
 
-Read [Usage](#usage) below to learn how to generate data with PatoSim.
+PatoSim also finds the same folders (`worlds/`, `bluerov/`, `plataforms/`, `statues_temples/`, `scenario/`)
+directly under `assets/`, the layout some machines already use.
+
+Optional environment variables: `PATOSIM_DEV_SCENE` (world loaded by the **Use MHL Scene** button; default
+`worlds/Prototipo1/world.usd` from the assets) and `PATOSIM_DATA` (data folder, default `~/PatoSimData`).
+
+---
+
+### Step 7 — Check the Installation
+```bash
+./app/python.sh -c "import tqdm, mobility_gen_path_planner; print('ok')"
+./app/python.sh tests/integration/run_worldbuilder_extension_check.py   # ~1 min, headless
+```
+See [Tests](#tests) for the full checks.
+
+---
+
+### Step 8 — Launch PatoSim
+Always launch from the **repository root**:
+
+```bash
+./scripts/launch_patosim.sh        # main simulator (robot, sensors, recording)
+./scripts/launch_world_builder.sh  # World Builder (worlds only, no robot)
+```
+If everything worked, Isaac Sim opens with the **PatoSim** window.
 
 <a id="usage"></a>
 ## 👍 Basic Usage
 
-Below details a typical workflow for collecting data with PatoSim.
+A typical session: open a world, drive the ROV, turn on the sensors you need, record, then render the
+sensor data offline.
 
-### Step 1 - Launch Isaac Sim
+### Step 1 - Launch PatoSim
 
-1. Navigate to the repo root
-
-    ```bash
-    cd PatoSim
-    ```
-
-2. Launch Isaac Sim with required extensions enabled by calling
-
-    ```bash
-    ./scripts/launch_sim.sh
-    ```
+```bash
+./scripts/launch_patosim.sh
+```
 
 ### Step 2 - Build a scenario
 
-This assumes you see the PatoSim extension window.
+In the **PatoSim** window:
 
-1. Under Scene USD URL / Path copy and paste the following
+1. Click **Use MHL Scene** (fills **USD Path / URL** with the example world) or paste the path of another
+   world `.usd` (prepare new worlds in the [World Builder](#world-builder) first).
+2. **Scenario Type**: `OceanSimROVTeleoperationScenario` (keyboard). Other options:
+   `OceanSimROVGamepadTeleoperationScenario`, `OceanSimROVWaypointScenario`,
+   `OceanSimROVPathFollowingScenario`.
+3. **Robot Type**: `OceanSimROVRobot`.
+4. Click **Build**. The world, the ROV and the occupancy map appear after a few seconds.
 
-    ```
-    http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.2/Isaac/Environments/Simple_Warehouse/warehouse_multiple_shelves.usd
-    ```
+All sensors start **off**, so driving stays fluid. To record sensor data, open **Robot Setup** and tick the
+sensors under **Sensors** (Front Camera, Stereo, LiDAR, Sonar, DVL, Barometer) **before Build**. The same
+window sets the speeds, the operating **Depth (m)** and **Sonar Refl.** (apply sonar reflectivity to the world
+meshes on Build).
 
-2. Under the ``Scenario`` dropdown select ``KeyboardTeleoperationScenario`` to start
+### Step 3 - Drive the ROV
 
-3. Under the ``Robot`` dropdown select ``H1Robot``
+| Keys | Motion |
+|---|---|
+| `W` / `S` | forward / backward (surge) |
+| `A` / `D` | left / right (sway) |
+| `↑` / `↓` | up / down (heave) |
+| `J` / `L` | turn left / right (yaw) |
+| `I` / `K` | pitch |
+| `←` / `→` | roll |
 
-4. Click ``Build``
+With `OceanSimROVGamepadTeleoperationScenario`: left stick = surge/sway, right stick = heave/yaw (deadzone and
+expo in `Config`). If the gamepad disconnects the command goes to zero.
 
-After a few seconds, you should see the scene and occupancy map appear.
+**Reset** respawns the robot. **Window Manager** shows/hides the tool windows: **Sensor Preview** (camera
+and sonar fan/grid, with update intervals), **LiDAR Preview** (top-down), **Occupancy Map**, **Path Planning**
+(parameters of the legacy ground-robot path following) and **Dataset Object** (insert an object into the
+world on Build).
 
-### Step 3 - Initialize / reset the scenario
+### Step 4 - Record
 
-1. Click the ``Reset`` function to randomly initialize the scenario.  Do this until the robot spawns inside the warehouse.
+1. Click **Start Recording**, drive, then **Stop Recording** (**Recording Settings** shows the status and the
+   output folder).
 
+Recordings go to `~/PatoSimData/recordings/<date-time>/` (`config.json`, `stage.usd`,
+`sensors_extrinsics.json`, occupancy map, per-step state and, if the sonar is on, `state/sonar/raw`).
 
-### Step 4 - Test drive the robot
+### Step 5 - Render the sensor data (offline replay)
 
-Before you start recording, try moving the robot around to get a feel for it
+Close Isaac Sim and render every recording (images, depth, segmentation, sonar, point clouds):
 
-To move the robot, use the following keys
+```bash
+python scripts/replay_directory.py --render_interval=20
+```
 
-- ``W`` - Move Forward
-- ``A`` - Turn Left
-- ``S`` - Move Backwards
-- ``D`` - Turn right
+`--render_interval=20` renders one frame every 20 physics steps. The results go to `~/PatoSimData/replays`.
+`python scripts/replay_directory.py --help` lists the options (modalities, point clouds, 2D annotations).
 
-### Step 5 - Start recording!
+### Step 6 - Visualize the data
 
-Once you're comfortable, you can record a log.
+```bash
+python examples/04_visualize_gradio.py   # then open http://127.0.0.1:7860
+python scripts/sonar_viz.py --help       # sonar frames
+```
 
-1. Click ``Start Recording`` to start recording a log.
+<a id="world-builder"></a>
+## 🌍 World Builder
 
-    > You should now see a recording name and the recording duration change.
-2. Move the robot around
-3. Click ``Stop Recording`` to stop recording.
+`./scripts/launch_world_builder.sh` opens Isaac Sim with only the `omni.ext.patosim_worldbuilder` extension:
+no robot, no sensors, no recording UI. Use it to prepare a world before recording:
 
-The data is recorded to ``~/PatoSimData/recordings`` by default.
+1. **Load World (no robot)**: paste the world `.usd` path.
+2. **Import Dataset Object**: pick an asset from `plataforms/`, `statues_temples/` or `scenario/`, set
+   position, rotation, scale and reflectivity, **Insert Object Into World**.
+3. **Check Semantic Classes** → **Apply Default Reflectivity**: meshes without the `class`/`reflectivity`
+   labels get a default sonar reflectivity (without them the sonar uses a default value that looks fine but is
+   wrong for a dataset).
+4. **Check Physics** → **Apply Physics (Collisions)**: geometry without a collision API is invisible to
+   sonar/lidar raycasts and ROV collisions.
 
-### Step 6 - Render data
+The fixes act on the open stage. **Build** in `launch_patosim.sh` already enables collisions on the whole
+world and, with **Sonar Refl.** on, applies the default reflectivity; the World Builder shows beforehand what a
+world is missing (e.g. meshes without a semantic class) so you can fix the world file itself.
 
-If you've gotten this far, you've recorded a trajectory, but it doesn't include the rendered sensor data.
+Details: [exts/omni.ext.patosim_worldbuilder/docs/README.md](./exts/omni.ext.patosim_worldbuilder/docs/README.md).
 
-Rendering the sensor data is done offline.  To do this call the following
+<a id="tests"></a>
+## ✅ Tests
 
-1. Close Isaac Sim if it's running
+```bash
+python3 -m pytest tests/unit                                            # 32 pure tests, no Isaac (needs pytest)
+./app/python.sh tests/integration/run_gpu_integration_checks.py        # Isaac headless, 1-3 min
+./app/python.sh tests/integration/run_worldbuilder_extension_check.py  # Isaac headless, ~1 min
+```
 
-2. Navigate to the repo root
-
-    ```bash
-    cd PatoSim
-    ```
-
-3. Run the ``scripts/replay_directory.py`` script to replay and render all recordings in the directory
-
-    ```bash
-    python scripts/replay_directory.py --render_interval=200
-    ```
-
-    > Note: For speed for this tutorial, we use a render interval of 200.  If our physics timestep is 200 FPS, this means we
-    > render 1 image per second.
-
-That's it! Now the data with renderings should be stored in ``~/PatoSimData/replays``.
-
-### Step 7 - Visualize the Data
-
-We provide a few examples in the [examples](./examples) folder for working with the data.
-
-One example is using Gradio to explore all of the recordings in the replays directory.  To run this example,
-call the following
-
-1. Call the gradio data visualization example script
-
-    ```bash
-    python examples/04_visualize_gradio.py
-    ```
-
-2. Open your web browser to ``http://127.0.0.1:7860`` to explore the data
-
-If everything worked, you should be able to view the data in the browser.
-
-<img src="assets/readme/gradio_gui.png" height=320 />
-
-### Next steps
-
-That's it!  Once you've gotten the hang of how to record data, you might try
-
-1. Record data using one of the procedural methods (like ``RandomAccelerationScenario`` or ``RandomPathFollowingScenario``).
-
-    > These methods don't rely on human input, and automatically "restart" when finished to create new recordings.
-
-2. Implement or customize your own [Robot](./exts/omni.ext.patosim/omni/ext/patosim/robots.py) class.
-3. Implement or customize your own [Scenario](./exts/omni.ext.patosim/omni/ext/patosim/scenarios.py) class.
-
-If you find PatoSim helpful for your use case, run in to issues, or have any questions please [let us know!](https://github.com/NVlabs/PatoSim/issues).
+The integration checks build a full ROV scenario with every sensor, record a short session, check the World
+Builder tools, the 3D occupancy map stack and the gamepad scenario, and confirm the sonar code comes from this
+repository. Results are printed and saved to `tests/integration/last_*_results.json`.
+`PATOSIM_LEGACY_RECORDING=<recording>` sets the old recording used by the config backward-compatibility
+check (skipped when absent).
 
 <a id="contributing"></a>
 <a id="todo"></a>
@@ -285,60 +270,23 @@ Below is the current implementation checklist for turning PatoSim into a complet
 - `OceanSim integration cleanup`: move the remaining compatibility glue into a clearly named integration layer so the runtime path is easier to understand and maintain.
 
 
-<a id="usage"></a>
+<a id="guides"></a>
 ## 💡 How To Guides
 
 <a id="how-to-procedural-data"></a>
-### How to record procedural data
+### How to record autonomous data
 
-#### Step 1 - Launch Isaac Sim
-
-This is the same as in the basic usage.
-
-1. Navigate to the repo root
-
-    ```bash
-    cd PatoSim
-    ```
-
-2. Launch Isaac Sim with required extensions enabled by calling
-
-    ```bash
-    ./scripts/launch_sim.sh
-    ```
-
-#### Step 2 - Build a scenario
-
-1. Under Scene USD URL / Path copy and paste the following
-
-    ```
-    http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.2/Isaac/Environments/Simple_Warehouse/warehouse_multiple_shelves.usd
-    ```
-
-2. Under the ``Scenario`` dropdown select ``RandomPathFollowingScenario`` or ``RandomAccelerationScenario``
-
-3. Under the ``Robot`` dropdown select ``H1Robot``
-
-4. Click ``Build``
-
-After a few seconds, you should see the scene and occupancy map appear.
-
-#### Step 3 - Record data
-
-1. Click ``Start Recording`` to start recording data
-
-2. Go grab some coffee!
-
-    > The procedural generated methods automatically determine when to reset (ie: if the robot collides with
-    > an object and needs to respawn).  If you run into any issues with the procedural methods getting stuck, please let us know.
-
-3. Click ``Stop Recording`` to stop recording data.
-
-The data is recorded to ``~/PatoSimData/recordings`` by default.
-
-#### Step 4 - Render and visualize sensor data
-
-This is the same as before.  Please refer to Step 6-7 of the "Basic Usage" guide.
+1. Launch PatoSim (`./scripts/launch_patosim.sh`) and fill **USD Path / URL** as in the basic usage.
+2. **Scenario Type** and **Robot Type** (`OceanSimROVRobot`):
+    - `OceanSimROVPathFollowingScenario`: random 3D goals, a path planned on the occupancy map (XY) with a
+      linear depth profile, followed with pure pursuit and replanned at each goal. Its parameters (XY/Z speed,
+      yaw gain, lookahead, goal threshold, goal depth range `rov_path_z_min`/`rov_path_z_max`) are attributes
+      of the scenario class in `scenarios.py`; the **Path Planning** window currently only edits the legacy
+      ground-robot scenario.
+    - `OceanSimROVWaypointScenario`: follows the waypoints of `exts/omni.ext.patosim/demo/demo_waypoints.txt`
+      (one `x y z qw qx qy qz` per line) or of the file in `$PATOSIM_ROV_WAYPOINTS`.
+3. Tick the sensors you need in **Robot Setup**, click **Build**, then **Start Recording**.
+4. **Stop Recording** when done; render and visualize as in Steps 5-6 of the basic usage.
 
 <a id="how-to-custom-robot"></a>
 ### How to implement a new robot
@@ -349,14 +297,14 @@ The general workflow is as follows:
 
 1. Subclass the [Robot](exts/omni.ext.patosim/omni/ext/patosim/robots.py) class.
 2. Implement the ``build()`` method.  This method is responsible for adding the robot to the USD stage.
-2. Implement the ``write_action()`` method.  This method performs the logic of applying the linear, angular velocity command.
+2. Implement the ``write_action()`` method.  This method applies the action (for ``OceanSimROVRobot``, the 6-DOF body force/torque).
 3. Overwrite the common class parameters (like ``physics_dt``, ``occupancy_map_z_min``, etc.)
 4. Register the robot class by using the ``ROBOT.register()`` decorator.  This makes the custom robot discoverable.
 
 We recommend referencing the example robots in [robots.py](exts/omni.ext.patosim/omni/ext/patosim/robots.py) for more details.
 
 A good way to start could be simply by modifying an existing robot.  For example, you might change the position at which
-the camera is mounted on the H1 robot.
+a sensor is mounted on ``OceanSimROVRobot``.
 
 <a id="how-to-custom-scenario"></a>
 ### How to implement a new scenario
@@ -461,9 +409,17 @@ In case you're interested, each recording is represented as a directory with the
     occupancy_map/
         map.png
         map.yaml
+    occupancy_map_3d/        # only with occupancy_map_mode = "3d_stack"
+        manifest.json
+        band_00/ ...
     config.json
+    sensors_extrinsics.json  # fixed body-to-sensor transform of each active sensor
     stage.usd
     state/
+        sonar/
+            raw/             # raw sonar frames (.npy), written during the live recording
+                00000000.npy
+                ...
         common/
             00000000.npy
             00000001.npy

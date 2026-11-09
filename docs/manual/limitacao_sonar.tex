@@ -1,0 +1,8 @@
+% Incluído na lista de limitações de patosim_novidades.tex.
+\item \textbf{Sonar no teste headless}: o teste de integração monta o sonar, roda o kernel e grava os arquivos,
+      mas a intensidade sai zerada (mínimo = máximo = 0), nas duas máquinas. Isso acontece mesmo com o ROV 1,5\,m
+      acima da primeira superfície abaixo dele (nesta máquina, o fundo do Prototipo1) e um objeto 3\,m à frente. Pela interface o sonar funciona (figura da seção~\ref{sec:uso}, gravação de 24/03). A causa no modo
+      headless não foi isolada. Antes de uma gravação longa, confira o sonar na janela Sensor Preview.
+\item \textbf{Checagem com a gravação antiga}: ao carregar a gravação de 24/03 no mesmo processo dos outros testes,
+      o Isaac cai (crash nativo em \arq{omni.usd} ao criar o \arq{World} de novo). As outras checagens já estão
+      salvas nesse ponto. Em máquinas sem essa gravação a checagem é pulada.

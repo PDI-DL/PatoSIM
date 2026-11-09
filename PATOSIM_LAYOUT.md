@@ -18,7 +18,12 @@
   `omni.ext.patosim_worldbuilder` enabled (the lightweight world-prep tool).
 - `scripts/launch_sim.sh`: compatibility wrapper that now forwards to `launch_patosim.sh`.
 - `scripts/register_oceansim_assets.sh`: registers the OceanSim asset directory into the integrated extension.
-- `link_app.sh`: links the local `app` folder to `/mnt/external/isaac/isaac-sim-5.1` by default.
+- `link_app.sh --path <isaac-sim-5.1>`: links the local `app` folder to the Isaac Sim installation
+  (without `--path`: `$ISAAC_SIM_PATH`, else `/home/bevlog/isaac-sim`).
+- `scripts/assets/downloadAll.py`: downloads the public Hugging Face assets (`PDI-DL/PatoSimAssets`) into
+  `assets/models`; the code also finds the same folders directly under `assets/`. `scripts/assets/assets.sh`
+  works on a git clone of the private `PDI-DL/PDI_3DUW` dataset.
+- `tests/unit` (pytest, no Isaac) and `tests/integration` (`./app/python.sh <script>`, Isaac headless).
 
 ## Extension structure
 
@@ -28,8 +33,10 @@
 - `exts/omni.ext.patosim/demo`: sample RGB, depth and waypoint files used by OceanSim tooling.
 - `exts/omni.ext.patosim/media`: figures and GIFs used by docs.
 - `exts/omni.ext.patosim/omni/ext/patosim`: main extension package, derived from the MobilityGen structure.
-- `exts/omni.ext.patosim/omni/ext/patosim/oceansim`: OceanSim modules, sensors and utilities integrated into the main package.
-- `exts/omni.ext.patosim/omni/ext/patosim/oceansim`: OceanSim package, imported as `omni.ext.patosim.oceansim`.
+- `exts/omni.ext.patosim/omni/ext/patosim/oceansim`: OceanSim modules, sensors and utilities integrated into the
+  main package, imported as `omni.ext.patosim.oceansim`.
+- `isaacsim/oceansim` and `exts/omni.ext.patosim/isaacsim/oceansim`: relative links to that package, kept for old
+  `isaacsim.oceansim` imports (the code no longer uses them).
 
 ## Legacy material
 

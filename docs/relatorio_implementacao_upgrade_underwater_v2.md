@@ -6,7 +6,8 @@ Continuação de
 rodada implementa dois pedidos novos: (1) deixar o modo de navegação mais
 leve/fluido desligando sensores por padrão, e (2) um launch separado para
 criação/validação de mundos, sem robô, com ferramentas de física e
-reflectância do sonar. **Nada foi commitado em git ainda.**
+reflectância do sonar. Commitado em 09/11/2026 (`efb77b2`), junto com a integração descrita na
+seção 5.
 
 ---
 
@@ -258,3 +259,54 @@ Mesmos da rodada 1 (seção 4 do relatório anterior), mais:
 9. Se quiser, adicionar um botão "Build Recording Scenario Here" no World
    Builder que simplesmente abre/foca a janela do `omni.ext.patosim` com o
    mesmo `scene_usd` já preenchido, para não precisar reabrir o caminho à mão.
+
+---
+
+## 5. Integração no `main`, instalação na pdi_mini_3 e revisão dos testes (09/11/2026)
+
+### O que entrou no `main` (e no `master`, igual)
+
+- `efb77b2`: esta rodada (navegação leve, World Builder, testes de integração).
+- Merge do `origin/main` (`f3a4728`, correção do caminho do ROV e `.gitignore`). O `.gitignore` passou a
+  ignorar só os artefatos de build do `path_planner`; os fontes dele continuam versionados.
+- Merge da branch `update_imports` (feita na pdi_mini_3): o código do OceanSim é importado como
+  `omni.ext.patosim.oceansim` em todo lugar. Antes, `isaacsim.oceansim` vinha de uma extensão em
+  `app/extsUser`, fora do git (a seção 0 do relatório v1). Na pdi_mini_3 essa cópia era de março, então
+  o sonar corrigido não rodaria lá. O teste de integração agora confere de onde o `ImagingSonarSensor`
+  foi carregado.
+- Caminhos de uma máquina só, trocados por caminhos relativos ao repositório: ROV e objetos do dataset em
+  `assets/models/` ou `assets/` (layout da pdi_mini_3); mundo do botão "Use MHL Scene" (ou
+  `$PATOSIM_DEV_SCENE`); link `isaacsim/oceansim` (era absoluto para `/home/pdi_4/...`); scripts de
+  `tests/integration` (gravação antiga opcional, `$PATOSIM_LEGACY_RECORDING`).
+- `8c92c04`: no teste, o ROV fica 1,5 m acima da primeira superfície achada por um raycast para baixo.
+  Antes ele ia para "mínimo da caixa da cena + 3 m", e no Prototipo1 isso fica **abaixo do fundo do
+  mar**: o fundo está em z≈0 m e os corais descem até z=-4,9 m.
+
+### Instalação na pdi_mini_3
+
+`~/Documents/PatoSIM` passou da branch `update_imports` para o `main`. Os assets fora do git, em `assets/`,
+não foram tocados. Depois o procedimento do README: `pip install tqdm wheel`, `pybind11` e
+`path_planner` com `--no-build-isolation -e .`, que recompilou o módulo C++. O `.venv` do repo foi criado
+quando a pasta se chamava `~/Documentos/PatoSIM` e não funciona mais; os testes unitários usam o
+`python3` do sistema.
+
+### Resultados
+
+| Checagem | Esta máquina (RTX 4070) | pdi_mini_3 (RTX 5060 Ti) |
+|---|---|---|
+| `tests/unit` | 32/32 | 32/32 |
+| `run_gpu_integration_checks.py` | 25 ok, 1 falha (sinal do sonar), crash na última checagem | 26 ok (2 pulados), 1 falha (sinal do sonar) |
+| `run_worldbuilder_extension_check.py` | 6/6 | 6/6 |
+
+- **Sinal do sonar**: continua zerado no modo headless nas duas máquinas, agora com o ROV acima do fundo
+  e um objeto 3 m à frente. A posição não era a causa, ou não era a única. Pela interface o sonar gera
+  imagem (gravação de 24/03). O item da seção 3 continua aberto, restrito ao modo headless.
+- **Spawn (seção 3)**: o robô não fica "no ar". O OceanSim não tem volume de água, a água é um efeito de
+  renderização. O que acontece é que ele nasce 1 m acima do objeto mais alto do mundo (z=6,7 m no
+  Prototipo1). Com o fundo em z≈0 m, a profundidade padrão de -2 m fica abaixo do fundo.
+- **Gravação antiga**: nesta máquina, carregar a gravação de 24/03 no mesmo processo derruba o Isaac
+  (crash nativo em `omni.usd` ao criar o `World` de novo, dentro de `load_scenario`). As outras checagens
+  já estão salvas nesse ponto. Na pdi_mini_3 a checagem é pulada.
+
+Documentação: README reescrito para o fluxo subaquático e `docs/PatoSim_novidades.pdf` (fonte em
+`docs/manual/`), com as novidades e o guia de uso.

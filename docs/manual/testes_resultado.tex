@@ -1,0 +1,26 @@
+% Resultados de 09/11/2026 (incluído em patosim_novidades.tex).
+\begin{table}[H]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}Ycc@{}}
+\toprule
+Checagem & \makecell{Esta máquina\\RTX 4070, driver 565} & \makecell{pdi\_mini\_3\\RTX 5060 Ti, driver 580} \\
+\midrule
+Testes unitários (\arq{tests/unit}) & 32/32 & 32/32 \\
+Extensões, imports e código do sonar vindo do repositório & ok & ok \\
+\arq{config.json} antigo (de antes dos campos novos) & ok & pulado (sem a gravação) \\
+World Builder: checar e aplicar classes, refletividade e colisão; listar e inserir objetos &
+  ok (428 meshes, 11 objetos) & ok (429 meshes, 12 objetos) \\
+Cenário ROV com os 5 sensores, sonar \texttt{raw}, perfil \texttt{insight\_micro} do LiDAR & ok & ok \\
+\textbf{Sinal do sonar} (intensidade diferente de zero) & \textbf{falha} & \textbf{falha} \\
+Gravação ao vivo: extrínsecos, \arq{state/common}, sonar bruto, imagens do sonar & ok & ok \\
+Mapa em camadas (3 fatias, salvo em disco) & ok & ok \\
+Gamepad sem controle físico (comando zero) & ok & ok \\
+Carregar gravação antiga no mesmo processo & crash do Isaac & pulado \\
+Extensão World Builder sozinha (sem a principal, janela criada) & 6/6 & 6/6 \\
+\midrule
+Total do teste de integração & 25 ok, 1 falha, 1 crash & 26 ok (2 pulados), 1 falha \\
+\bottomrule
+\end{tabularx}
+\caption{Resultados de 09/11/2026 com o código do \arq{main} (\arq{8c92c04}). A falha do sonar e o crash estão em
+Limitações conhecidas.}
+\end{table}

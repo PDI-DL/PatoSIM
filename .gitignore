@@ -117,3 +117,6 @@ path_planner/mobility_gen_path_planner/*.so
 *.stale_backup_*/
 # outputs of tests/integration/*.py (regenerated on every run)
 tests/integration/last_*_results.json
+
+# LaTeX build files of docs/manual (the PDF goes to docs/PatoSim_novidades.pdf)
+docs/manual/build/

@@ -17,7 +17,8 @@ UI -- it only reuses the pure scene-building helpers already in
 1. **Load World** -- references a scene USD under `/World/scene`, no robot.
 2. **Import Dataset Object** -- lists the same asset folders the main
    extension's dataset-object picker uses
-   (`assets/models/{plataforms,statues_temples,scenario}`), lets you set
+   (`{plataforms,statues_temples,scenario}` under `assets/models/`, or under
+   `assets/` when the assets were copied there directly), lets you set
    position/rotation/scale/reflectivity and insert one into the loaded world.
 3. **Check / Apply Semantic Classes** -- reports how many mesh prims are
    missing the `class`/`reflectivity` semantic labels the sonar model's
@@ -30,7 +31,9 @@ UI -- it only reuses the pure scene-building helpers already in
 
 Run the checks, fix what's missing, and only then switch to the main
 `omni.ext.patosim` extension to build an actual robot/recording scenario
-against the same scene.
+against the same scene. The fixes act on the open stage; the main
+extension's **Build** also enables collisions on the whole world and, with
+**Sonar Refl.** on, applies the default reflectivity.
 
 See `docs/plano_upgrade_simulacao_subaquatica.md` and
 `docs/relatorio_implementacao_upgrade_underwater_v2.md` in the repo root
