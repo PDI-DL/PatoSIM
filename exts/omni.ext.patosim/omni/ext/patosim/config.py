@@ -17,12 +17,15 @@ class Config:
     rov_linear_speed: float = 0.75
     rov_angular_speed: float = 0.9
     enable_dvl_debug_lines: bool = False
-    enable_rov_front_camera: bool = True
+    # All sensors default OFF: a freshly-built robot starts in lightweight
+    # navigation mode (no sensor rendering/raycasting overhead). Turn on
+    # only what a given data-recording session actually needs.
+    enable_rov_front_camera: bool = False
     enable_rov_stereo_camera: bool = False
-    enable_rov_lidar: bool = True
-    enable_rov_sonar: bool = True
-    enable_rov_dvl: bool = True
-    enable_rov_barometer: bool = True
+    enable_rov_lidar: bool = False
+    enable_rov_sonar: bool = False
+    enable_rov_dvl: bool = False
+    enable_rov_barometer: bool = False
     dataset_object_position: tuple = (0.0, 0.0, 0.0)
     dataset_object_scale: float = 1.0
     dataset_object_rotation_euler_deg: tuple = (0.0, 0.0, 0.0)

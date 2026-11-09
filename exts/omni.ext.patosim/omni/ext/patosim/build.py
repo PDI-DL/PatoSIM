@@ -208,6 +208,115 @@ def _apply_sonar_reflectivity_to_scene(scene_root_path: str, default_reflectivit
     return applied
 
 
+async def build_world_only(scene_usd: str) -> str:
+    """Load just a scene (no robot) for world-building/validation. Returns
+    the scene root prim path ("/World/scene"). Used by the standalone World
+    Builder extension (omni.ext.patosim_worldbuilder) so assets/physics/
+    reflectivity can be checked and fixed before any data-recording
+    scenario is built -- see
+    docs/plano_upgrade_simulacao_subaquatica.md Fase 0/5 and
+    docs/relatorio_implementacao_upgrade_underwater_v2.md.
+    """
+    scene_usd = _validate_scene_usd_path(scene_usd)
+    new_stage()
+    world = new_world(physics_dt=1.0 / 60.0)
+    await world.initialize_simulation_context_async()
+    add_reference_to_stage(scene_usd, "/World/scene")
+    return "/World/scene"
+
+
+def check_scene_semantics(scene_root_path: str) -> dict:
+    """Report, WITHOUT modifying anything, which mesh prims under
+    scene_root_path already have the semantic "class" and "reflectivity"
+    labels the sonar model needs (compute_intensity() looks up reflectivity
+    by semantic class id -- an unlabeled mesh silently gets a default
+    reflectivity, which can look fine visually but is wrong for sonar
+    datasets). Meant to be run from the World Builder extension BEFORE a
+    data-recording session, per
+    docs/plano_upgrade_simulacao_subaquatica.md Fase 0/5.
+    """
+    from isaacsim.core.utils.semantics import get_semantics
+
+    stage = get_stage()
+    root_prim = stage_get_prim(stage, scene_root_path)
+    if root_prim is None or not root_prim.IsValid():
+        return {"total_meshes": 0, "with_class": 0, "with_reflectivity": 0, "missing": [], "missing_count": 0}
+
+    total = 0
+    with_class = 0
+    with_reflectivity = 0
+    missing = []
+    for prim in Usd.PrimRange(root_prim):
+        if not prim.IsValid() or not prim.IsA(UsdGeom.Mesh):
+            continue
+        total += 1
+        try:
+            semantics = get_semantics(prim)
+        except Exception:
+            semantics = {}
+        types_present = {type_label for (type_label, _label) in semantics.values()} if semantics else set()
+        has_class = "class" in types_present
+        has_reflectivity = "reflectivity" in types_present
+        if has_class:
+            with_class += 1
+        if has_reflectivity:
+            with_reflectivity += 1
+        if not has_class or not has_reflectivity:
+            missing.append(prim.GetPath().pathString)
+    return {
+        "total_meshes": total,
+        "with_class": with_class,
+        "with_reflectivity": with_reflectivity,
+        "missing": missing[:200],
+        "missing_count": len(missing),
+    }
+
+
+def check_scene_physics(scene_root_path: str) -> dict:
+    """Report, WITHOUT modifying anything, which geometry prims under
+    scene_root_path already have a collision API applied (needed for sonar/
+    lidar raycasts and for the ROV's own collision checks to register hits
+    against world geometry). Mirrors the exact schema
+    isaacsim.core.prims.GeometryPrim.apply_collision_apis() actually applies
+    at construction time when SingleGeometryPrim(collision=True) is used
+    (UsdPhysics.CollisionAPI -- confirmed by reading
+    isaacsim/core/prims/impl/geometry_prim.py; NOT UsdPhysics.PhysxCollisionAPI,
+    a different, more specific PhysX-extension schema that is NOT what gets
+    applied here), so "check" and "apply" (_enable_scene_collisions) agree
+    on what counts as enabled.
+    """
+    from pxr import UsdPhysics
+
+    stage = get_stage()
+    root_prim = stage_get_prim(stage, scene_root_path)
+    if root_prim is None or not root_prim.IsValid():
+        return {"total_geoms": 0, "with_collision": 0, "missing": [], "missing_count": 0}
+
+    total = 0
+    with_collision = 0
+    missing = []
+    for prim in Usd.PrimRange(root_prim):
+        if not prim.IsValid() or not prim.IsA(UsdGeom.Gprim):
+            continue
+        if prim.GetPath().pathString == scene_root_path:
+            continue
+        total += 1
+        try:
+            has_collision = bool(prim.HasAPI(UsdPhysics.CollisionAPI))
+        except Exception:
+            has_collision = False
+        if has_collision:
+            with_collision += 1
+        else:
+            missing.append(prim.GetPath().pathString)
+    return {
+        "total_geoms": total,
+        "with_collision": with_collision,
+        "missing": missing[:200],
+        "missing_count": len(missing),
+    }
+
+
 def _compute_world_bbox(scene_root_path: str):
     stage = get_stage()
     root_prim = stage_get_prim(stage, scene_root_path)

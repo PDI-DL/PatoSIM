@@ -31,8 +31,15 @@ def test_new_defaults_match_the_fix_intent():
     cfg = _minimal_config()
     # "raw" preserves true distance falloff -- the actual bug fix default.
     assert cfg.sonar_normalizing_method == "raw"
-    # Lidar enabled by default, calibrated to a real subsea scanner envelope.
-    assert cfg.enable_rov_lidar is True
+    # All sensors default OFF -- lightweight navigation mode by default;
+    # recording sessions opt in explicitly per sensor.
+    assert cfg.enable_rov_front_camera is False
+    assert cfg.enable_rov_stereo_camera is False
+    assert cfg.enable_rov_lidar is False
+    assert cfg.enable_rov_sonar is False
+    assert cfg.enable_rov_dvl is False
+    assert cfg.enable_rov_barometer is False
+    # Lidar still calibrated to a real subsea scanner envelope whenever it IS enabled.
     assert cfg.lidar_range_profile == "insight_micro"
     assert 0.0 < cfg.lidar_min_range < cfg.lidar_max_range
     # Occupancy map mode defaults to the pre-existing (non-breaking) behaviour.

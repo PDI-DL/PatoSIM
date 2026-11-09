@@ -2,8 +2,20 @@
 
 ## Main entrypoints
 
-- `exts/omni.ext.patosim`: single Isaac Sim extension now loaded by the project.
+- `exts/omni.ext.patosim`: the main Isaac Sim extension -- robot, sensors,
+  scenarios (navigation + autonomous), recording. Opens with **all sensors
+  off by default** so navigation stays lightweight/fluid; tick the sensor
+  checkboxes before a recording session.
+- `exts/omni.ext.patosim_worldbuilder`: a second, standalone, lightweight
+  extension for preparing/validating a world **before** a recording session
+  -- scene loading with **no robot spawned**, dataset-object import, and
+  check/apply tools for sonar semantic reflectance and physics collisions.
+  Reuses `omni.ext.patosim.build`'s pure scene-building helpers instead of
+  duplicating them; does not pull in the main extension's robot/sensor/
+  recording UI. See `exts/omni.ext.patosim_worldbuilder/docs/README.md`.
 - `scripts/launch_patosim.sh`: launches Isaac Sim with only `omni.ext.patosim` enabled.
+- `scripts/launch_world_builder.sh`: launches Isaac Sim with only
+  `omni.ext.patosim_worldbuilder` enabled (the lightweight world-prep tool).
 - `scripts/launch_sim.sh`: compatibility wrapper that now forwards to `launch_patosim.sh`.
 - `scripts/register_oceansim_assets.sh`: registers the OceanSim asset directory into the integrated extension.
 - `link_app.sh`: links the local `app` folder to `/mnt/external/isaac/isaac-sim-5.1` by default.

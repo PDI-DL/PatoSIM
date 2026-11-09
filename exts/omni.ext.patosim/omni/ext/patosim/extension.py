@@ -350,12 +350,17 @@ class PatoSimExtension(omni.ext.IExt):
         self._oceansim_angular_speed_model = ui.SimpleFloatModel(0.90)
         self._oceansim_operating_depth_model = ui.SimpleFloatModel(-2.0)
         self._oceansim_dvl_debug_model = ui.SimpleBoolModel(False)
-        self._oceansim_front_camera_model = ui.SimpleBoolModel(True)
+        # All sensors default OFF: patosim opens into a lightweight
+        # navigation-only mode (no sensor rendering/raycasting overhead), so
+        # driving the ROV around stays fluid. Tick the checkboxes for the
+        # sensors you actually need before a data-recording session -- see
+        # docs/relatorio_implementacao_upgrade_underwater_v2.md.
+        self._oceansim_front_camera_model = ui.SimpleBoolModel(False)
         self._oceansim_stereo_camera_model = ui.SimpleBoolModel(False)
         self._oceansim_lidar_model = ui.SimpleBoolModel(False)
-        self._oceansim_sonar_model = ui.SimpleBoolModel(True)
-        self._oceansim_dvl_model = ui.SimpleBoolModel(True)
-        self._oceansim_barometer_model = ui.SimpleBoolModel(True)
+        self._oceansim_sonar_model = ui.SimpleBoolModel(False)
+        self._oceansim_dvl_model = ui.SimpleBoolModel(False)
+        self._oceansim_barometer_model = ui.SimpleBoolModel(False)
         self._dataset_object_enabled_model = ui.SimpleBoolModel(False)
         self._dataset_object_reflectivity_model = ui.SimpleFloatModel(1.5)
         self._dataset_object_assets = []

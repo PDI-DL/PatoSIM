@@ -1,0 +1,25 @@
+[core]
+reloadable = true
+order = 0
+
+[package]
+version = "1.0.0"
+category = "Simulation"
+title = "PatoSim World Builder"
+description = "Lightweight world-building and validation tools for PatoSim/OceanSim: scene loading, asset import, physics/collision setup and sonar reflectance semantic labeling -- with no robot spawned. Meant to validate a world before running a data-recording scenario in the main PatoSim extension."
+authors = ["MOD_patosim integration"]
+repository = ""
+keywords = ["PatoSim", "OceanSim", "WorldBuilder", "Underwater"]
+changelog = "docs/CHANGELOG.md"
+readme = "docs/README.md"
+
+[dependencies]
+"omni.kit.uiapp" = {}
+"omni.isaac.ui" = {}
+"omni.isaac.core" = {}
+
+[[python.module]]
+name = "omni.ext.patosim_worldbuilder"
+
+[[test]]
+dependencies = []
