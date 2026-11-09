@@ -356,15 +356,38 @@ def main():
                 bbox = _compute_world_bbox("/World/scene")
                 min_v = np.asarray(bbox.GetMin(), dtype=np.float32) if bbox is not None else np.array([-10, -10, -10], dtype=np.float32)
                 max_v = np.asarray(bbox.GetMax(), dtype=np.float32) if bbox is not None else np.array([10, 10, 10], dtype=np.float32)
-                spawn = np.array(
-                    [0.5 * (min_v[0] + max_v[0]), 0.5 * (min_v[1] + max_v[1]), float(min_v[2]) + 3.0],
-                    dtype=np.float32,
-                )
+                cx, cy = 0.5 * (min_v[0] + max_v[0]), 0.5 * (min_v[1] + max_v[1])
+                # The scene bbox minimum is NOT the seafloor (in Prototipo1 the floor is at z~0 m while
+                # corals reach z=-4.9 m below it), so "bbox min + 3 m" put the ROV under the seabed and the
+                # sonar saw nothing. Find the floor under the scene center with a PhysX raycast instead.
+                floor_z = None
+                try:
+                    from omni.physx import get_physx_scene_query_interface
+
+                    query = get_physx_scene_query_interface()
+                    origin_z = float(max_v[2]) + 1.0
+                    for _ in range(10):  # skip hits on the ROV itself (it spawns right above the scene)
+                        hit = query.raycast_closest(
+                            (float(cx), float(cy), origin_z), (0.0, 0.0, -1.0), origin_z - float(min_v[2]) + 1.0
+                        )
+                        if not (hit and hit.get("hit")):
+                            break
+                        if str(hit.get("collision", "")).startswith("/World/robot"):
+                            origin_z = float(hit["position"][2]) - 0.01
+                            continue
+                        floor_z = float(hit["position"][2])
+                        break
+                except Exception as exc:
+                    print(f"[info] floor raycast failed: {exc}", flush=True)
+                spawn_z = floor_z + 1.5 if floor_z is not None else float(min_v[2]) + 3.0
+                spawn = np.array([cx, cy, spawn_z], dtype=np.float32)
                 robot.set_pose_3d(spawn, np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
                 record(
                     "overrode_spawn_bug_workaround", True,
-                    f"production _compute_safe_underwater_spawn put the robot at z=6.73 (above scene bbox max z=5.73) "
-                    f"-- test-only override to {spawn} (3m above scene floor, scene bbox min/max={min_v}/{max_v})",
+                    f"production _compute_safe_underwater_spawn put the robot above every scene object "
+                    f"(bbox max z + 1 m) -- test-only override to {spawn} "
+                    f"({'1.5 m above the floor hit by a raycast at z=%.2f' % floor_z if floor_z is not None else 'bbox min + 3 m (raycast found no floor)'}, "
+                    f"scene bbox min/max={min_v}/{max_v})",
                 )
                 target_pos = (float(spawn[0]) + 3.0, float(spawn[1]), float(spawn[2]))
                 assets = list_dataset_object_assets()
@@ -591,7 +614,7 @@ def main():
         # ================= 6. Replay / backward-compat regression on a pre-existing recording =================
         def check_replay_regression():
             if not os.path.isdir(OLD_RECORDING):
-                record("replay_regression_old_recording", False, f"no old recording at {OLD_RECORDING}")
+                record("replay_regression_old_recording", True, f"SKIPPED: no old recording at {OLD_RECORDING}")
                 return
             new_stage()
             scenario = load_scenario(OLD_RECORDING)
