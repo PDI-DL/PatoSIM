@@ -427,7 +427,13 @@ class OceanSimROVRobot(Robot):
     rov_gamepad_expo: float = 0.3
 
     usd_relative_path: str = "bluerov/BROV_low.usd"
-    fallback_assets_root: str = Path(__file__).resolve().parents[5] / "assets" / "models"
+    # Repo assets: the Hugging Face asset repo (PDI-DL/PatoSimAssets) is cloned into assets/models by
+    # scripts/assets/assets.sh, but some machines keep its folders directly under assets/.
+    fallback_assets_root: str = str(Path(__file__).resolve().parents[5] / "assets" / "models")
+    fallback_assets_roots: Tuple[str, ...] = (
+        str(Path(__file__).resolve().parents[5] / "assets" / "models"),
+        str(Path(__file__).resolve().parents[5] / "assets"),
+    )
 
     initial_translation: Tuple[float, float, float] = (-2.0, 0.0, -0.8)
     initial_orientation_euler_deg: Tuple[float, float, float] = (0.0, 0.0, 0.0)
@@ -529,6 +535,9 @@ class OceanSimROVRobot(Robot):
     def _resolve_usd_path(cls) -> str:
         candidate_roots: List[str] = []
         candidate_roots.append(cls.fallback_assets_root)
+        for root in cls.fallback_assets_roots:
+            if root not in candidate_roots:
+                candidate_roots.append(root)
         try:
             candidate_roots.append(get_oceansim_assets_path())
         except Exception:

@@ -38,7 +38,12 @@ from omni.ext.patosim.unit_scale_math import unit_scale_ratio
 
 
 DATASET_OBJECT_ALLOWED_FOLDERS = ("plataforms", "platforms", "statues_temples", "scenario")
-DATASET_OBJECT_ASSET_ROOT = Path(__file__).resolve().parents[5] / "assets" / "models"
+_REPO_ASSETS_DIR = Path(__file__).resolve().parents[5] / "assets"
+# Hugging Face assets (PDI-DL/PatoSimAssets): assets/models (scripts/assets/assets.sh) or, on machines
+# where the folders were copied straight into it, assets/ itself.
+DATASET_OBJECT_ASSET_ROOT = (
+    _REPO_ASSETS_DIR / "models" if (_REPO_ASSETS_DIR / "models").is_dir() else _REPO_ASSETS_DIR
+)
 
 # Range envelopes (min_m, max_m) modelled on real subsea laser scanners (Voyis
 # Insight family) rather than a generic terrestrial lidar's long default

@@ -12,7 +12,7 @@ import carb
 from pxr import UsdGeom
 
 # Custom import
-from isaacsim.oceansim.utils.UWrenderer_utils import UW_render
+from omni.ext.patosim.oceansim.utils.UWrenderer_utils import UW_render
 
 
 class UW_Camera(Camera):

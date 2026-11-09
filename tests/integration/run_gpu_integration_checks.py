@@ -138,7 +138,10 @@ def main():
             )
 
             enabled = {}
-            for label, candidates in (("omap", omap_candidates), ("patosim", patosim_candidates), ("oceansim", oceansim_candidates)):
+            # Only omap and omni.ext.patosim, like launch_patosim.sh: the OceanSim code is imported as
+            # omni.ext.patosim.oceansim (inside the extension), so no extsUser OceanSim/PatoSIM copy is
+            # enabled; those old copies are only listed above for information.
+            for label, candidates in (("omap", omap_candidates), ("patosim", patosim_candidates)):
                 if candidates:
                     eid = candidates[0]
                     ok = ext_manager.set_extension_enabled_immediate(eid, True)
@@ -171,19 +174,35 @@ def main():
             from omni.ext.patosim.writer import Writer
             from omni.ext.patosim.utils.global_utils import new_stage, new_world, get_world, get_stage
             record("bootstrap_imports", True, "all omni.ext.patosim modules imported successfully")
+
+            # The sonar/camera code must be the repo's (omni.ext.patosim.oceansim), not a stale copy of
+            # the OceanSim extension that a machine may still have in app/extsUser.
+            import omni.ext.patosim.oceansim.sensors.ImagingSonarSensor as _sonar_module
+
+            sonar_file = Path(_sonar_module.__file__).resolve()
+            stale = sorted(m for m in sys.modules if m == "isaacsim.oceansim" or m.startswith("isaacsim.oceansim."))
+            record(
+                "oceansim_code_from_repo",
+                REPO_ROOT.resolve() in sonar_file.parents and not stale,
+                f"ImagingSonarSensor from {sonar_file}; isaacsim.oceansim modules loaded: {stale or 'none'}",
+            )
         except Exception as exc:
             record("bootstrap_imports", False, f"{exc}\n{traceback.format_exc()}")
             return
 
-        DEV_SCENE = "/mnt/external/isaac/MOD_patosim/assets/models/worlds/Prototipo1/world.usd"
-        RECORDINGS_DIR = os.path.expanduser("~/PatoSimData/recordings")
-        OLD_RECORDING = os.path.join(RECORDINGS_DIR, "2026-03-24T17:29:01.269957")
+        # Same example world the extension offers ($PATOSIM_DEV_SCENE or the repo assets).
+        from omni.ext.patosim.extension import dev_scene_path as DEV_SCENE
+        RECORDINGS_DIR = os.path.join(os.environ.get("PATOSIM_DATA", os.path.expanduser("~/PatoSimData")), "recordings")
+        OLD_RECORDING = os.environ.get(
+            "PATOSIM_LEGACY_RECORDING", os.path.join(RECORDINGS_DIR, "2026-03-24T17:29:01.269957")
+        )
 
         # ================= 1. Config backward compatibility =================
         def check_legacy_config():
             cfg_path = os.path.join(OLD_RECORDING, "config.json")
             if not os.path.exists(cfg_path):
-                record("legacy_config_roundtrip", False, f"no pre-existing recording at {OLD_RECORDING}")
+                # Machine without that old recording: nothing to compare (set PATOSIM_LEGACY_RECORDING).
+                record("legacy_config_roundtrip", True, f"SKIPPED: no pre-existing recording at {OLD_RECORDING}")
                 return
             with open(cfg_path, "r", encoding="utf-8") as f:
                 raw_text = f.read()

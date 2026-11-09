@@ -22,6 +22,7 @@ import tempfile
 import glob
 import math
 from collections import OrderedDict
+from pathlib import Path
 
 import carb
 import omni.ext
@@ -39,7 +40,18 @@ from omni.ext.patosim.robots import ROBOTS
 from omni.ext.patosim.config import Config
 from omni.ext.patosim.build import build_scenario_from_config, list_dataset_object_assets
 
-dev_scene_path = "/mnt/external/isaac/MOD_patosim/assets/models/worlds/Prototipo1/world.usd"
+def _default_dev_scene_path() -> str:
+    """Example world (Prototipo1): $PATOSIM_DEV_SCENE, else the repo assets in either layout
+    (assets/models/ from scripts/assets/assets.sh, or the same folders directly under assets/)."""
+    env_path = os.environ.get("PATOSIM_DEV_SCENE", "").strip()
+    if env_path:
+        return env_path
+    assets = Path(__file__).resolve().parents[5] / "assets"
+    candidates = [root / "worlds" / "Prototipo1" / "world.usd" for root in (assets / "models", assets)]
+    return str(next((c for c in candidates if c.exists()), candidates[0]))
+
+
+dev_scene_path = _default_dev_scene_path()
 
 if "PATOSIM_DATA" in os.environ:
     DATA_DIR = os.environ['PATOSIM_DATA']

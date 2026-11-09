@@ -537,7 +537,7 @@ class Lidar(Sensor):
         Delegates to the pure, unit-tested underwater_lidar_math module."""
         if points is None:
             return None
-        from isaacsim.oceansim.utils.underwater_lidar_math import apply_underwater_lidar_profile
+        from omni.ext.patosim.oceansim.utils.underwater_lidar_math import apply_underwater_lidar_profile
 
         return apply_underwater_lidar_profile(
             points,
@@ -1028,7 +1028,7 @@ class OceanSimUWCamera(Sensor):
         clipping_range: Tuple[float, float] | None = None,
         water_profile_path: Optional[str] = None,
     ) -> "OceanSimUWCamera":
-        from isaacsim.oceansim.sensors.UW_Camera import UW_Camera as _UWCamera
+        from omni.ext.patosim.oceansim.sensors.UW_Camera import UW_Camera as _UWCamera
 
         res = tuple(resolution or cls.resolution)
         sensor = _UWCamera(
@@ -1234,7 +1234,7 @@ class OceanSimUWCamera(Sensor):
         depth_crop: np.ndarray,
     ) -> Optional[np.ndarray]:
         import warp as wp
-        from isaacsim.oceansim.utils.UWrenderer_utils import UW_render
+        from omni.ext.patosim.oceansim.utils.UWrenderer_utils import UW_render
 
         if raw_rgb.size == 0 or depth_crop.size == 0:
             return None
@@ -1483,7 +1483,7 @@ class OceanSimImagingSonar(Sensor):
         angular_res: float = 0.25,
         hori_res: int = 4000,
     ) -> "OceanSimImagingSonar":
-        from isaacsim.oceansim.sensors.ImagingSonarSensor import ImagingSonarSensor as _ImagingSonarSensor
+        from omni.ext.patosim.oceansim.sensors.ImagingSonarSensor import ImagingSonarSensor as _ImagingSonarSensor
 
         sensor = _ImagingSonarSensor(
             prim_path=prim_path,
@@ -2090,7 +2090,7 @@ class OceanSimDVL(Sensor):
         max_range: float = 10.0,
         add_debug_lines: bool = False,
     ) -> "OceanSimDVL":
-        from isaacsim.oceansim.sensors.DVLsensor import DVLsensor as _DVLsensor
+        from omni.ext.patosim.oceansim.sensors.DVLsensor import DVLsensor as _DVLsensor
 
         sensor = _DVLsensor(name=name, max_range=max_range)
         sensor.attachDVL(
@@ -2185,7 +2185,7 @@ class OceanSimBarometer(Sensor):
         orientation=None,
         water_surface_z: float = 0.0,
     ) -> "OceanSimBarometer":
-        from isaacsim.oceansim.sensors.BarometerSensor import BarometerSensor as _BarometerSensor
+        from omni.ext.patosim.oceansim.sensors.BarometerSensor import BarometerSensor as _BarometerSensor
 
         sensor = _BarometerSensor(
             prim_path=prim_path,

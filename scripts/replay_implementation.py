@@ -142,10 +142,6 @@ def bootstrap_repo_paths() -> Path:
     ext_pkg_root = repo_root / "exts" / "omni.ext.patosim"
     ext_omni_ext_root = ext_pkg_root / "omni" / "ext"
 
-    ext_pkg_root_str = str(ext_pkg_root)
-    if ext_pkg_root.exists() and ext_pkg_root_str not in sys.path:
-        sys.path.insert(0, ext_pkg_root_str)
-
     try:
         import omni.ext as omni_ext  # type: ignore
 

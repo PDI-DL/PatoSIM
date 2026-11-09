@@ -30,7 +30,7 @@ def main():
     try:
         import omni.kit.app
 
-        repo_root = "/home/pdi_4/Documents/Documentos/00_mestrado_gustavo/MOD_patosim"
+        repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         ext_manager = omni.kit.app.get_app().get_extension_manager()
         ext_manager.add_path(os.path.join(repo_root, "exts"))
 
