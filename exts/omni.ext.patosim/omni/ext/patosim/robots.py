@@ -17,6 +17,7 @@ from __future__ import annotations  # <-- DEIXE AQUI (linha 3), ou REMOVA em Pyt
 # Standard imports
 import numpy as np
 import os
+from pathlib import Path
 import math
 #from typing import List, Type, Tuple, Union
 from typing import Optional, Sequence, Union, Dict, List, Tuple, Type, List
@@ -426,18 +427,7 @@ class OceanSimROVRobot(Robot):
     rov_gamepad_expo: float = 0.3
 
     usd_relative_path: str = "bluerov/BROV_low.usd"
-    fallback_assets_root: str = os.path.abspath(
-        os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "..",
-            "..",
-            "..",
-            "..",
-            "assets",
-            "models",
-        )
-    )
+    fallback_assets_root: str = Path(__file__).resolve().parents[5] / "assets" / "models"
 
     initial_translation: Tuple[float, float, float] = (-2.0, 0.0, -0.8)
     initial_orientation_euler_deg: Tuple[float, float, float] = (0.0, 0.0, 0.0)
