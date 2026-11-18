@@ -198,7 +198,15 @@ def check_planner(isaac: Path, repo: Path) -> None:
         elif not os.path.isdir(target):
             add("ERRO", "planner", f"o path_planner instalado no Isaac aponta para {target}, que não existe")
         elif real(target) != real(own):
-            add("ERRO", "planner", f"o path_planner instalado no Isaac é o de {target}, não o deste repositório ({own})")
+            # com o planner_guard.py a extensão põe o path_planner do repositório na frente e troca a cópia de fora
+            guarded = any("use_own_planner" in f.read_text(errors="ignore")
+                          for f in (repo / "exts").glob("*/omni/ext/*/scenarios.py"))
+            if guarded:
+                add("AVISO", "planner", f"o path_planner instalado no Isaac é o de {target}; a extensão deste "
+                                        f"repositório usa o próprio ({own}) via planner_guard.py, mas um script que "
+                                        "importe mobility_gen_path_planner direto no Python do Isaac pega o de fora")
+            else:
+                add("ERRO", "planner", f"o path_planner instalado no Isaac é o de {target}, não o deste repositório ({own})")
         else:
             add("OK", "planner", f"path_planner instalado no Isaac = {target}")
     sos = glob.glob(str(own / "mobility_gen_path_planner" / "_mobility_gen_path_planner_C*.so"))

@@ -4,7 +4,7 @@
 
 ## 2026-11-18
 
-- Sensor visual models (RPLidar on the optional ROV lidar, Hawk, ZED X): the dead `/home/pdi_4/Documents/Documentos/bevlog-isaac/...` fallbacks were replaced by the Isaac 5.1 asset server URL, and `_resolve_asset_path` returns that URL when no local file exists (it returned a missing local path); `check_sim_isolation.py` no longer counts a class name in a docstring as use (HawkCamera)
+- Sensor visual models (RPLidar on the optional ROV lidar, Hawk, ZED X): the dead `/home/pdi_4/Documents/Documentos/bevlog-isaac/...` fallbacks were replaced by the Isaac 5.1 asset server URL, and `_resolve_asset_path` returns that URL when no local file exists (it returned a missing local path); `check_sim_isolation.py` no longer counts a class name in a docstring as use (HawkCamera), and BEVSIM's `path_planner` installed in a shared Isaac is a warning, not an error, since the extension swaps it for its own (`planner_guard.py`)
 - Isolation from BEVSIM (both derive from MobilityGen), 18/11/2026: conda env renamed `pato_sim` and pinned (was `mobgen`, BEVSIM's name); `legacy_exts/omni.ext.mobility_gen` (same extension id as BEVSIM) and the forklift demo removed; the extension always imports this repository's `path_planner` (`planner_guard.py`); `link_app.sh` has no machine-specific default; `scripts/launch_patosim.sh` and `launch_world_builder.sh` use this repository's `app/` and `exts/` from any folder; `scripts/check_sim_isolation.py`; unit tests `tests/unit/test_isolation_from_bevsim.py`
 - Local machine: the `path_planner` C++ extension was only built for Python 3.10, so inside Isaac (3.11) PatoSim used the fallback planner; built in place for 3.11 (`setup.py build_ext --inplace`, nothing installed in the shared Isaac)
 
