@@ -277,6 +277,8 @@ def check_assets(repo: Path) -> None:
             # em uso = montada (X.build/X.attach/X(...)) ou herdada (class Y(X)) em algum módulo da extensão
             body = re.search(rf"^class {owner}\b.*?(?=^class |\Z)", everything, re.M | re.S)
             outside = everything.replace(body.group(0), "") if body else everything
+            # docstrings e comentários não contam como uso (ex.: "construída com HawkCamera.build(prim_path)")
+            outside = re.sub(r'"""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'|#[^\n]*', "", outside)
             used = re.search(rf"\b{owner}\.(build|attach)\(|\b{owner}\(|\(\s*{owner}\s*[,)]", outside)
             level, note = ("ERRO", "classe em uso") if used else ("AVISO", "classe sem uso (só importada)")
             add(level, "assets", f"{py.relative_to(repo)}:{line} {owner} ({note}): nenhum candidato existe aqui: {cands}")
