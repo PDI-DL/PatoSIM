@@ -100,7 +100,7 @@ Pré-requisitos: Ubuntu com GPU NVIDIA RTX e o \textbf{Isaac Sim 5.1.0} (pacote 
 \arq{\textasciitilde/isaacsim}). Os comandos rodam na raiz do repositório.
 \begin{lstlisting}[language=bash]
 git clone https://github.com/PDI-DL/PatoSIM.git PatoSim && cd PatoSim
-./link_app.sh --path ~/isaacsim                 # cria app/ -> Isaac Sim
+./link_app.sh --path ~/isaacsim                 # cria app/ -> Isaac Sim (sem padrão)
 ./app/python.sh -m pip install tqdm wheel        # dependências no Python do Isaac
 cd path_planner
 ../app/python.sh -m pip install pybind11
@@ -351,8 +351,16 @@ repositório. A comparação com uma gravação antiga só roda se ela existir (
   \item \arq{oceansim/utils/asset\_path.json} aponta para \arq{/mnt/external/isaac/OceanSim\_assets}, que só existe numa
         máquina. Ele é só um caminho alternativo para o modelo do ROV (o principal vem dos assets do repositório).
         Para mudar: \arq{scripts/register\_oceansim\_assets.sh <pasta>} ou \arq{OCEANSIM\_ASSET\_PATH}.
-  \item As cópias \arq{OceanSim}, \arq{OceanSim.bak} e \arq{PatoSIM} em \arq{app/extsUser} não são mais usadas pelo PatoSim
-        e podem ficar onde estão.
+  \item As cópias \arq{OceanSim}, \arq{OceanSim.bak} e \arq{PatoSIM} em \arq{app/extsUser} não são mais usadas pelo
+        PatoSim. Num Isaac que também roda o BEVSIM, elas entram em toda sessão dele: tire-as de lá.
 \end{itemize}
+
+\subsection*{Convivência com o BEVSIM (18/11/2026)}
+O BEVSIM (simulador logístico) também nasceu do MobilityGen. Os dois dividiam nomes: o env conda \arq{mobgen}, a
+extensão \nome{omni.ext.mobility_gen} (em \arq{legacy\_exts}) e o pacote \arq{mobility\_gen\_path\_planner}. Agora o env
+do PatoSim se chama \arq{pato\_sim}, o \arq{legacy\_exts} saiu do repositório, a extensão sempre usa o
+\arq{path\_planner} do próprio repositório, \arq{link\_app.sh} não tem mais o padrão de outra máquina e os scripts de
+lançamento usam o \arq{app/} e o \arq{exts/} do repositório de qualquer pasta. \arq{python3
+scripts/check\_sim\_isolation.py} lista o que os dois ainda dividem numa máquina. De preferência, um Isaac para cada.
 
 \end{document}

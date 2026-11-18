@@ -76,6 +76,11 @@ below). Pass the **exact folder path** where your Isaac Sim is located:
 ./link_app.sh --path ~/isaacsim
 ```
 
+Without `--path` it uses `$ISAAC_SIM_PATH` (there is no machine-specific default anymore). Prefer an Isaac Sim used
+only by PatoSim: BEVSIM (the logistics simulator, also derived from MobilityGen) shares names with PatoSim (the
+`mobility_gen_path_planner` package, the MobilityGen base) and, on the same Isaac, both see the same `extsUser/`
+extensions. `python3 scripts/check_sim_isolation.py` lists what the two simulators share on a machine.
+
 ---
 
 ### Step 4 — Install Core Python Dependencies
@@ -96,6 +101,19 @@ cd path_planner
 ../app/python.sh -m pip install --no-build-isolation -e .
 cd ..
 ```
+
+The extension always imports this repository's `path_planner` (`planner_guard.py` puts it first on `sys.path` and
+replaces a same-named copy loaded from elsewhere, with a `[PatoSim] AVISO` in the log), so on an Isaac shared with
+BEVSIM the pip step only builds the C++ bindings in place.
+
+Tools that run outside Isaac (analysis scripts, Gradio and Open3D examples) use their own conda env, `pato_sim`:
+
+```bash
+PYTHONNOUSERSITE=1 conda env create -f environment.yml
+```
+
+(until 18/11/2026 this file created an env named `mobgen`, the same name as BEVSIM's, and creating or updating one
+changed the other.)
 
 ---
 
@@ -240,6 +258,7 @@ Details: [exts/omni.ext.patosim_worldbuilder/docs/README.md](./exts/omni.ext.pat
 python3 -m pytest tests/unit                                            # 32 pure tests, no Isaac (needs pytest)
 ./app/python.sh tests/integration/run_gpu_integration_checks.py        # Isaac headless, 1-3 min
 ./app/python.sh tests/integration/run_worldbuilder_extension_check.py  # Isaac headless, ~1 min
+python3 scripts/check_sim_isolation.py --quiet                          # what PatoSim shares with BEVSIM here
 ```
 
 The integration checks build a full ROV scenario with every sensor, record a short session, check the World

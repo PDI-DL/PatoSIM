@@ -31,16 +31,22 @@ _HERE = os.path.dirname(__file__)
 # move up to the repository root: mobility_gen -> omni/ext/patosim -> omni/ext -> omni.ext.patosim -> exts -> <repo root>
 _REPO_ROOT = os.path.abspath(os.path.join(_HERE, "..", "..", "..", "..", ".."))
 _PATH_PLANNER = os.path.join(_REPO_ROOT, "path_planner")
-if os.path.isdir(_PATH_PLANNER) and _PATH_PLANNER not in sys.path:
-    sys.path.insert(0, _PATH_PLANNER)
 
 try:
-    import mobility_gen_path_planner as _planner_pkg
+    # O BEVSIM tem um pacote com o mesmo nome: use_own_planner garante o deste repositório (planner_guard.py).
+    from omni.ext.patosim.planner_guard import use_own_planner
+
+    _planner_pkg, _planner_origin, _planner_warning = use_own_planner(_PATH_PLANNER)
+    if _planner_pkg is None:
+        raise ImportError(_planner_warning)
     from mobility_gen_path_planner import generate_paths as _generate_paths
     try:
         _planner_backend = "cpp" if getattr(_planner_pkg, "_C", None) is not None else "python"
     except Exception:
         _planner_backend = "python"
+    print(f"[PatoSim] path_planner: {_planner_origin} ({_planner_backend})", flush=True)
+    if _planner_warning:
+        print(f"[PatoSim] AVISO: {_planner_warning}", flush=True)
 except Exception as exc:
     _planner_pkg = None
     _generate_paths = None

@@ -16,8 +16,21 @@ if [[ "${CLEAR_DATA}" == "1" ]]; then
     SAFE_ARGS+=(--clear-data)
 fi
 
-./app/isaac-sim.sh \
-    --ext-folder exts \
-    --enable omni.ext.patosim \
-    "${SAFE_ARGS[@]}" \
-    "$@"
+# Sempre o Isaac e a extensão DESTE repositório, de qualquer pasta atual (antes: ./app e "--ext-folder exts"
+# relativos à pasta atual; de dentro de outro clone, como o do BEVSIM, abria o Isaac e a extensão daquele clone).
+REPO="$(cd "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO"
+if [[ ! -x "$REPO/app/isaac-sim.sh" ]]; then
+    echo "Isaac Sim não está linkado em $REPO/app (rode ./link_app.sh --path <isaac-sim-5.1>)." >&2
+    exit 1
+fi
+CMD=("$REPO/app/isaac-sim.sh"
+    --ext-folder "$REPO/exts"
+    --enable omni.ext.patosim
+    "${SAFE_ARGS[@]}"
+    "$@")
+if [[ "${PATOSIM_DRY_RUN:-0}" == "1" ]]; then   # testes: mostra o comando sem abrir o Isaac
+    printf '%q ' "${CMD[@]}"; echo
+    exit 0
+fi
+exec "${CMD[@]}"

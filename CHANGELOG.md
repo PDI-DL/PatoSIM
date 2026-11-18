@@ -2,6 +2,11 @@
 
 # PatoSim (main)
 
+## 2026-11-18
+
+- Isolation from BEVSIM (both derive from MobilityGen), 18/11/2026: conda env renamed `pato_sim` and pinned (was `mobgen`, BEVSIM's name); `legacy_exts/omni.ext.mobility_gen` (same extension id as BEVSIM) and the forklift demo removed; the extension always imports this repository's `path_planner` (`planner_guard.py`); `link_app.sh` has no machine-specific default; `scripts/launch_patosim.sh` and `launch_world_builder.sh` use this repository's `app/` and `exts/` from any folder; `scripts/check_sim_isolation.py`; unit tests `tests/unit/test_isolation_from_bevsim.py`
+- Local machine: the `path_planner` C++ extension was only built for Python 3.10, so inside Isaac (3.11) PatoSim used the fallback planner; built in place for 3.11 (`setup.py build_ext --inplace`, nothing installed in the shared Isaac)
+
 ## 2026-11-09
 
 - OceanSim code imported as `omni.ext.patosim.oceansim` everywhere (branch `update_imports`): the sonar,

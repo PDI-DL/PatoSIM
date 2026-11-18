@@ -13,13 +13,17 @@
   Reuses `omni.ext.patosim.build`'s pure scene-building helpers instead of
   duplicating them; does not pull in the main extension's robot/sensor/
   recording UI. See `exts/omni.ext.patosim_worldbuilder/docs/README.md`.
-- `scripts/launch_patosim.sh`: launches Isaac Sim with only `omni.ext.patosim` enabled.
+- `scripts/launch_patosim.sh`: launches this repository's Isaac Sim (`app/`) with only `omni.ext.patosim` enabled, from
+  any working directory (`PATOSIM_DRY_RUN=1` prints the command).
 - `scripts/launch_world_builder.sh`: launches Isaac Sim with only
   `omni.ext.patosim_worldbuilder` enabled (the lightweight world-prep tool).
 - `scripts/launch_sim.sh`: compatibility wrapper that now forwards to `launch_patosim.sh`.
 - `scripts/register_oceansim_assets.sh`: registers the OceanSim asset directory into the integrated extension.
 - `link_app.sh --path <isaac-sim-5.1>`: links the local `app` folder to the Isaac Sim installation
-  (without `--path`: `$ISAAC_SIM_PATH`, else `/home/bevlog/isaac-sim`).
+  (without `--path`: `$ISAAC_SIM_PATH`; no default).
+- `environment.yml`: conda env `pato_sim` for the tools outside Isaac (pinned; it used to be named `mobgen`, like BEVSIM's).
+- `scripts/check_sim_isolation.py`: lists what PatoSim shares with BEVSIM on a machine (Isaac, `extsUser`, Kit config,
+  `path_planner`, conda env names, shortcuts, sessions).
 - `scripts/assets/downloadAll.py`: downloads the public Hugging Face assets (`PDI-DL/PatoSimAssets`) into
   `assets/models`; the code also finds the same folders directly under `assets/`. `scripts/assets/assets.sh`
   works on a git clone of the private `PDI-DL/PDI_3DUW` dataset.
@@ -40,7 +44,8 @@
 
 ## Legacy material
 
-- `legacy_exts/omni.ext.mobility_gen`: previous standalone MobilityGen extension, moved out of `exts` so Isaac no longer loads it directly.
+- `legacy_exts/omni.ext.mobility_gen` (the old standalone MobilityGen extension, with the same extension id as BEVSIM's)
+  and `examples/test_forklift_demo.py` (a BEVSIM forklift demo) were removed on 18/11/2026; they remain in the git history.
 
 ## Notes
 

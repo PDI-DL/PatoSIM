@@ -1,16 +1,28 @@
-name: mobgen
+# Env conda das ferramentas do PatoSim que rodam fora do Isaac Sim (scripts de análise, exemplos com Gradio e Open3D).
+# O Isaac usa o próprio Python (app/python.sh).
+#
+#   PYTHONNOUSERSITE=1 conda env create -f environment.yml
+#
+# Nome próprio, "pato_sim": até 18/11/2026 este arquivo era uma cópia antiga do environment.yml do BEVSIM, com o
+# mesmo nome ("mobgen"), e criar ou atualizar um mudava o env do outro simulador na mesma máquina.
+# PYTHONNOUSERSITE=1: sem ele o pip pula dependências que achar em ~/.local/lib/python3.10 e o env só funciona ali.
+# Versões fixas: as testadas no env do BEVSIM (mesma base), criado do zero em 09/11/2026 em duas máquinas.
+name: pato_sim
 channels:
   - conda-forge
+  - nodefaults
 dependencies:
-  - python=3.10
-  - numpy
-  - matplotlib
-  - tqdm
-  - opencv
-  - openexr
-  - imath
-  - pip
+  - python=3.10.13
+  - numpy=1.26.4
+  - matplotlib=3.9.1
+  - pillow=10.0.0
+  - tqdm=4.67.1
+  - opencv=4.7.0
+  - openexr=3.1.5
+  - imath=3.1.5
+  - pip=25.2
   - pip:
-      - gradio
-    - open3d
-
+      - gradio==5.43.0
+      - open3d==0.19.0
+      - scipy==1.13.0  # open3d
+      - pyyaml==6.0.2
